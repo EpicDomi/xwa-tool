@@ -112,6 +112,12 @@ message): bit 0 zstd text, bit 1 math glyph runs, bit 2 line-art images
 (LA2), bit 3 JPEG images. Optional (safe to ignore): bit 0 fallback font,
 bit 1 word index, bit 2 popularity scores, bit 3 HD images present.
 
+### 3.4 Where archives go
+
+Archives are files ending in `.xwa` in the `wiki` folder at the top of the
+SD card (`/wiki/`); a card can hold several, under any names. Readers list
+that folder; FAT32 and exFAT match its name in any case.
+
 ## 4. META section
 
 `varint count`, then `count` pairs of strings (key, value). Keys used:

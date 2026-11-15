@@ -29,7 +29,8 @@ Early. What works today:
   searchable alternative titles.
 - `xwa-fetch`: the Kiwix library catalog, downloads (resumed after an
   interruption, mirrors tried in turn, checked against their SHA-256), and
-  copying archives to SD cards (with FAT32's 4 GB limit checked first).
+  copying archives to SD cards (into the card's `wiki` folder, where the
+  e-reader looks for them, with FAT32's 4 GB limit checked first).
 - `xwa-tool`: command line with `catalog`, `download`, `convert`, `copy`,
   `info`, `verify`, `dump` and `title-index`.
 - `xwa-tool-gui`: a desktop app. "Get Wikipedia" lists the Kiwix library
@@ -70,8 +71,8 @@ xwa-tool catalog                            # English Wikipedia ZIMs in the Kiwi
 xwa-tool catalog --lang fra --search medecine
 xwa-tool catalog --languages
 xwa-tool download wikipedia_en_ray-charles --flavour maxi --dir ~/Downloads
-xwa-tool copy wiki.xwa                      # to the SD card, if exactly one is inserted
-xwa-tool copy wiki.xwa --to /media/me/SDCARD
+xwa-tool copy wiki.xwa                      # to the SD card's wiki folder, if one card is inserted
+xwa-tool copy wiki.xwa --to /media/me/SDCARD  # into /media/me/SDCARD/wiki
 ```
 
 For ZIM and XWA files:
