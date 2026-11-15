@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x86_64
+          - os: macos-latest
+            name: macos-universal
+          - os: ubuntu-latest
+            name: linux-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (macOS universal)
+        if: matrix.os == 'macos-latest'
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist
+          for bin in xwa-tool xwa-tool-gui; do
+            lipo -create -output dist/$bin target/aarch64-apple-darwin/release/$bin target/x86_64-apple-darwin/release/$bin
+          done
+      - name: Build
+        if: matrix.os != 'macos-latest'
+        shell: bash
+        run: |
+          cargo build --release
+          mkdir -p dist
+          ext=""; [ "${{ matrix.os }}" = "windows-latest" ] && ext=".exe"
+          cp target/release/xwa-tool$ext target/release/xwa-tool-gui$ext dist/
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then 7z a ../xwa-tool-${{ matrix.name }}.zip .; else zip -r ../xwa-tool-${{ matrix.name }}.zip .; fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: xwa-tool-${{ matrix.name }}.zip

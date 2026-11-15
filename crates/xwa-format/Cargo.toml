@@ -1,0 +1,12 @@
+[package]
+name = "xwa-format"
+description = "Offline wiki archive format (draft v0): encoding and decoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+unicode-normalization.workspace = true
+caseless.workspace = true
+crc32c.workspace = true

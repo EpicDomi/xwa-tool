@@ -1,0 +1,16 @@
+[package]
+name = "xwa-gui"
+description = "Desktop app for converting Kiwix ZIM archives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "xwa-tool-gui"
+path = "src/main.rs"
+
+[dependencies]
+xwa-zim.workspace = true
+iced = { workspace = true, features = ["tokio"] }
+rfd.workspace = true
