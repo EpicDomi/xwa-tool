@@ -16,6 +16,8 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   resume, SHA-256), removable drives and copying to them.
 - `crates/xwa-cli`: the `xwa-tool` command line.
 - `crates/xwa-gui`: the `xwa-tool-gui` desktop app (iced).
+- `xtask`: repository chores; `cargo xtask licenses` writes the third-party
+  notice that ships in every release zip.
 - `docs/format-spec-v0.md`: the format specification.
 
 ## Rules
@@ -28,4 +30,6 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   and `cargo test --workspace` passing; CI runs all three on Windows, macOS
   and Linux.
 - The GUI targets non-technical users: plain wording, no jargon.
+- New dependencies must be under a licence `xtask/src/main.rs` accepts (no
+  copyleft); CI runs `cargo xtask licenses` to check.
 - Do not commit, tag, or push unless the user asks.
