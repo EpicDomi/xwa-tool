@@ -1,6 +1,8 @@
 //! Title index (spec section 6): front-coded leaf blocks under a static
 //! B+tree of inner blocks, all 4096 bytes with a trailing CRC32C.
 
+use std::borrow::Cow;
+
 use crate::normalize::search_key;
 use crate::{BLOCK_SIZE, varint};
 
@@ -51,11 +53,11 @@ impl BuiltIndex {
         self.inner.len() / BLOCK_SIZE
     }
 
-    pub fn reader(&self) -> IndexReader<'_> {
-        IndexReader {
+    pub fn reader(&self) -> IndexReader<Slices<'_>> {
+        IndexReader::new(Slices {
             leaves: &self.leaves,
             inner: &self.inner,
-        }
+        })
     }
 }
 
@@ -232,19 +234,70 @@ fn finish_leaf(block: &mut [u8], count: u16, used: usize, leaves: &mut Vec<u8>) 
 }
 
 /// Error from reading index blocks.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadError {
     Checksum { inner: bool, block: usize },
     Malformed { inner: bool, block: usize },
+    Io(String),
 }
 
-/// Prefix search over index blocks held in memory (or a cache of them).
-pub struct IndexReader<'a> {
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let level = |inner: &bool| if *inner { "inner" } else { "leaf" };
+        match self {
+            ReadError::Checksum { inner, block } => {
+                write!(
+                    f,
+                    "title index {} block {block}: checksum mismatch",
+                    level(inner)
+                )
+            }
+            ReadError::Malformed { inner, block } => {
+                write!(f, "title index {} block {block}: malformed", level(inner))
+            }
+            ReadError::Io(e) => write!(f, "title index: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {}
+
+/// Where index blocks come from: memory, a file, or a cache.
+pub trait BlockSource {
+    /// Number of 4096-byte blocks in the leaf (`inner == false`) or inner section.
+    fn block_count(&self, inner: bool) -> usize;
+    /// Block `index` of that section, exactly [`BLOCK_SIZE`] bytes.
+    fn read_block(&self, inner: bool, index: usize) -> Result<Cow<'_, [u8]>, ReadError>;
+}
+
+/// Index sections held in memory.
+#[derive(Clone, Copy)]
+pub struct Slices<'a> {
     pub leaves: &'a [u8],
     pub inner: &'a [u8],
 }
 
-/// One search result.
+impl BlockSource for Slices<'_> {
+    fn block_count(&self, inner: bool) -> usize {
+        (if inner {
+            self.inner.len()
+        } else {
+            self.leaves.len()
+        }) / BLOCK_SIZE
+    }
+
+    fn read_block(&self, inner: bool, index: usize) -> Result<Cow<'_, [u8]>, ReadError> {
+        let data = if inner { self.inner } else { self.leaves };
+        data.get(index * BLOCK_SIZE..(index + 1) * BLOCK_SIZE)
+            .map(Cow::Borrowed)
+            .ok_or(ReadError::Malformed {
+                inner,
+                block: index,
+            })
+    }
+}
+
+/// One title as stored in a leaf block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
     pub display: String,
@@ -252,14 +305,24 @@ pub struct Hit {
     pub flags: u8,
 }
 
-impl IndexReader<'_> {
-    fn block(data: &[u8], index: usize, inner: bool) -> Result<&[u8], ReadError> {
-        let b = data
-            .get(index * BLOCK_SIZE..(index + 1) * BLOCK_SIZE)
-            .ok_or(ReadError::Malformed {
+/// Prefix search and full scans over an index.
+pub struct IndexReader<S> {
+    src: S,
+}
+
+impl<S: BlockSource> IndexReader<S> {
+    pub fn new(src: S) -> Self {
+        Self { src }
+    }
+
+    fn block(&self, inner: bool, index: usize) -> Result<Cow<'_, [u8]>, ReadError> {
+        let b = self.src.read_block(inner, index)?;
+        if b.len() != BLOCK_SIZE {
+            return Err(ReadError::Malformed {
                 inner,
                 block: index,
-            })?;
+            });
+        }
         let stored = u32::from_le_bytes(b[PAYLOAD_END..].try_into().unwrap());
         if crc32c::crc32c(&b[..PAYLOAD_END]) != stored {
             return Err(ReadError::Checksum {
@@ -272,43 +335,35 @@ impl IndexReader<'_> {
 
     /// Leaf block that holds the first key `>= key` (or the block before it).
     fn descend(&self, key: &[u8]) -> Result<usize, ReadError> {
-        if self.inner.is_empty() {
+        let inner_count = self.src.block_count(true);
+        if inner_count == 0 {
             return Ok(0);
         }
         let mut index = 0usize;
-        loop {
-            let b = Self::block(self.inner, index, true)?;
+        // Each step goes one level down; a well-formed tree is far shallower than this.
+        for _ in 0..32 {
+            let b = self.block(true, index)?;
+            let bad = ReadError::Malformed {
+                inner: true,
+                block: index,
+            };
             let level = b[0];
             let count = u16::from_le_bytes([b[2], b[3]]) as usize;
             let mut p = INNER_HEADER;
             let mut prev: Vec<u8> = Vec::new();
             let mut chosen = None;
             for _ in 0..count {
-                let bad = ReadError::Malformed {
-                    inner: true,
-                    block: index,
-                };
-                let ks = varint::get(b, &mut p).ok_or(bad)? as usize;
-                let sl = varint::get(b, &mut p).ok_or(ReadError::Malformed {
-                    inner: true,
-                    block: index,
-                })? as usize;
-                let suffix = b.get(p..p + sl).ok_or(ReadError::Malformed {
-                    inner: true,
-                    block: index,
-                })?;
+                let ks = varint::get(&b, &mut p).ok_or(bad.clone())? as usize;
+                let sl = varint::get(&b, &mut p).ok_or(bad.clone())? as usize;
+                let suffix = b
+                    .get(p..p.saturating_add(sl))
+                    .filter(|_| ks <= prev.len())
+                    .ok_or(bad.clone())?;
                 p += sl;
                 prev.truncate(ks);
                 prev.extend_from_slice(suffix);
-                let child = u32::from_le_bytes(
-                    b.get(p..p + 4)
-                        .ok_or(ReadError::Malformed {
-                            inner: true,
-                            block: index,
-                        })?
-                        .try_into()
-                        .unwrap(),
-                );
+                let child = b.get(p..p + 4).ok_or(bad.clone())?;
+                let child = u32::from_le_bytes(child.try_into().unwrap());
                 p += 4;
                 if prev.as_slice() <= key || chosen.is_none() {
                     chosen = Some(child);
@@ -316,65 +371,119 @@ impl IndexReader<'_> {
                     break;
                 }
             }
-            let child = chosen.ok_or(ReadError::Malformed {
-                inner: true,
-                block: index,
-            })? as usize;
+            let child = chosen.ok_or(bad.clone())? as usize;
             if level == 1 {
                 return Ok(child);
             }
+            if level == 0 || child >= inner_count {
+                return Err(bad);
+            }
             index = child;
         }
+        Err(ReadError::Malformed {
+            inner: true,
+            block: index,
+        })
+    }
+
+    /// Calls `f(key, hit)` for every entry of leaf block `leaf`, in order,
+    /// until `f` returns `false`. Returns whether the scan should continue.
+    fn scan_leaf(
+        &self,
+        leaf: usize,
+        f: &mut impl FnMut(&[u8], Hit) -> bool,
+    ) -> Result<bool, ReadError> {
+        let b = self.block(false, leaf)?;
+        let bad = || ReadError::Malformed {
+            inner: false,
+            block: leaf,
+        };
+        let count = u16::from_le_bytes([b[0], b[1]]) as usize;
+        let used = u16::from_le_bytes([b[2], b[3]]) as usize;
+        if LEAF_HEADER + used > PAYLOAD_END {
+            return Err(bad());
+        }
+        let payload = &b[..LEAF_HEADER + used];
+        let mut p = LEAF_HEADER;
+        let (mut key, mut disp): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
+        let field = |prev: &mut Vec<u8>, p: &mut usize| -> Result<(), ReadError> {
+            let shared = varint::get(payload, p).ok_or_else(bad)? as usize;
+            let len = varint::get(payload, p).ok_or_else(bad)? as usize;
+            let s = payload
+                .get(*p..p.saturating_add(len))
+                .filter(|_| shared <= prev.len())
+                .ok_or_else(bad)?;
+            *p += len;
+            prev.truncate(shared);
+            prev.extend_from_slice(s);
+            Ok(())
+        };
+        for _ in 0..count {
+            field(&mut key, &mut p)?;
+            field(&mut disp, &mut p)?;
+            let article = varint::get(payload, &mut p)
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(bad)?;
+            let flags = *payload.get(p).ok_or_else(bad)?;
+            p += 1;
+            let display = String::from_utf8(disp.clone()).map_err(|_| bad())?;
+            if !f(
+                &key,
+                Hit {
+                    display,
+                    article,
+                    flags,
+                },
+            ) {
+                return Ok(false);
+            }
+        }
+        if p != payload.len() {
+            return Err(bad());
+        }
+        Ok(true)
     }
 
     /// Up to `limit` titles whose search key starts with `search_key(prefix)`.
     pub fn prefix(&self, prefix: &str, limit: usize) -> Result<Vec<Hit>, ReadError> {
         let want = search_key(prefix).into_bytes();
-        let mut leaf = self.descend(&want)?;
         let mut hits = Vec::new();
-        let leaf_count = self.leaves.len() / BLOCK_SIZE;
-        while leaf < leaf_count && hits.len() < limit {
-            let b = Self::block(self.leaves, leaf, false)?;
-            let count = u16::from_le_bytes([b[0], b[1]]) as usize;
-            let mut p = LEAF_HEADER;
-            let (mut key, mut disp): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
-            for _ in 0..count {
-                let bad = || ReadError::Malformed {
-                    inner: false,
-                    block: leaf,
-                };
-                let field = |prev: &mut Vec<u8>, p: &mut usize| -> Result<(), ReadError> {
-                    let shared = varint::get(b, p).ok_or_else(bad)? as usize;
-                    let len = varint::get(b, p).ok_or_else(bad)? as usize;
-                    let s = b.get(*p..*p + len).ok_or_else(bad)?;
-                    *p += len;
-                    prev.truncate(shared);
-                    prev.extend_from_slice(s);
-                    Ok(())
-                };
-                field(&mut key, &mut p)?;
-                field(&mut disp, &mut p)?;
-                let article = varint::get(b, &mut p).ok_or_else(bad)? as u32;
-                let flags = *b.get(p).ok_or_else(bad)?;
-                p += 1;
-                if key.as_slice() < want.as_slice() {
-                    continue;
+        if limit == 0 {
+            return Ok(hits);
+        }
+        let leaf_count = self.src.block_count(false);
+        let mut leaf = self.descend(&want)?;
+        let mut done = false;
+        while leaf < leaf_count && !done {
+            let more = self.scan_leaf(leaf, &mut |key, hit| {
+                if key < want.as_slice() {
+                    return true;
                 }
                 if !key.starts_with(&want) {
-                    return Ok(hits);
+                    done = true;
+                    return false;
                 }
-                hits.push(Hit {
-                    display: String::from_utf8_lossy(&disp).into_owned(),
-                    article,
-                    flags,
-                });
+                hits.push(hit);
                 if hits.len() == limit {
-                    break;
+                    done = true;
                 }
-            }
+                !done
+            })?;
+            done |= !more;
             leaf += 1;
         }
         Ok(hits)
+    }
+
+    /// Calls `f(key, hit)` for every entry in index order.
+    pub fn for_each(&self, mut f: impl FnMut(&[u8], Hit)) -> Result<(), ReadError> {
+        for leaf in 0..self.src.block_count(false) {
+            self.scan_leaf(leaf, &mut |key, hit| {
+                f(key, hit);
+                true
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -455,14 +564,25 @@ mod tests {
     }
 
     #[test]
+    fn full_scan_is_sorted_and_complete() {
+        let idx = build(synthetic(20_000));
+        let mut seen = Vec::new();
+        idx.reader()
+            .for_each(|key, hit| seen.push((key.to_vec(), hit.display.into_bytes())))
+            .unwrap();
+        assert_eq!(seen.len(), idx.entry_count);
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[test]
     fn detects_corruption() {
         let idx = build(synthetic(5_000));
         let mut leaves = idx.leaves.clone();
         leaves[100] ^= 0xFF;
-        let r = IndexReader {
+        let r = IndexReader::new(Slices {
             leaves: &leaves,
             inner: &idx.inner,
-        };
+        });
         assert!(matches!(
             r.prefix("", usize::MAX),
             Err(ReadError::Checksum { .. })

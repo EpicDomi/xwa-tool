@@ -1,12 +1,21 @@
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
-use std::process::ExitCode;
-use std::time::Instant;
+mod dump;
 
-use clap::{Parser, Subcommand};
+use std::collections::{BTreeMap, HashMap};
+use std::error::Error;
+use std::io::{IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::time::{Duration, Instant};
+
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use xwa_format::normalize::search_key;
+use xwa_format::reader::{self, Archive as Xwa};
+use xwa_format::records::image_encoding;
 use xwa_format::title_index::{self, TitleEntry};
+use xwa_format::{la2, optional, required};
 use xwa_zim::{Archive, Compression, Target};
+
+type CliResult = Result<(), Box<dyn Error>>;
 
 #[derive(Parser)]
 #[command(
@@ -21,14 +30,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print facts about a ZIM file: header, content types, clusters.
-    Inspect {
-        zim: PathBuf,
-        /// Also decompress every cluster to report decompressed sizes.
+    /// Describe a ZIM or XWA file.
+    Info {
+        /// The ZIM or XWA file.
+        file: PathBuf,
+        /// ZIM only: decompress every cluster to report decompressed sizes.
         #[arg(long)]
         decompress: bool,
     },
-    /// Build the archive title index from a ZIM file and report its size.
+    /// Check every checksum, chunk, article, link, image and title in an XWA file.
+    Verify {
+        /// The XWA file.
+        file: PathBuf,
+    },
+    /// Print an article, search titles, or extract an image from an XWA file.
+    Dump(DumpArgs),
+    /// Build the title index from a ZIM file and report its size.
     TitleIndex {
         zim: PathBuf,
         /// Run prefix searches against the built index.
@@ -37,11 +54,39 @@ enum Command {
     },
 }
 
+#[derive(Args)]
+#[group(skip)]
+#[command(group = ArgGroup::new("what").required(true).args(["id", "title", "search", "image"]))]
+struct DumpArgs {
+    /// The XWA file.
+    file: PathBuf,
+    /// Print the article with this id.
+    #[arg(long)]
+    id: Option<u32>,
+    /// Print the article with this title (case and accents ignored).
+    #[arg(long)]
+    title: Option<String>,
+    /// List titles starting with this prefix.
+    #[arg(long)]
+    search: Option<String>,
+    /// Extract this image (see --out).
+    #[arg(long)]
+    image: Option<u32>,
+    /// Where --image writes. Line art is converted when the name ends in .pgm.
+    #[arg(long, short, requires = "image")]
+    out: Option<PathBuf>,
+    /// Maximum results for --search.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Inspect { zim, decompress } => inspect(&zim, decompress),
-        Command::TitleIndex { zim, queries } => title_index_cmd(&zim, &queries),
+        Command::Info { file, decompress } => info(&file, decompress),
+        Command::Verify { file } => verify(&file),
+        Command::Dump(args) => dump_cmd(&args),
+        Command::TitleIndex { zim, queries } => title_index_cmd(&zim, &queries).map_err(Into::into),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -52,11 +97,234 @@ fn main() -> ExitCode {
     }
 }
 
+/// Picks the reader by the file's signature.
+fn info(path: &Path, decompress: bool) -> CliResult {
+    let mut magic = [0u8; 8];
+    let n = std::fs::File::open(path)?.read(&mut magic)?;
+    if magic[..n].starts_with(&xwa_format::MAGIC) {
+        xwa_info(path)
+    } else if magic[..n].starts_with(&[0x5A, 0x49, 0x4D, 0x04]) {
+        Ok(inspect(path, decompress)?)
+    } else {
+        Err(format!("{} is neither a ZIM nor an XWA file", path.display()).into())
+    }
+}
+
+fn feature_names(bits: u32, names: &[(u32, &str)]) -> String {
+    let mut out: Vec<String> = names
+        .iter()
+        .filter(|(b, _)| bits & b != 0)
+        .map(|(_, n)| n.to_string())
+        .collect();
+    let known = names.iter().fold(0, |acc, (b, _)| acc | b);
+    if bits & !known != 0 {
+        out.push(format!("unknown {:#x}", bits & !known));
+    }
+    if out.is_empty() {
+        "none".into()
+    } else {
+        out.join(", ")
+    }
+}
+
+fn xwa_info(path: &Path) -> CliResult {
+    let a = Xwa::open(path)?;
+    let sb = a.superblock();
+    println!(
+        "XWA {}.{}  {:?} profile, {:?} text{}  {:.1} MB",
+        sb.version_major,
+        sb.version_minor,
+        sb.profile,
+        sb.text_codec,
+        if a.has_dictionary() {
+            " with dictionary"
+        } else {
+            ""
+        },
+        mb(sb.file_size)
+    );
+    let req = [
+        (required::ZSTD_TEXT, "zstd text"),
+        (required::MATH, "math"),
+        (required::LINE_ART, "line art"),
+        (required::JPEG, "JPEG"),
+    ];
+    let opt = [
+        (optional::FONT, "font"),
+        (optional::WORD_INDEX, "word index"),
+        (optional::POPULARITY, "popularity"),
+        (optional::HD_IMAGES, "HD images"),
+    ];
+    println!("  requires: {}", feature_names(sb.required_features, &req));
+    println!("  optional: {}", feature_names(sb.optional_features, &opt));
+    println!(
+        "  {} articles, {} chunks, {} images{}",
+        a.article_count(),
+        a.chunk_count(),
+        a.image_count(),
+        a.glyph_count()
+            .map_or(String::new(), |g| format!(", {g} math glyphs"))
+    );
+    println!("sections:");
+    let mut sections = sb.sections.clone();
+    sections.sort_by_key(|s| s.offset);
+    for s in sections {
+        println!(
+            "  {:<13} at {:>12}  {:>12} bytes  crc {:08x}",
+            reader::section_name(s.kind),
+            s.offset,
+            s.length,
+            s.crc32c
+        );
+    }
+    println!("metadata:");
+    for (k, v) in a.meta() {
+        println!("  {k}: {v}");
+    }
+    Ok(())
+}
+
+/// Throttled progress on stderr, only when it is a terminal.
+struct Progress {
+    enabled: bool,
+    last: Instant,
+    shown: bool,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self {
+            enabled: std::io::stderr().is_terminal(),
+            last: Instant::now(),
+            shown: false,
+        }
+    }
+
+    fn update(&mut self, stage: &str, done: u64, total: u64) {
+        if !self.enabled || (self.last.elapsed() < Duration::from_millis(100) && done < total) {
+            return;
+        }
+        self.last = Instant::now();
+        let pct = if total == 0 {
+            100.0
+        } else {
+            done as f64 * 100.0 / total as f64
+        };
+        eprint!("\r\x1b[2K{stage}: {pct:.0}%");
+        let _ = std::io::stderr().flush();
+        self.shown = true;
+    }
+
+    fn clear(&mut self) {
+        if self.shown {
+            eprint!("\r\x1b[2K");
+            self.shown = false;
+        }
+    }
+}
+
+fn verify(path: &Path) -> CliResult {
+    let t = Instant::now();
+    let a = Xwa::open(path)?;
+    let mut progress = Progress::new();
+    let report = a.verify(&mut |stage, done, total| progress.update(stage, done, total));
+    progress.clear();
+    let r = report?;
+    println!(
+        "{} articles ({:.1} MB of text in {} chunks), {} links, {} formulas",
+        r.articles,
+        mb(r.text_bytes),
+        r.chunks,
+        r.links,
+        r.formulas
+    );
+    println!(
+        "{} images ({:.1} MB), {} titles ({} redirects); checked in {:.1}s",
+        r.images,
+        mb(r.image_bytes),
+        r.title_entries,
+        r.redirects,
+        t.elapsed().as_secs_f64()
+    );
+    if r.ok() {
+        println!("OK: no problems found");
+        return Ok(());
+    }
+    for p in &r.problems {
+        println!("problem: {p}");
+    }
+    if r.problem_count > r.problems.len() as u64 {
+        println!("... and {} more", r.problem_count - r.problems.len() as u64);
+    }
+    Err(format!("{} problems found", r.problem_count).into())
+}
+
+fn dump_cmd(args: &DumpArgs) -> CliResult {
+    let a = Xwa::open(&args.file)?;
+    let title_of = |id: u32| a.title(id).ok();
+    let id = if let Some(id) = args.id {
+        Some(id)
+    } else if let Some(title) = &args.title {
+        let key = search_key(title);
+        let hits = a.search(title, 1000)?;
+        let mut exact: Vec<_> = hits
+            .iter()
+            .filter(|h| search_key(&h.display) == key)
+            .collect();
+        exact.sort_by_key(|h| h.flags & title_index::FLAG_REDIRECT);
+        match exact.first() {
+            Some(h) => Some(h.article),
+            None => return Err(format!("no article titled {title:?}").into()),
+        }
+    } else {
+        None
+    };
+    if let Some(id) = id {
+        let article = a.article(id)?;
+        let rec = a.article_record(id)?;
+        println!(
+            "article {id}: chunk {} offset {}, {} chunk(s), flags {:#06x}, popularity {}",
+            rec.first_chunk, rec.offset_in_chunk, rec.chunk_count, rec.flags, rec.popularity
+        );
+        print!("{}", dump::article_text(&article, &title_of));
+        return Ok(());
+    }
+    if let Some(prefix) = &args.search {
+        for h in a.search(prefix, args.limit)? {
+            if h.flags & title_index::FLAG_REDIRECT != 0 {
+                let target = title_of(h.article).unwrap_or_default();
+                println!("{:>9}  {} -> {target}", h.article, h.display);
+            } else {
+                println!("{:>9}  {}", h.article, h.display);
+            }
+        }
+        return Ok(());
+    }
+    let image = args.image.expect("clap requires one of the options");
+    let (rec, data) = a.image(image)?;
+    println!(
+        "image {image}: {}x{}, encoding {}, kind {}, flags {:#x}, {} bytes",
+        rec.width, rec.height, rec.encoding, rec.kind, rec.flags, rec.size
+    );
+    if let Some(out) = &args.out {
+        let pgm = out
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pgm"));
+        if pgm && rec.encoding == image_encoding::LINE_ART {
+            std::fs::write(out, la2::decode(&data)?.to_pgm())?;
+        } else {
+            std::fs::write(out, &data)?;
+        }
+        println!("wrote {}", out.display());
+    }
+    Ok(())
+}
+
 fn mb(bytes: u64) -> f64 {
     bytes as f64 / 1e6
 }
 
-fn inspect(path: &PathBuf, decompress: bool) -> xwa_zim::Result<()> {
+fn inspect(path: &Path, decompress: bool) -> xwa_zim::Result<()> {
     let zim = Archive::open(path)?;
     let h = zim.header();
     println!(
@@ -136,7 +404,7 @@ fn inspect(path: &PathBuf, decompress: bool) -> xwa_zim::Result<()> {
     Ok(())
 }
 
-fn title_index_cmd(path: &PathBuf, queries: &[String]) -> xwa_zim::Result<()> {
+fn title_index_cmd(path: &Path, queries: &[String]) -> xwa_zim::Result<()> {
     let zim = Archive::open(path)?;
     let t = Instant::now();
     // Articles get ids in path order; redirects point at them.

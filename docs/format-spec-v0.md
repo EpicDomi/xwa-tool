@@ -76,6 +76,10 @@ offset 0      Superblock (4096 bytes)
 `Section` (32 bytes): `u32 type`, `u32 flags`, `u64 offset`, `u64 length`,
 `u32 crc32c` (of the section bytes, 0 = not computed), `u32 reserved`.
 
+`file_size` must equal the size of the file. A reader that finds a shorter
+file reports an incomplete copy rather than reading past the end; copying
+large files to SD cards fails this way often enough to matter.
+
 ### 3.2 Section types
 
 | Type | Name | Required | Purpose |
@@ -86,15 +90,20 @@ offset 0      Superblock (4096 bytes)
 | 4 | TINDEX_LEAF | yes | Front-coded title index leaf blocks |
 | 5 | TINDEX_INNER | yes | Upper levels of the title index |
 | 6 | CHUNK_TABLE | yes | Content chunk locations |
-| 7 | CHUNKS | yes | Compressed content chunks |
+| 7 | BLOBS | yes | Compressed content chunks and encoded images |
 | 8 | IMAGE_TABLE | if images | Image records |
-| 9 | IMAGES | if images | Encoded image data |
-| 10 | MATH_GLYPHS | if math | Glyph outline table |
-| 11 | ZSTD_DICT | if text_codec = zstd | Shared zstd dictionary |
-| 12 | FONT | optional | Fallback font (a complete `.cpfont` v4 file) |
-| 13 | WORD_INDEX | optional | Title-word search index (later) |
+| 9 | MATH_GLYPHS | if math | Glyph outline table |
+| 10 | ZSTD_DICT | optional | Shared zstd dictionary (zstd archives only) |
+| 11 | FONT | optional | Fallback font (a complete `.cpfont` v4 file) |
+| 12 | WORD_INDEX | optional | Title-word search index (later) |
 
 Readers ignore unknown section types.
+
+BLOBS holds content chunks and image data in whatever order the writer
+produced them, so a converter can stream both into one file in a single
+pass. CHUNK_TABLE and IMAGE_TABLE offsets are relative to the start of
+BLOBS. xwa-tool writes BLOBS first, at offset 4096, and the tables after
+it, but readers must not rely on any section order.
 
 ### 3.3 Feature flags
 
@@ -109,8 +118,9 @@ bit 1 word index, bit 2 popularity scores, bit 3 HD images present.
 `title`, `description`, `language` (ISO 639-3), `source.name`,
 `source.flavour`, `source.date`, `source.uuid`, `source.scraper`,
 `license`, `attribution`, `created` (RFC 3339), `converter` (name and
-version), `profile`, `counts.articles`, `counts.redirects`,
-`counts.images`, `counts.formulas`, `main_article` (decimal article id).
+version), `profile`, `counts.articles`, `counts.redirects` (redirect
+entries in the title index, after de-duplication), `counts.images`,
+`counts.formulas`, `main_article` (decimal article id).
 
 Wikipedia content is CC BY-SA: `attribution` must be shown somewhere in the
 firmware UI (archive info screen).
@@ -124,9 +134,9 @@ they exist only in the title index. Record, 16 bytes:
 
 | Field | Type | Meaning |
 |---|---|---|
-| first_chunk | u32 | Chunk holding the article header |
-| offset_in_chunk | u16 | Byte offset of the header in the decompressed chunk |
-| chunk_count | u16 | Chunks the article spans |
+| first_chunk | u32 | Chunk holding the start of the article stream |
+| offset_in_chunk | u16 | Byte offset of the stream in the decompressed chunk |
+| chunk_count | u16 | Chunks the stream touches, `first_chunk` included |
 | title_ref | u32 | Offset into TITLES |
 | flags | u16 | infobox, tables, math, images, disambiguation, list |
 | popularity | u8 | 0-255, log-scaled incoming link count (optional) |
@@ -197,35 +207,57 @@ the first M matches is optional.
 
 ### 7.1 Chunks
 
-Article content is a byte stream (7.3), split at block boundaries into
-chunks of at most 32 KB uncompressed. Small articles are packed several to
-a chunk; large ones span several. Each chunk is compressed independently:
+Each article is one byte stream (7.2). Streams are concatenated in article
+id order and cut into chunks of at most 32,768 bytes uncompressed, in both
+profiles; a stream may start partway through one chunk and continue through
+the following ones. Small articles share a chunk; large ones span several.
+Each chunk is compressed independently:
 
-- compact profile: raw deflate (window = `deflate_window_bits`, default 15),
-  decodable by the firmware's uzlib.
-- full profile: zstd, window ≤ 128 KB, using the archive's ZSTD_DICT.
-  Measured on the mathematics ZIM's extracted text: 75.4 MB vs 95.0 MB for
-  deflate (-21%).
+- compact profile: raw deflate (window = `deflate_window_bits`, 15),
+  decodable by the firmware's uzlib. xwa-tool compresses with libdeflate at
+  level 12, 3.3% smaller than zlib's level 9 at about 6 MB/s per core
+  (zopfli was only 0.6% smaller again, at a twentieth of the speed).
+- full profile: one zstd frame per chunk, single-segment (content size in
+  the header, so the decoder needs no window beyond the chunk itself),
+  without checksum or dictionary id, compressed with the archive's
+  ZSTD_DICT when there is one. xwa-tool trains the dictionary (110 KB) on
+  the first 16 MB of chunks; sampling the whole archive instead measured
+  only 0.2% better. Archives with too little text to train on have no
+  ZSTD_DICT. Measured on the mathematics ZIM's text with 32 KB chunks:
+  77.0 MB, against 98.4 MB for deflate at the same chunk size (-22%).
 
-CHUNK_TABLE entry, 12 bytes: `u48 offset` (within CHUNKS), `u24
-compressed_size`, `u24 uncompressed_size`. A trailing CRC32C per chunk sits
-at the end of each compressed chunk.
+Why 32 KB: with the dictionary, 64 KB and 128 KB chunks would save only
+1.0% and 1.7%, while every chunk read costs RAM on the C3 and decompression
+time on both devices.
 
-### 7.2 Article header
+CHUNK_TABLE entry, 12 bytes: `u48 offset` (within BLOBS), `u24
+stored_size`, `u24 uncompressed_size` (1-32,768). The stored bytes are the
+compressed chunk followed by a `u32` CRC32C of the compressed bytes, so
+corruption is caught before decompression.
+
+To read from position `p` of an article stream, start at
+(`first_chunk`, `offset_in_chunk`) and walk forward through the following
+chunks' uncompressed sizes.
+
+### 7.2 Article stream
 
 At `offset_in_chunk` of `first_chunk`:
 
 ```
-varint header_size
+varint stream_size     bytes that follow this field
 string title
-varint toc_count, then per heading: u8 level, string text,
-       varint chunk_delta, varint offset_in_chunk
-varint table_count, then per table: varint chunk_delta, varint offset_in_chunk
-varint infobox_chunk_delta + varint offset_in_chunk (0 0 = none)
-varint body_size (bytes of block stream that follow)
+varint body_size
+varint toc_count, then per heading: u8 level, string text, varint pos
+varint table_count, then per table: varint pos
+varint infobox_pos_plus_one   (0 = no infobox)
+body                   block stream (7.3), body_size bytes
+tables                 table records (7.4), one per table
+infobox                infobox record (7.4), if any
 ```
 
-Jumping to a section or table decompresses only the chunk that holds it.
+Every `pos` is a byte position measured from the first byte of the body, so
+the header never depends on its own size. Jumping to a section or table
+decompresses only the chunk that holds that position.
 
 ### 7.3 Block stream
 
@@ -278,8 +310,9 @@ today, or on-device bidi with the existing MiniBidi) is an open question.
 Stored in the article's chunks after the body:
 
 ```
-TABLE: varint rows, varint cols, u8 flags,
-       per cell: u8 cell_flags (header, empty), varint rowspan, varint colspan,
+TABLE: varint rows, varint cols, u8 flags, varint cell_count,
+       per cell (row-major, by top-left corner):
+                 u8 cell_flags (bit0 header), varint rowspan, varint colspan,
                  inline run
 INFOBOX: varint row_count, per row: u8 kind (header, image, label/value,
          full-width), payload (inline runs, image_id)
@@ -316,6 +349,8 @@ it. A formula the math engine cannot lay out falls back to a fallback image
 
 ### 8.2 Glyph outlines (MATH_GLYPHS)
 
+Required whenever an article contains a formula (feature bit 1).
+
 ```
 u16 upem, u16 glyph_count, u8 scale_count, u16 scales[scale_count] (8.8)
 u32 glyph_offset[glyph_count + 1]
@@ -333,7 +368,7 @@ RAM, ~3 ms per inline formula on the C3).
 
 ### 9.1 Image table (IMAGE_TABLE)
 
-Image id = index. Record, 16 bytes: `u48 offset` (within IMAGES), `u24
+Image id = index. Record, 16 bytes: `u48 offset` (within BLOBS), `u24
 size`, `u8 encoding`, `u16 width`, `u16 height`, `u8 kind` (photo,
 line art, icon), `u8 flags` (HD source, has transparency).
 
@@ -343,8 +378,10 @@ line art, icon), `u8 flags` (HD source, has transparency).
   (which also decodes at 1/2, 1/4, 1/8 scale cheaply). For photos.
 - `encoding 2` LA2: line art, 4 grey levels. Header `u16 w, u16 h, u8 bpp
   (1 or 2), u8 codec (0 raw deflate, 1 zstd)`, then rows packed MSB-first,
-  compressed as one stream. Deflate with a ≤ 4 KB window compresses within
-  1-3% of a 32 KB window (measured), so the C3 needs only a small buffer.
+  compressed as one stream. Pixel values are ink levels: 0 is paper
+  (white) and the maximum (1 or 3) is black. Deflate with a ≤ 4 KB window
+  compresses within 1-3% of a 32 KB window (measured), so the C3 needs only
+  a small buffer.
 
 ### 9.3 Resolution policy
 
