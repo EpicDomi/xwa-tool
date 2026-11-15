@@ -63,6 +63,14 @@ Without pictures the same archives are 2.2, 27.2 and 71.6 MB for the X4
 Pro. `xwa-tool dump wiki.xwa --title "Pythagorean theorem" --formulas
 page.html` draws an article's formulas into a web page, for checking.
 
+Memory use stays small whatever the size of the Wikipedia: titles are
+sorted on disk in batches, and the converter keeps 12 bytes per page.
+Swedish Wikipedia (the 4.0 GB "mini" ZIM: 5.0 million entries, 2.6 million
+articles) converts in 9 min 39 s with at most 335 MB of memory, where it
+took 10 min 48 s and 1,430 MB before. A title index the size of English
+Wikipedia's (18.5 million titles) builds in 83 MB instead of 3.2 GB.
+Temporary files go next to the archive and disappear once it is written.
+
 Getting ZIMs and putting archives on the card:
 
 ```
