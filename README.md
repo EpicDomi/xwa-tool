@@ -17,37 +17,42 @@ Early. What works today:
   title index (case- and accent-insensitive prefix search), and an archive
   writer, reader and verifier. The writer compresses on every CPU core and
   produces the same bytes for the same input.
-- `xwa-convert`: ZIM to XWA conversion of Wikipedia text: paragraphs,
-  headings, lists, tables, infoboxes, and links resolved to articles.
-  Navigation boxes, citation markers, reference lists and external-link
-  lists are left out. Redirects, including mwoffliner's redirects to a
-  section, become searchable alternative titles.
+- `xwa-convert`: ZIM to XWA conversion of Wikipedia: paragraphs,
+  headings, lists, tables, infoboxes, links resolved to articles, and
+  pictures (photos as greyscale JPEG; diagrams, line-art bitmaps and icons
+  as lossless 4-grey line art, each picture stored once). Navigation boxes,
+  citation markers, reference lists and external-link lists are left out.
+  Redirects, including mwoffliner's redirects to a section, become
+  searchable alternative titles.
 - `xwa-tool`: command line with `convert`, `info`, `verify`, `dump` and
   `title-index`.
 - `xwa-tool-gui`: a desktop window: choose a ZIM (or drop one on it), pick
   your e-reader, convert.
 
-Not yet: pictures, and formulas drawn as math (for now they appear as text,
-such as a² + b² = c²). Both are the next steps.
+Not yet: formulas drawn as math (for now they appear as text, such as
+a² + b² = c²). That is the next step.
 
 ## Building
 
 ```
 cargo build --release
-./target/release/xwa-tool convert wikipedia_en_100_2026-08.zim                # for the X4 Pro
-./target/release/xwa-tool convert wikipedia_en_100_2026-08.zim --device x4    # for the X4 or X3
+./target/release/xwa-tool convert wikipedia_en_100_2026-08.zim                 # for the X4 Pro
+./target/release/xwa-tool convert wikipedia_en_100_2026-08.zim --device x4     # for the X4 or X3
+./target/release/xwa-tool convert wikipedia_en_100_2026-08.zim --no-images     # text only
 ./target/release/xwa-tool-gui
 ```
 
-Measured on four English Wikipedia ZIMs (4 cores):
+`--jpeg-quality` (default 75) trades photo quality for size.
 
-| ZIM | Articles | ZIM size | X4 Pro archive | X4/X3 archive | Time |
-|---|---|---|---|---|---|
-| Top 100 | 101 | 333 MB | 2.2 MB | 2.5 MB | 1.2 s |
-| Chemistry | 9,313 | 384 MB | 26.4 MB | 31.6 MB | 12 s |
-| Mathematics | 23,255 | 996 MB | 60.8 MB | 72.1 MB | 30 s |
+Measured on English Wikipedia ZIMs (4 cores), with pictures:
 
-Most of a ZIM's size is pictures, which these archives do not include yet.
+| ZIM | Articles | Pictures | ZIM size | X4 Pro archive | X4/X3 archive | Time (X4 Pro) |
+|---|---|---|---|---|---|---|
+| Top 100 | 101 | 3,098 | 333 MB | 39.7 MB | 40.1 MB | 5 s |
+| Chemistry | 9,313 | 28,649 | 384 MB | 163.6 MB | 171.6 MB | 39 s |
+| Mathematics | 23,255 | 42,673 | 996 MB | 245.3 MB | 260.5 MB | 68 s |
+
+Without pictures the same archives are 2.2, 26.4 and 60.8 MB for the X4 Pro.
 
 For ZIM and XWA files:
 

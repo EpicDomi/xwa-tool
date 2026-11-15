@@ -6,9 +6,11 @@
 //! directory before any article is read.
 
 pub mod html;
+pub mod images;
 pub mod links;
 pub mod mathml;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -67,11 +69,20 @@ pub struct Options {
     pub device: Device,
     /// Worker threads; 0 means one per CPU.
     pub threads: usize,
+    /// Include pictures.
+    pub images: bool,
+    /// JPEG quality for photos, 1-100.
+    pub jpeg_quality: u8,
 }
 
 impl Options {
     pub fn new(device: Device) -> Self {
-        Self { device, threads: 0 }
+        Self {
+            device,
+            threads: 0,
+            images: true,
+            jpeg_quality: 75,
+        }
     }
 }
 
@@ -82,6 +93,8 @@ pub enum Stage {
     Scanning,
     /// Converting articles; `done` and `total` count articles.
     Articles,
+    /// Converting pictures; `done` and `total` count images.
+    Images,
     /// Building the title index and writing the tables.
     Finishing,
 }
@@ -100,6 +113,8 @@ pub struct Report {
     pub stats: Stats,
     /// Articles whose content could not be read; kept with their title only.
     pub failed_articles: u64,
+    /// Images that could not be decoded; stored as blank placeholders.
+    pub failed_images: u64,
     /// Redirects that lead nowhere in the archive.
     pub dangling_redirects: u64,
     pub zim_bytes: u64,
@@ -119,10 +134,37 @@ struct Redirect {
     title: String,
 }
 
-impl Resolver for PathTable {
+/// Where an image's bytes are in the ZIM.
+#[derive(Clone, Copy)]
+struct ImageEntry {
+    cluster: u32,
+    blob: u32,
+}
+
+/// Link and image lookups for the extractor.
+struct Tables {
+    links: PathTable,
+    /// Image path to an index into the image entries; `None` when pictures
+    /// are off.
+    images: Option<PathTable>,
+}
+
+impl Resolver for Tables {
     fn article(&self, path: &str) -> Option<u32> {
-        self.get(path)
+        self.links.get(path)
     }
+
+    fn image(&self, path: &str) -> Option<u32> {
+        self.images.as_ref()?.get(path)
+    }
+}
+
+/// Raster formats the image pipeline decodes.
+fn is_raster(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/webp" | "image/png" | "image/jpeg" | "image/gif"
+    )
 }
 
 const NONE: u32 = u32::MAX;
@@ -170,6 +212,8 @@ fn convert_inner(
     let mut redirects: Vec<Redirect> = Vec::new();
     let mut paths: Vec<(u64, u32)> = Vec::new();
     let mut leads_to = vec![NONE; entry_count as usize];
+    let mut image_paths: Vec<(u64, u32)> = Vec::new();
+    let mut image_entries: Vec<ImageEntry> = Vec::new();
     let mut scanned = 0u64;
     let mut cancelled = false;
     let scan = zim.for_each_entry(|e| {
@@ -184,9 +228,20 @@ fn convert_inner(
             cancelled = true;
             return Err(xwa_zim::Error::Corrupt("cancelled".into()));
         }
-        // Content lives in "C" (new ZIMs) or "A" (old ones); mwoffliner's own
-        // files start with an underscore.
-        if !(e.namespace == b'C' || e.namespace == b'A') || e.path.starts_with('_') {
+        // Content lives in "C" (new ZIMs), "A" and "I" (old ones).
+        if !matches!(e.namespace, b'C' | b'A' | b'I') {
+            return Ok(());
+        }
+        if let Target::Blob { cluster, blob } = e.target
+            && opts.images
+            && zim.mime_type(&e).is_some_and(is_raster)
+        {
+            image_paths.push((links::path_hash(&e.path), image_entries.len() as u32));
+            image_entries.push(ImageEntry { cluster, blob });
+            return Ok(());
+        }
+        // mwoffliner's own files (styles, scripts, assets) start with "_".
+        if e.namespace == b'I' || e.path.starts_with('_') {
             return Ok(());
         }
         paths.push((links::path_hash(&e.path), e.index));
@@ -291,16 +346,20 @@ fn convert_inner(
         })
         .collect();
     // Links resolve through every path that leads to an article.
-    let table = PathTable::from_hashed(
-        by_path
-            .into_entries()
-            .into_iter()
-            .filter_map(|(hash, entry)| follow(entry).map(|id| (hash, id)))
-            .collect(),
-    );
+    let table = Tables {
+        links: PathTable::from_hashed(
+            by_path
+                .into_entries()
+                .into_iter()
+                .filter_map(|(hash, entry)| follow(entry).map(|id| (hash, id)))
+                .collect(),
+        ),
+        images: opts.images.then(|| PathTable::from_hashed(image_paths)),
+    };
     let main_article = zim.header().main_page.and_then(follow);
     drop(leads_to);
 
+    let profile = opts.device.profile();
     let mut writer = ArchiveWriter::create(
         out_path,
         WriterOptions {
@@ -348,6 +407,9 @@ fn convert_inner(
     let mut stats = Stats::default();
     let mut failed_articles = 0u64;
     let mut incoming = vec![0u32; articles.len()];
+    // Image ids in order of first use; each image is stored once.
+    let mut image_ids: HashMap<u32, u32> = HashMap::new();
+    let mut image_uses: Vec<html::ImageUse> = Vec::new();
     let groups = cluster_groups(&articles);
     check(Stage::Articles, 0, total)?;
     for batch in groups.chunks(threads * 4) {
@@ -378,7 +440,18 @@ fn convert_inner(
         });
         for (id, x) in converted.into_iter().flatten() {
             match x {
-                Some(x) => {
+                Some(mut x) => {
+                    let global: Vec<u32> = x
+                        .images
+                        .iter()
+                        .map(|u| {
+                            *image_ids.entry(u.key).or_insert_with(|| {
+                                image_uses.push(*u);
+                                image_uses.len() as u32 - 1
+                            })
+                        })
+                        .collect();
+                    html::for_each_image_mut(&mut x.article, &mut |i| *i = global[*i as usize]);
                     xwa_format::content::walk_refs(&x.article, &mut |r| {
                         if let Ref::Link(target) = r
                             && target != id
@@ -406,6 +479,57 @@ fn convert_inner(
         check(Stage::Articles, writer.article_count() as u64, total)?;
     }
 
+    // Pictures, a batch of ZIM clusters at a time, in the ZIM's order.
+    let total = image_uses.len() as u64;
+    let settings = images::Settings {
+        jpeg_quality: opts.jpeg_quality,
+        ..images::Settings::new(profile)
+    };
+    let mut failed_images = 0u64;
+    let mut order: Vec<(ImageEntry, u32)> = image_uses
+        .iter()
+        .enumerate()
+        .map(|(id, u)| (image_entries[u.key as usize], id as u32))
+        .collect();
+    order.sort_by_key(|(e, _)| (e.cluster, e.blob));
+    let mut groups: Vec<&[(ImageEntry, u32)]> =
+        order.chunk_by(|a, b| a.0.cluster == b.0.cluster).collect();
+    // Keep batches small enough to hold in memory: large clusters alone.
+    let mut done = 0u64;
+    check(Stage::Images, 0, total)?;
+    while !groups.is_empty() {
+        let take = groups.len().min(threads * 2);
+        let batch: Vec<&[(ImageEntry, u32)]> = groups.drain(..take).collect();
+        let converted: Vec<Vec<(u32, Option<images::Encoded>)>> = pool.install(|| {
+            batch
+                .par_iter()
+                .map(|group| {
+                    let cluster = zim.cluster(group[0].0.cluster).ok();
+                    group
+                        .iter()
+                        .map(|(entry, id)| {
+                            let bytes = cluster.as_ref().and_then(|c| c.blob(entry.blob as usize));
+                            let kind = image_uses[*id as usize].kind;
+                            (
+                                *id,
+                                bytes.and_then(|b| images::convert(b, kind, &settings).ok()),
+                            )
+                        })
+                        .collect()
+                })
+                .collect()
+        });
+        for (id, encoded) in converted.into_iter().flatten() {
+            let e = encoded.unwrap_or_else(|| {
+                failed_images += 1;
+                images::placeholder(profile)
+            });
+            writer.add_image(id, e.info, e.data)?;
+            done += 1;
+        }
+        check(Stage::Images, done, total)?;
+    }
+
     check(Stage::Finishing, 0, 1)?;
     for (title, id) in &resolved_redirects {
         writer.add_redirect(title, *id);
@@ -421,6 +545,7 @@ fn convert_inner(
         summary,
         stats,
         failed_articles,
+        failed_images,
         dangling_redirects,
         zim_bytes,
         elapsed: started.elapsed(),

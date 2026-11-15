@@ -369,8 +369,13 @@ RAM, ~3 ms per inline formula on the C3).
 ### 9.1 Image table (IMAGE_TABLE)
 
 Image id = index. Record, 16 bytes: `u48 offset` (within BLOBS), `u24
-size`, `u8 encoding`, `u16 width`, `u16 height`, `u8 kind` (photo,
-line art, icon), `u8 flags` (HD source, has transparency).
+size`, `u8 encoding`, `u16 width`, `u16 height`, `u8 kind` (0 photo, 1
+line art, 2 icon), `u8 flags` (bit 0 HD source, bit 1 the source had
+transparency, now flattened onto white).
+
+Each image is stored once, however many articles use it. Articles refer
+to images with `Figure`, `Gallery`, infobox image rows and inline `ICON`s;
+an icon is a small image meant to sit in a line of text (flags, symbols).
 
 ### 9.2 Encodings
 
@@ -379,16 +384,27 @@ line art, icon), `u8 flags` (HD source, has transparency).
 - `encoding 2` LA2: line art, 4 grey levels. Header `u16 w, u16 h, u8 bpp
   (1 or 2), u8 codec (0 raw deflate, 1 zstd)`, then rows packed MSB-first,
   compressed as one stream. Pixel values are ink levels: 0 is paper
-  (white) and the maximum (1 or 3) is black. Deflate with a ≤ 4 KB window
-  compresses within 1-3% of a 32 KB window (measured), so the C3 needs only
-  a small buffer.
+  (white) and the maximum (1 or 3) is black; `bpp` is 1 when the image has
+  no greys. Compact archives use deflate with back-references of at most
+  4096 bytes, so the C3 decodes with a 4 KB window (measured: within 1-3%
+  of a 32 KB window); full archives use zstd.
+
+xwa-tool stores diagrams drawn from vector graphics (`data-file-type=
+"drawing"`) and icons as LA2, and photos as JPEG (quality 75 by default).
+Bitmaps that are really diagrams (PNG reaction schemes, plots) are found
+by their pixels: when at least 90% sit within 8 of an ink level they are
+stored as LA2 too. On the chemistry ZIM that makes the pictures 24%
+smaller than JPEG and keeps lines and labels crisp; shaded renderings and
+photos score lower and stay JPEG, which the device can dither.
 
 ### 9.3 Resolution policy
 
 One stored rendition per image, at the larger of what the zoom viewer can
 use and what the inline "enlarged" setting needs, capped at 800 px on the
 long side (landscape width) and at the source resolution (or the HD
-download, if fetched). The firmware downsamples for inline display, so the
+download, if fetched). ZIM thumbnails are small (chemistry ZIM: 110, 250
+and 507 px wide at the 10th, 50th and 90th percentiles), so most are
+stored at their source size. The firmware downsamples for inline display, so the
 diagram-size setting and the zoom viewer need no extra data. 1-bit display
 is derived from LA2 by threshold or patterns; 4-grey uses the levels as
 stored.
