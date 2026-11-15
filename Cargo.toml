@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/xwa-zim", "crates/xwa-format", "crates/xwa-cli", "crates/xwa-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Unlicense"
+repository = "https://github.com/EpicDomi/xwa-tool"
+
+[workspace.dependencies]
+xwa-zim = { path = "crates/xwa-zim" }
+xwa-format = { path = "crates/xwa-format" }
+zstd = "0.14"
+lzma-rs = "0.3"
+thiserror = "2"
+clap = { version = "4.6", features = ["derive"] }
+unicode-normalization = "0.1"
+caseless = "0.2"
+crc32c = "0.6"
+iced = "0.14"
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
