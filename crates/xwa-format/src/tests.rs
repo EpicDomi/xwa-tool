@@ -318,9 +318,10 @@ fn archive(opts: WriterOptions) -> (Vec<u8>, Summary) {
             add_image(&mut w);
         }
         if id % 3 == 0 {
-            w.add_redirect(&format!("Alias of {id}"), id);
+            w.add_redirect(&format!("Alias of {id}"), id).unwrap();
             // Same key as the article's own title: dropped by the index.
-            w.add_redirect(&format!("article {id} {}", WORDS[(id % 16) as usize]), id);
+            w.add_redirect(&format!("article {id} {}", WORDS[(id % 16) as usize]), id)
+                .unwrap();
         }
     }
     while w.image_count() < IMAGES {
@@ -466,7 +467,7 @@ fn writer_rejects_bad_input() {
 
     let mut w = new();
     w.add_article(0, &article(0), 0).unwrap();
-    w.add_redirect("Elsewhere", 5);
+    w.add_redirect("Elsewhere", 5).unwrap();
     assert!(matches!(w.finish(), Err(Error::Invalid(m)) if m.contains("missing article")));
 
     let mut w = new();

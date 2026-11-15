@@ -1,15 +1,17 @@
 //! Streaming archive writer.
 //!
-//! Content chunks and images go into BLOBS as they arrive, so memory use is
-//! bounded by the tables (about 40 bytes per article) rather than the
-//! archive size. Chunks are compressed on worker threads; the file layout
-//! depends only on the order of calls, so the same input always produces
-//! the same bytes.
+//! Content chunks and images go into BLOBS as they arrive, the article
+//! records and titles list go to temporary files, and the title index is
+//! sorted in temporary files in batches of bounded size. Memory use is about
+//! a byte per article and 16 per image, plus a fixed allowance (64 MB by
+//! default for sorting titles), whatever the archive's size.
+//! Chunks are compressed on worker threads; the file layout depends only on
+//! the order of calls, so the same input always produces the same bytes.
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -20,7 +22,7 @@ use crate::records::{
     ArticleRecord, ChunkEntry, ImageRecord, U24_MAX, U48_MAX, article_flags, image_encoding,
 };
 use crate::superblock::{SectionEntry, Superblock};
-use crate::title_index::{self, TitleEntry};
+use crate::title_index::{self, LeafWriter, Leaves, TitleSorter};
 use crate::{
     BLOCK_SIZE, Error, Profile, Result, TextCodec, VERSION_MAJOR, VERSION_MINOR, meta, optional,
     required, section, varint,
@@ -52,6 +54,10 @@ pub struct WriterOptions {
     pub dict_size: usize,
     /// Compression threads; 0 means one per CPU.
     pub threads: usize,
+    /// Memory for title index entries; more go to temporary files.
+    pub title_memory: usize,
+    /// Folder for temporary files; `None` means the system's.
+    pub temp_dir: Option<PathBuf>,
 }
 
 impl WriterOptions {
@@ -65,6 +71,8 @@ impl WriterOptions {
             dict_sample_bytes: 16 << 20,
             dict_size: 112_640,
             threads: 0,
+            title_memory: 64 << 20,
+            temp_dir: None,
         }
     }
 }
@@ -161,11 +169,17 @@ pub struct ArchiveWriter<W: Write + Seek> {
     in_flight: usize,
     ready: BTreeMap<u64, Blob>,
     chunks: Vec<ChunkEntry>,
-    articles: Vec<ArticleRecord>,
-    titles: Vec<u8>,
-    title_entries: Vec<TitleEntry>,
-    /// Image records by id; ids may arrive in any order.
-    images: Vec<Option<ImageRecord>>,
+    /// The ARTICLES section, without popularity, which is set later.
+    articles: Spool,
+    popularity: Vec<u8>,
+    /// The TITLES section.
+    titles: Spool,
+    title_sorter: TitleSorter,
+    /// The highest redirect target and its title, checked at the end.
+    max_redirect: Option<(u32, String)>,
+    /// Encoded image records by id, all zeros until added; ids may arrive
+    /// in any order.
+    images: Vec<[u8; ImageRecord::SIZE]>,
     meta: Vec<(String, String)>,
     extra_sections: Vec<(u32, Vec<u8>)>,
     required: u32,
@@ -206,6 +220,9 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
             n => n,
         };
+        let articles = Spool::new(opts.temp_dir.clone());
+        let titles = Spool::new(opts.temp_dir.clone());
+        let title_sorter = TitleSorter::new(opts.title_memory, opts.temp_dir.clone());
         // The superblock is written last; reserve its space now.
         out.seek(SeekFrom::Start(0))?;
         out.write_all(&[0u8; Superblock::SIZE])?;
@@ -231,9 +248,11 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             in_flight: 0,
             ready: BTreeMap::new(),
             chunks: Vec::new(),
-            articles: Vec::new(),
-            titles: Vec::new(),
-            title_entries: Vec::new(),
+            articles,
+            popularity: Vec::new(),
+            titles,
+            title_sorter,
+            max_redirect: None,
             images: Vec::new(),
             meta: Vec::new(),
             extra_sections: Vec::new(),
@@ -272,7 +291,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
 
     /// Number of articles added so far, which is also the next article id.
     pub fn article_count(&self) -> u32 {
-        self.articles.len() as u32
+        self.popularity.len() as u32
     }
 
     /// One more than the highest image id added so far (the next id when
@@ -285,10 +304,10 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// adds source knowledge (disambiguation, list); the content flags are
     /// worked out here.
     pub fn add_article(&mut self, id: u32, article: &Article, flags: u16) -> Result<()> {
-        if id as usize != self.articles.len() {
+        if id != self.article_count() {
             return Err(Error::Invalid(format!(
                 "article {id} added out of order; expected {}",
-                self.articles.len()
+                self.article_count()
             )));
         }
         let mut flags = flags;
@@ -334,52 +353,75 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         let chunk_count = u16::try_from(chunk_count)
             .map_err(|_| Error::Invalid(format!("article {id} spans {chunk_count} chunks")))?;
 
-        let title_ref = u32::try_from(self.titles.len())
+        let title_ref = u32::try_from(self.titles.len)
             .map_err(|_| Error::Invalid("titles exceed 4 GB".into()))?;
-        varint::put(&mut self.titles, article.title.len() as u64);
-        self.titles.extend_from_slice(article.title.as_bytes());
+        let mut len = Vec::with_capacity(4);
+        varint::put(&mut len, article.title.len() as u64);
+        self.titles.write(&len)?;
+        self.titles.write(article.title.as_bytes())?;
         if !article.title.is_empty() {
-            self.title_entries
-                .push(TitleEntry::new(article.title.clone(), id, false));
+            self.title_sorter.push(&article.title, id, false)?;
         }
-        self.articles.push(ArticleRecord {
+        let record = ArticleRecord {
             first_chunk,
             offset_in_chunk,
             chunk_count,
             title_ref,
             flags,
             popularity: 0,
-        });
+        };
+        self.articles.write(&record.encode())?;
+        self.popularity.push(0);
         Ok(())
     }
 
-    /// Adds a searchable alternative title for article `target`. Redirects
-    /// that normalise to their target's own key are dropped by the index.
-    pub fn add_redirect(&mut self, title: &str, target: u32) {
-        if !title.is_empty() {
-            self.title_entries
-                .push(TitleEntry::new(title, target, true));
+    /// Adds a searchable alternative title for article `target`, which may
+    /// be added later. Redirects that normalise to their target's own key
+    /// are dropped by the index.
+    pub fn add_redirect(&mut self, title: &str, target: u32) -> Result<()> {
+        if title.is_empty() {
+            return Ok(());
         }
+        if self
+            .max_redirect
+            .as_ref()
+            .is_none_or(|(max, _)| target > *max)
+        {
+            self.max_redirect = Some((target, title.to_string()));
+        }
+        self.title_sorter.push(title, target, true)?;
+        Ok(())
     }
 
     /// Sets the 0-255 popularity score of an article already added.
     pub fn set_popularity(&mut self, id: u32, popularity: u8) -> Result<()> {
         let rec = self
-            .articles
+            .popularity
             .get_mut(id as usize)
             .ok_or_else(|| Error::Invalid(format!("no article {id}")))?;
-        rec.popularity = popularity;
+        *rec = popularity;
         if popularity > 0 {
             self.optional |= optional::POPULARITY;
         }
         Ok(())
     }
 
+    /// Makes room for `count` images in all, when the number is known in
+    /// advance, so the image table takes no more memory than it needs.
+    pub fn reserve_images(&mut self, count: u32) {
+        let more = (count as usize).saturating_sub(self.images.len());
+        self.images.reserve_exact(more);
+    }
+
     /// Adds image `id` with its encoded bytes (spec 9.2). Ids may come in
     /// any order, but every id below the highest must be added before
     /// [`ArchiveWriter::finish`].
     pub fn add_image(&mut self, id: u32, info: ImageInfo, data: Vec<u8>) -> Result<()> {
-        if self.images.get(id as usize).is_some_and(Option::is_some) {
+        if self
+            .images
+            .get(id as usize)
+            .is_some_and(|r| *r != [0; ImageRecord::SIZE])
+        {
             return Err(Error::Invalid(format!("image {id} added twice")));
         }
         let size = u32::try_from(data.len())
@@ -400,9 +442,9 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             self.optional |= optional::HD_IMAGES;
         }
         if self.images.len() <= id as usize {
-            self.images.resize(id as usize + 1, None);
+            self.images.resize(id as usize + 1, [0; ImageRecord::SIZE]);
         }
-        self.images[id as usize] = Some(ImageRecord {
+        self.images[id as usize] = ImageRecord {
             offset: 0,
             size,
             encoding: info.encoding,
@@ -410,7 +452,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             height: info.height,
             kind: info.kind,
             flags: info.flags,
-        });
+        }
+        .encode();
         self.summary.image_bytes += size as u64;
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -525,9 +568,10 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                 }
                 Blob::Image { id, data } => {
                     self.write_blob(&data)?;
-                    if let Some(rec) = &mut self.images[id as usize] {
-                        rec.offset = offset;
-                    }
+                    let rec = &mut self.images[id as usize];
+                    let mut decoded = ImageRecord::decode(rec, 0)?;
+                    decoded.offset = offset;
+                    *rec = decoded.encode();
                 }
             }
         }
@@ -541,24 +585,30 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         Ok(())
     }
 
+    /// Pads to the next block boundary, where a section starts.
+    fn start_section(&mut self) -> Result<u64> {
+        let pad = self.pos.next_multiple_of(BLOCK_SIZE as u64) - self.pos;
+        self.out.write_all(&vec![0u8; pad as usize])?;
+        self.pos += pad;
+        Ok(self.pos)
+    }
+
     fn write_section(
         &mut self,
         sections: &mut Vec<SectionEntry>,
         kind: u32,
         data: &[u8],
     ) -> Result<()> {
-        let pad = self.pos.next_multiple_of(BLOCK_SIZE as u64) - self.pos;
-        self.out.write_all(&vec![0u8; pad as usize])?;
-        self.pos += pad;
+        let offset = self.start_section()?;
+        self.out.write_all(data)?;
+        self.pos += data.len() as u64;
         sections.push(SectionEntry {
             kind,
             flags: 0,
-            offset: self.pos,
+            offset,
             length: data.len() as u64,
             crc32c: crc32c::crc32c(data),
         });
-        self.out.write_all(data)?;
-        self.pos += data.len() as u64;
         Ok(())
     }
 
@@ -583,18 +633,19 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         }
         debug_assert!(self.ready.is_empty() && self.chunks.len() == self.chunks_cut as usize);
 
-        let article_count = self.articles.len() as u32;
-        if let Some(missing) = self.images.iter().position(Option::is_none) {
+        let article_count = self.article_count();
+        if let Some(missing) = self
+            .images
+            .iter()
+            .position(|r| *r == [0; ImageRecord::SIZE])
+        {
             return Err(Error::Invalid(format!("image {missing} was never added")));
         }
-        if let Some(e) = self
-            .title_entries
-            .iter()
-            .find(|e| e.article >= article_count)
+        if let Some((target, title)) = &self.max_redirect
+            && *target >= article_count
         {
             return Err(Error::Invalid(format!(
-                "redirect {:?} points to missing article {}",
-                e.display, e.article
+                "redirect {title:?} points to missing article {target}"
             )));
         }
         if self.required & required::MATH != 0
@@ -616,13 +667,46 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             crc32c: self.blobs_crc,
         }];
 
-        let titled = self
-            .title_entries
-            .iter()
-            .filter(|e| e.flags & title_index::FLAG_REDIRECT == 0)
-            .count();
-        let index = title_index::build(std::mem::take(&mut self.title_entries));
-        let redirects = (index.entry_count - titled) as u64;
+        if let Some(dict) = self.codec.dict.clone() {
+            self.write_section(&mut sections, section::ZSTD_DICT, &dict)?;
+        }
+        // The titles list, copied from its temporary file.
+        let offset = self.start_section()?;
+        let titles = std::mem::replace(&mut self.titles, Spool::new(None));
+        let (length, crc32c) = (titles.len, titles.crc32c);
+        titles.copy_to(&mut self.out)?;
+        self.pos += length;
+        sections.push(SectionEntry {
+            kind: section::TITLES,
+            flags: 0,
+            offset,
+            length,
+            crc32c,
+        });
+        // The title index: leaf blocks straight from the sorter into the
+        // file, then the inner blocks above them.
+        let offset = self.start_section()?;
+        let sorter = std::mem::replace(&mut self.title_sorter, TitleSorter::new(0, None));
+        let mut leaves = LeafWriter::new(&mut self.out);
+        sorter.finish(|key, display, article, flags| leaves.push(key, display, article, flags))?;
+        let Leaves {
+            first_keys,
+            redirect_count,
+            bytes: leaf_bytes,
+            crc32c,
+            ..
+        } = leaves.finish()?;
+        self.pos += leaf_bytes;
+        sections.push(SectionEntry {
+            kind: section::TINDEX_LEAF,
+            flags: 0,
+            offset,
+            length: leaf_bytes,
+            crc32c,
+        });
+        let (inner, _) = title_index::build_inner(first_keys);
+        self.write_section(&mut sections, section::TINDEX_INNER, &inner)?;
+        let redirects = redirect_count as u64;
 
         let profile = match self.opts.profile {
             Profile::Compact => "compact",
@@ -639,25 +723,27 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         pairs.retain(|(k, _)| !computed.iter().any(|(c, _)| c == k));
         pairs.extend(computed.into_iter().map(|(k, v)| (k.to_string(), v)));
 
-        if let Some(dict) = self.codec.dict.clone() {
-            self.write_section(&mut sections, section::ZSTD_DICT, &dict)?;
-        }
         self.write_section(&mut sections, section::META, &meta::encode(&pairs))?;
-        let articles: Vec<u8> = self.articles.iter().flat_map(|a| a.encode()).collect();
-        self.write_section(&mut sections, section::ARTICLES, &articles)?;
-        let titles = std::mem::take(&mut self.titles);
-        self.write_section(&mut sections, section::TITLES, &titles)?;
-        self.write_section(&mut sections, section::TINDEX_INNER, &index.inner)?;
-        self.write_section(&mut sections, section::TINDEX_LEAF, &index.leaves)?;
+        // Article records, with their popularity filled in on the way.
+        let offset = self.start_section()?;
+        let articles = std::mem::replace(&mut self.articles, Spool::new(None));
+        let length = articles.len;
+        let popularity = std::mem::take(&mut self.popularity);
+        let crc32c = articles.copy_records_to(&mut self.out, ArticleRecord::SIZE, |i, rec| {
+            rec[ArticleRecord::POPULARITY] = popularity[i];
+        })?;
+        self.pos += length;
+        sections.push(SectionEntry {
+            kind: section::ARTICLES,
+            flags: 0,
+            offset,
+            length,
+            crc32c,
+        });
         let chunks: Vec<u8> = self.chunks.iter().flat_map(|c| c.encode()).collect();
         self.write_section(&mut sections, section::CHUNK_TABLE, &chunks)?;
         if !self.images.is_empty() {
-            let images: Vec<u8> = self
-                .images
-                .iter()
-                .flatten()
-                .flat_map(|i| i.encode())
-                .collect();
+            let images: Vec<u8> = self.images.concat();
             self.write_section(&mut sections, section::IMAGE_TABLE, &images)?;
         }
         for (kind, data) in std::mem::take(&mut self.extra_sections) {
@@ -686,7 +772,85 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         summary.images = self.images.len() as u32;
         summary.chunks = self.chunks.len() as u32;
         summary.dictionary_bytes = self.codec.dict.as_ref().map_or(0, Vec::len);
-        summary.title_index_bytes = (index.leaves.len() + index.inner.len()) as u64;
+        summary.title_index_bytes = leaf_bytes + inner.len() as u64;
         Ok((self.out, summary))
+    }
+}
+
+/// Bytes for a section that grows while the archive is written but goes
+/// after BLOBS, kept in a temporary file until then.
+struct Spool {
+    dir: Option<PathBuf>,
+    file: Option<BufWriter<File>>,
+    len: u64,
+    crc32c: u32,
+}
+
+impl Spool {
+    fn new(dir: Option<PathBuf>) -> Self {
+        Self {
+            dir,
+            file: None,
+            len: 0,
+            crc32c: 0,
+        }
+    }
+
+    fn write(&mut self, data: &[u8]) -> io::Result<()> {
+        let file = match &mut self.file {
+            Some(f) => f,
+            None => {
+                let f = match &self.dir {
+                    Some(dir) => tempfile::tempfile_in(dir)?,
+                    None => tempfile::tempfile()?,
+                };
+                self.file.insert(BufWriter::with_capacity(1 << 20, f))
+            }
+        };
+        file.write_all(data)?;
+        self.len += data.len() as u64;
+        self.crc32c = crc32c::crc32c_append(self.crc32c, data);
+        Ok(())
+    }
+
+    /// Copies fixed-size records to `out`, letting `patch` change each
+    /// one (by index) on the way, and returns the CRC32C of what it wrote.
+    fn copy_records_to(
+        self,
+        out: &mut impl Write,
+        size: usize,
+        mut patch: impl FnMut(usize, &mut [u8]),
+    ) -> io::Result<u32> {
+        let mut crc = 0;
+        if let Some(w) = self.file {
+            let mut f = w.into_inner().map_err(|e| e.into_error())?;
+            f.seek(SeekFrom::Start(0))?;
+            let mut buf = vec![0u8; size * 4096];
+            let (mut index, mut left) = (0, self.len);
+            while left > 0 {
+                let n = buf.len().min(left as usize);
+                f.read_exact(&mut buf[..n])?;
+                for rec in buf[..n].chunks_exact_mut(size) {
+                    patch(index, rec);
+                    index += 1;
+                }
+                crc = crc32c::crc32c_append(crc, &buf[..n]);
+                out.write_all(&buf[..n])?;
+                left -= n as u64;
+            }
+        }
+        Ok(crc)
+    }
+
+    fn copy_to(self, out: &mut impl Write) -> io::Result<()> {
+        if let Some(w) = self.file {
+            let mut f = w.into_inner().map_err(|e| e.into_error())?;
+            f.seek(SeekFrom::Start(0))?;
+            let copied = io::copy(&mut f, out)?;
+            if copied != self.len {
+                return Err(io::Error::other("a temporary file came back short"));
+            }
+        }
+        Ok(())
     }
 }
