@@ -13,7 +13,7 @@ use ego_tree::NodeRef;
 use scraper::node::Element;
 use scraper::{Html, Node};
 use xwa_format::content::{
-    Article, Block, Cell, Infobox, InfoboxRow, Inline, ListKind, Style, Table,
+    Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Style, Table,
 };
 use xwa_format::records::article_flags;
 
@@ -28,6 +28,11 @@ pub trait Resolver: Sync {
     /// A key for the image at a decoded archive path, if it is stored and
     /// images are wanted.
     fn image(&self, _path: &str) -> Option<u32> {
+        None
+    }
+    /// A drawn formula for LaTeX source, if formulas are drawn and this one
+    /// lays out.
+    fn formula(&self, _tex: &str, _display: bool) -> Option<Formula> {
         None
     }
 }
@@ -47,8 +52,9 @@ pub struct Stats {
     pub links: u64,
     /// Internal links whose target is not in the archive (kept as text).
     pub unresolved_links: u64,
-    /// Formulas, written as text until the math engine draws them.
     pub formulas: u64,
+    /// Formulas drawn as math; the rest are written as text.
+    pub formulas_drawn: u64,
     /// Images placed in articles.
     pub images: u64,
     pub images_skipped: u64,
@@ -63,6 +69,7 @@ impl std::ops::AddAssign for Stats {
         self.links += o.links;
         self.unresolved_links += o.unresolved_links;
         self.formulas += o.formulas;
+        self.formulas_drawn += o.formulas_drawn;
         self.images += o.images;
         self.images_skipped += o.images_skipped;
         self.tables += o.tables;
@@ -461,14 +468,15 @@ impl Cx<'_> {
                     }
                 }
             }
-            _ if is_display_math(e) => {
-                let mut run = Vec::new();
-                self.formula(node, true, &mut run);
-                normalize(&mut run);
-                if !run.is_empty() {
-                    flow.block(Block::Para(run));
+            _ if is_display_math(e) => match self.formula(node, true) {
+                Ok(f) => flow.block(Block::MathBlock(f)),
+                Err(mut run) => {
+                    normalize(&mut run);
+                    if !run.is_empty() {
+                        flow.block(Block::Para(run));
+                    }
                 }
-            }
+            },
             "div" if has_class(e, "mw-heading") => {
                 // The heading element inside carries the level and anchor.
                 match child_elements(node)
@@ -960,12 +968,15 @@ impl Cx<'_> {
                     out.push(Inline::Icon(image));
                 }
             }
-            "math" => {
-                self.stats.formulas += 1;
-                out.extend(mathml::to_inlines(node, false));
-            }
+            "math" => match self.formula(node, false) {
+                Ok(f) => out.push(Inline::Math(f)),
+                Err(run) => out.extend(run),
+            },
             "span" if has_class(e, "mwe-math-element") => {
-                self.formula(node, is_display_math(e), out)
+                match self.formula(node, is_display_math(e)) {
+                    Ok(f) => out.push(Inline::Math(f)),
+                    Err(run) => out.extend(run),
+                }
             }
             "table" => {
                 let mut f = Flow::default();
@@ -1035,34 +1046,40 @@ impl Cx<'_> {
     }
 
     /// A formula as text, from its MathML; LaTeX source if there is none.
-    fn formula(&mut self, node: NodeRef<'_, Node>, display: bool, out: &mut Vec<Inline>) {
+    /// A formula: drawn from its LaTeX source when possible, else as text
+    /// from its MathML (or the LaTeX itself if there is no MathML).
+    fn formula(&mut self, node: NodeRef<'_, Node>, display: bool) -> Result<Formula, Vec<Inline>> {
         self.stats.formulas += 1;
         let math = node
             .descendants()
             .find(|d| element(d).is_some_and(|e| e.name() == "math"));
+        let tex = math
+            .and_then(|m| element(&m).and_then(|e| e.attr("alttext")))
+            .or_else(|| {
+                node.descendants().find_map(|d| {
+                    element(&d)
+                        .filter(|e| e.name() == "img")
+                        .and_then(|e| e.attr("alt"))
+                })
+            })
+            .map(str::trim);
+        if let Some(f) = tex.and_then(|t| self.resolver.formula(t, display)) {
+            self.stats.formulas_drawn += 1;
+            return Ok(f);
+        }
         let mut run = math
             .map(|m| mathml::to_inlines(m, display))
             .unwrap_or_default();
-        if run.is_empty() {
-            let alt = math
-                .and_then(|m| element(&m).and_then(|e| e.attr("alttext")))
-                .or_else(|| {
-                    node.descendants().find_map(|d| {
-                        element(&d)
-                            .filter(|e| e.name() == "img")
-                            .and_then(|e| e.attr("alt"))
-                    })
-                });
-            if let Some(tex) = alt {
-                let tex = tex.trim();
-                let tex = tex
-                    .strip_prefix("{\\displaystyle")
-                    .and_then(|t| t.strip_suffix('}'))
-                    .unwrap_or(tex);
-                run.push(Inline::Text(tex.trim().to_string()));
-            }
+        if run.is_empty()
+            && let Some(tex) = tex
+        {
+            let tex = tex
+                .strip_prefix("{\\displaystyle")
+                .and_then(|t| t.strip_suffix('}'))
+                .unwrap_or(tex);
+            run.push(Inline::Text(tex.trim().to_string()));
         }
-        out.extend(run);
+        Err(run)
     }
 }
 
@@ -1425,6 +1442,50 @@ fn drop_empty_headings(
         .filter(|(_, k)| *k)
         .map(|(ba, _)| ba)
         .unzip()
+}
+
+/// Calls `f` on every formula in the article.
+pub fn for_each_formula_mut(a: &mut Article, f: &mut impl FnMut(&mut Formula)) {
+    fn inlines(list: &mut [Inline], f: &mut impl FnMut(&mut Formula)) {
+        for i in list {
+            match i {
+                Inline::Math(x) => f(x),
+                Inline::Styled(_, c) | Inline::Link { content: c, .. } => inlines(c, f),
+                Inline::Text(_) | Inline::Icon(_) | Inline::Break | Inline::NoteRef(_) => {}
+            }
+        }
+    }
+    fn blocks(list: &mut [Block], f: &mut impl FnMut(&mut Formula)) {
+        for b in list {
+            match b {
+                Block::Para(c)
+                | Block::Heading { content: c, .. }
+                | Block::Figure { caption: c, .. } => inlines(c, f),
+                Block::Gallery(items) => items.iter_mut().for_each(|(_, c)| inlines(c, f)),
+                Block::List { items, .. } => items.iter_mut().for_each(|i| blocks(i, f)),
+                Block::Quote(inner) => blocks(inner, f),
+                Block::MathBlock(x) => f(x),
+                Block::Pre(_) | Block::Rule | Block::TableRef(_) | Block::InfoboxRef => {}
+            }
+        }
+    }
+    blocks(&mut a.body, f);
+    for t in &mut a.tables {
+        t.cells.iter_mut().for_each(|c| inlines(&mut c.content, f));
+    }
+    if let Some(ib) = &mut a.infobox {
+        for row in &mut ib.rows {
+            match row {
+                InfoboxRow::Header(c)
+                | InfoboxRow::Full(c)
+                | InfoboxRow::Image { caption: c, .. } => inlines(c, f),
+                InfoboxRow::Field { label, value } => {
+                    inlines(label, f);
+                    inlines(value, f);
+                }
+            }
+        }
+    }
 }
 
 /// Calls `f` on every image id in the article.
@@ -1991,5 +2052,95 @@ mod image_tests {
                 Block::Para(vec![Inline::Icon(101)])
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod formula_tests {
+    use super::*;
+    use xwa_format::content::MathItem;
+
+    /// Draws every formula except `\ce{...}` as one glyph.
+    struct Draws;
+
+    impl Resolver for Draws {
+        fn article(&self, _: &str) -> Option<u32> {
+            None
+        }
+
+        fn formula(&self, tex: &str, display: bool) -> Option<Formula> {
+            (!tex.contains("\\ce")).then(|| Formula {
+                display,
+                width: 1000,
+                ascent: 700,
+                descent: 200,
+                items: vec![MathItem::Glyph {
+                    glyph: 7,
+                    scale: 0,
+                    dx: 0,
+                    dy: 0,
+                }],
+                fallback_image: None,
+            })
+        }
+    }
+
+    fn math(class: &str, tex: &str, mathml: &str) -> String {
+        format!(
+            r#"<span class="mwe-math-element {class}"><span class="mwe-math-mathml-a11y" style="display: none;"><math alttext="{tex}">{mathml}</math></span><img class="mwe-math-fallback-image-inline" alt="{tex}"></span>"#
+        )
+    }
+
+    #[test]
+    fn formulas_are_drawn_with_a_text_fallback() {
+        let body = format!(
+            "<p>Since {} and{}we get {}.</p>",
+            math(
+                "mwe-math-element-inline",
+                r"{\displaystyle a}",
+                "<mi>a</mi>"
+            ),
+            math("mwe-math-element-block", r"{\displaystyle b}", "<mi>b</mi>"),
+            math(
+                "mwe-math-element-inline",
+                r"{\displaystyle {\ce {H2O}}}",
+                "<msub><mi>H</mi><mn>2</mn></msub><mi>O</mi>"
+            ),
+        );
+        let html =
+            format!("<html><body><div class=\"mw-parser-output\">{body}</div></body></html>");
+        let x = extract(&html, "T", "T", 0, &Draws);
+        let drawn = |display| Formula {
+            display,
+            width: 1000,
+            ascent: 700,
+            descent: 200,
+            items: vec![MathItem::Glyph {
+                glyph: 7,
+                scale: 0,
+                dx: 0,
+                dy: 0,
+            }],
+            fallback_image: None,
+        };
+        assert_eq!(
+            x.article.body,
+            vec![
+                Block::Para(vec![
+                    Inline::Text("Since ".into()),
+                    Inline::Math(drawn(false)),
+                    Inline::Text(" and".into())
+                ]),
+                Block::MathBlock(drawn(true)),
+                Block::Para(vec![
+                    Inline::Text("we get ".into()),
+                    Inline::Styled(Style::Italic, vec![Inline::Text("H".into())]),
+                    Inline::Styled(Style::Subscript, vec![Inline::Text("2".into())]),
+                    Inline::Styled(Style::Italic, vec![Inline::Text("O".into())]),
+                    Inline::Text(".".into()),
+                ]),
+            ]
+        );
+        assert_eq!((x.stats.formulas, x.stats.formulas_drawn), (3, 2));
     }
 }

@@ -10,7 +10,7 @@ writer agree on it.
    article 2 reads, following a link 1-2 reads, jumping to any section or
    table 1-2 reads. No B-tree walks for images, formulas or links.
 2. Small: a front-coded title index (~28 B per entry measured), math as
-   vectors (~93 B per formula measured), lossless 2-bit line art.
+   vectors (~82 B per formula measured), lossless 2-bit line art.
 3. Device profiles: one container, two encodings. The X4 Pro (ESP32-S3,
    8 MB PSRAM) gets everything it can use; the X4/X3 (ESP32-C3, ~380 KB
    RAM) gets a compatible subset. Nothing in the container forces the X4 Pro
@@ -320,32 +320,64 @@ INFOBOX: varint row_count, per row: u8 kind (header, image, label/value,
 
 ## 8. Math
 
+Formulas are vector drawings: glyph outlines placed by a TeX-quality
+layout, so they stay sharp at any size and the firmware can match the text
+size, shrink a wide formula to fit, or zoom without re-converting.
+
+xwa-tool lays out each formula's LaTeX source (the `alttext` Wikipedia
+keeps next to the MathML) with KaTeX's layout rules, through katex-native
+(a Rust port), and KaTeX's fonts. It does not use Wikimedia's math SVGs.
+Measured: 99.97% of the mathematics ZIM's 642,219 formulas are drawn, and
+90% of the chemistry ZIM's (mhchem's `\ce` is not supported). A formula
+that cannot be laid out becomes text in the content stream, with
+superscript and subscript styles and italic variables (a² + b² = c²),
+which suits chemical formulas well.
+
+Formulas are not images, so archives built without pictures still carry
+them. In the mathematics ZIM they add 10.8 MB to the X4 Pro archive (60.8
+MB with formulas as text, 71.6 MB drawn); the old `.img` spent 536 MB on
+formula images.
+
 ### 8.1 Formula record
 
 Used by MATH (inline) and MATH_BLOCK:
 
 ```
-u8     flags         bit0 display style, bit1 has fallback image
-svarint width, ascent, descent   (font units of MATH_GLYPHS)
+u8     flags         bit0 display (a block formula), bit1 has fallback image
+svarint width, ascent, descent   (MATH_GLYPHS units)
 varint item_count
 items:
   tag 0 GLYPH     varint glyph_id, u8 scale_code, svarint dx, svarint dy
   tag 1 GLYPH_XY  varint glyph_id, i16 sx, i16 sy (8.8 fixed), svarint dx, svarint dy
   tag 2 RULE      svarint dx, svarint dy, varint w, varint h
+  tag 3 PATH      svarint dx, svarint dy, varint command_count, commands:
+                    u8 0 MOVE | 1 LINE | 2 QUAD | 3 CUBIC | 4 CLOSE,
+                    followed by 1, 1, 2, 3 or 0 points; each point is
+                    svarint x, y as a delta from the point written before
+                    it (the first from 0, 0)
 [varint fallback_image_id]
 ```
 
-`dx/dy` are relative to the previous item's position, in font units.
-`scale_code` indexes a small table in MATH_GLYPHS (1.0, 0.707, 0.5 ...).
-GLYPH_XY covers vertically stretched delimiter pieces. Measured on 316,891
-real formulas: 99.86% are representable, 93 B mean, 59 B median.
+Units are MATH_GLYPHS font units (1000 per em in xwa-tool's archives),
+with y pointing up. The formula's origin is the left end of its baseline;
+its box runs from x = 0 to `width` and from y = −`descent` to `ascent`.
+Each item's position is the previous item's position plus (`dx`, `dy`);
+the first item's is relative to the origin.
 
-Formulas are resolution-independent: the firmware chooses px/em per
-setting (match text, shrink to fit, zoom viewer).
+- GLYPH: the glyph's origin at the position, scaled by
+  `scales[scale_code]` from MATH_GLYPHS. GLYPH_XY scales by `sx`, `sy`
+  instead, for sizes outside the table.
+- RULE: a filled rectangle (fraction bar, overline) with its bottom-left
+  corner at the position.
+- PATH: a filled outline (radical sign, stretchy brace or arrow), nonzero
+  winding, with coordinates relative to the position. KaTeX draws such
+  shapes hundreds of ems long and clips them to their box; xwa-tool clips
+  them before writing, so devices never need to clip.
 
-Vector math is not an image, so archives built without images still carry
-it. A formula the math engine cannot lay out falls back to a fallback image
-(when images are on) or to plain Unicode text in the content stream.
+Measured on the mathematics ZIM: 82 B per formula on average (median 33,
+90th percentile 196), 9.8 items, a PATH in 8% of formulas.
+`xwa_format::math_svg` in xwa-tool is a reference renderer: it draws a
+formula record as SVG.
 
 ### 8.2 Glyph outlines (MATH_GLYPHS)
 
@@ -353,16 +385,23 @@ Required whenever an article contains a formula (feature bit 1).
 
 ```
 u16 upem, u16 glyph_count, u8 scale_count, u16 scales[scale_count] (8.8)
-u32 glyph_offset[glyph_count + 1]
-per glyph: i16 xmin, ymin, xmax, ymax, then ops:
+u32 glyph_offset[glyph_count + 1]   (from the start of the glyph data,
+                                     which follows this table)
+per glyph: i16 xmin, ymin, xmax, ymax, then commands:
   0 MOVE x y | 1 LINE x y | 2 QUAD cx cy x y | 3 CUBIC c1x c1y c2x c2y x y
   4 CLOSE | 5 END          (i16 coordinates, font units, y up)
 ```
 
-Glyphs come either from Wikimedia's MathJax SVGs (compiled) or from our own
-math layout (LaTeX/MathML via a TeX-style engine). The firmware rasterises
-them with a small integer rasteriser (prototype: 2.1 KB RV32 code, ≤ 8 KB
-RAM, ~3 ms per inline formula on the C3).
+xwa-tool writes `upem` 1000 and the scales 1.0, 0.7 and 0.5 (KaTeX's
+text, script and scriptscript sizes, which cover all but 62 of 1.4 million
+glyph uses in the mathematics ZIM). It stores only the glyphs the
+archive's formulas use, numbered in order of first use: 995 glyphs, 333 KB
+for the mathematics ZIM. The outlines come from KaTeX's fonts (SIL Open
+Font License 1.1); META `license.math_font` says so.
+
+The firmware rasterises outlines with a small integer rasteriser
+(prototype: 2.1 KB RV32 code, ≤ 8 KB RAM, ~3 ms per inline formula on the
+C3).
 
 ## 9. Images
 
@@ -437,5 +476,3 @@ sector reads work without the "copy contiguously" step.
 3. Compact-profile deflate window: 32 KB (as today) or smaller.
 4. FAT32 cards: archives over 4 GB need exFAT; split archives are out of
    scope for v0.
-5. Math source priority: our own layout first and Wikimedia SVGs as a
-   fallback, or the other way round, during the transition.

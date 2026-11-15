@@ -48,6 +48,9 @@ enum Command {
         /// JPEG quality for photos, 1-100.
         #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u8).range(1..=100))]
         jpeg_quality: u8,
+        /// Write formulas as text instead of drawing them.
+        #[arg(long)]
+        math_as_text: bool,
     },
     /// Describe a ZIM or XWA file.
     Info {
@@ -105,6 +108,10 @@ struct DumpArgs {
     /// Where --image writes. Line art is converted when the name ends in .pgm.
     #[arg(long, short, requires = "image")]
     out: Option<PathBuf>,
+    /// With --id or --title: also write the article's formulas, drawn, to
+    /// this HTML page.
+    #[arg(long)]
+    formulas: Option<PathBuf>,
     /// Maximum results for --search.
     #[arg(long, default_value_t = 20)]
     limit: usize,
@@ -126,6 +133,7 @@ fn main() -> ExitCode {
             threads,
             no_images,
             jpeg_quality,
+            math_as_text,
         } => {
             let device = match device {
                 DeviceArg::X4Pro => Device::X4Pro,
@@ -137,6 +145,7 @@ fn main() -> ExitCode {
                 threads,
                 images: !no_images,
                 jpeg_quality,
+                math: !math_as_text,
             };
             convert(&zim, out, &opts)
         }
@@ -206,8 +215,9 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         r.stats.images_skipped
     );
     println!(
-        "  formulas: {} (as text until the math engine lands)",
-        r.stats.formulas
+        "  formulas: {} drawn as math, {} as text",
+        r.stats.formulas_drawn,
+        r.stats.formulas - r.stats.formulas_drawn
     );
     if r.failed_articles > 0 || r.failed_images > 0 || r.dangling_redirects > 0 {
         println!(
@@ -409,6 +419,25 @@ fn dump_cmd(args: &DumpArgs) -> CliResult {
             rec.first_chunk, rec.offset_in_chunk, rec.chunk_count, rec.flags, rec.popularity
         );
         print!("{}", xwa_format::text::article_text(&article, &title_of));
+        if let Some(page) = &args.formulas {
+            let glyphs = a
+                .math_glyphs()?
+                .ok_or("this archive has no drawn formulas")?;
+            let mut html = format!(
+                "<!DOCTYPE html><meta charset=utf-8><title>{}</title><body style=\"font: 16px serif\">",
+                article.title.replace('&', "&amp;").replace('<', "&lt;")
+            );
+            let mut n = 0;
+            xwa_format::content::walk_refs(&article, &mut |r| {
+                if let xwa_format::content::Ref::Formula(f) = r {
+                    n += 1;
+                    let svg = xwa_format::math_svg::formula_svg(f, &glyphs, 24.0);
+                    html.push_str(&format!("<p>{n}. {svg}</p>"));
+                }
+            });
+            std::fs::write(page, html)?;
+            println!("wrote {n} formulas to {}", page.display());
+        }
         return Ok(());
     }
     if let Some(prefix) = &args.search {

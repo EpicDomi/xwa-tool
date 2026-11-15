@@ -18,9 +18,12 @@ Early. What works today:
   writer, reader and verifier. The writer compresses on every CPU core and
   produces the same bytes for the same input.
 - `xwa-convert`: ZIM to XWA conversion of Wikipedia: paragraphs,
-  headings, lists, tables, infoboxes, links resolved to articles, and
+  headings, lists, tables, infoboxes, links resolved to articles,
   pictures (photos as greyscale JPEG; diagrams, line-art bitmaps and icons
-  as lossless 4-grey line art, each picture stored once). Navigation boxes,
+  as lossless 4-grey line art, each picture stored once), and formulas
+  drawn as vector math (KaTeX's layout of the LaTeX in the ZIM, with
+  KaTeX's fonts; formulas it cannot lay out, such as mhchem's `\ce`, are
+  written as text with real superscripts and subscripts). Navigation boxes,
   citation markers, reference lists and external-link lists are left out.
   Redirects, including mwoffliner's redirects to a section, become
   searchable alternative titles.
@@ -28,9 +31,6 @@ Early. What works today:
   `title-index`.
 - `xwa-tool-gui`: a desktop window: choose a ZIM (or drop one on it), pick
   your e-reader, convert.
-
-Not yet: formulas drawn as math (for now they appear as text, such as
-a² + b² = c²). That is the next step.
 
 ## Building
 
@@ -42,17 +42,21 @@ cargo build --release
 ./target/release/xwa-tool-gui
 ```
 
-`--jpeg-quality` (default 75) trades photo quality for size.
+`--jpeg-quality` (default 75) trades photo quality for size, and
+`--math-as-text` writes formulas as text instead of drawing them.
 
-Measured on English Wikipedia ZIMs (4 cores), with pictures:
+Measured on English Wikipedia ZIMs (4 cores), with pictures and drawn
+formulas:
 
-| ZIM | Articles | Pictures | ZIM size | X4 Pro archive | X4/X3 archive | Time (X4 Pro) |
-|---|---|---|---|---|---|---|
-| Top 100 | 101 | 3,098 | 333 MB | 39.7 MB | 40.1 MB | 5 s |
-| Chemistry | 9,313 | 28,649 | 384 MB | 163.6 MB | 171.6 MB | 39 s |
-| Mathematics | 23,255 | 42,673 | 996 MB | 245.3 MB | 260.5 MB | 68 s |
+| ZIM | Articles | Pictures | Formulas drawn | ZIM size | X4 Pro archive | X4/X3 archive | Time (X4 Pro) |
+|---|---|---|---|---|---|---|---|
+| Top 100 | 101 | 3,098 | 5 of 8 | 333 MB | 39.7 MB | 40.1 MB | 6 s |
+| Chemistry | 9,313 | 28,649 | 19,687 of 21,776 | 384 MB | 164.4 MB | 172.4 MB | 48 s |
+| Mathematics | 23,255 | 42,673 | 646,177 of 646,347 | 996 MB | 256.3 MB | 274.7 MB | 94 s |
 
-Without pictures the same archives are 2.2, 26.4 and 60.8 MB for the X4 Pro.
+Without pictures the same archives are 2.2, 27.2 and 71.6 MB for the X4
+Pro. `xwa-tool dump wiki.xwa --title "Pythagorean theorem" --formulas
+page.html` draws an article's formulas into a web page, for checking.
 
 For ZIM and XWA files:
 
@@ -72,4 +76,5 @@ to a GitHub release.
 ## License
 
 Public domain, via the [Unlicense](LICENSE). Third-party dependencies keep
-their own licenses.
+their own licenses; xwa-tool embeds KaTeX's fonts, which are under the SIL
+Open Font License (see [`licenses/`](licenses/)).

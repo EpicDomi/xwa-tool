@@ -123,15 +123,21 @@ pub struct Formula {
     pub fallback_image: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One item of a formula. Each item's position is the previous item's
+/// position plus (`dx`, `dy`), starting from the formula's origin (the left
+/// end of its baseline). Units are MATH_GLYPHS font units; y points up.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MathItem {
+    /// A glyph with its origin at the position, scaled by MATH_GLYPHS
+    /// scale `scale`.
     Glyph {
         glyph: u32,
         scale: u8,
         dx: i32,
         dy: i32,
     },
-    /// A glyph scaled by `sx`, `sy` (8.8 fixed point), e.g. a stretched delimiter piece.
+    /// A glyph scaled by `sx`, `sy` (8.8 fixed point), for sizes outside the
+    /// scale table.
     GlyphXY {
         glyph: u32,
         sx: i16,
@@ -139,12 +145,24 @@ pub enum MathItem {
         dx: i32,
         dy: i32,
     },
-    Rule {
-        dx: i32,
-        dy: i32,
-        w: u32,
-        h: u32,
-    },
+    /// A filled rectangle (fraction bar, overline) with its bottom-left
+    /// corner at the position.
+    Rule { dx: i32, dy: i32, w: u32, h: u32 },
+    /// A filled outline (radical sign, stretchy brace or arrow), nonzero
+    /// winding, with coordinates relative to the position.
+    Path { dx: i32, dy: i32, ops: Vec<PathOp> },
+}
+
+/// A drawing command of a [`MathItem::Path`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathOp {
+    Move(i32, i32),
+    Line(i32, i32),
+    /// Control point, end point.
+    Quad(i32, i32, i32, i32),
+    /// Two control points, end point.
+    Cubic(i32, i32, i32, i32, i32, i32),
+    Close,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -300,6 +318,43 @@ pub fn encode_formula(out: &mut Vec<u8>, f: &Formula) {
     varint::put(out, f.items.len() as u64);
     for item in &f.items {
         match *item {
+            MathItem::Path { dx, dy, ref ops } => {
+                out.push(3);
+                varint::put_signed(out, dx as i64);
+                varint::put_signed(out, dy as i64);
+                varint::put(out, ops.len() as u64);
+                // Every point is a delta from the point written before it.
+                let mut pen = (0i64, 0i64);
+                let mut point = |out: &mut Vec<u8>, x: i32, y: i32| {
+                    varint::put_signed(out, x as i64 - pen.0);
+                    varint::put_signed(out, y as i64 - pen.1);
+                    pen = (x as i64, y as i64);
+                };
+                for op in ops {
+                    match *op {
+                        PathOp::Move(x, y) => {
+                            out.push(0);
+                            point(out, x, y);
+                        }
+                        PathOp::Line(x, y) => {
+                            out.push(1);
+                            point(out, x, y);
+                        }
+                        PathOp::Quad(cx, cy, x, y) => {
+                            out.push(2);
+                            point(out, cx, cy);
+                            point(out, x, y);
+                        }
+                        PathOp::Cubic(ax, ay, bx, by, x, y) => {
+                            out.push(3);
+                            point(out, ax, ay);
+                            point(out, bx, by);
+                            point(out, x, y);
+                        }
+                        PathOp::Close => out.push(4),
+                    }
+                }
+            }
             MathItem::Glyph {
                 glyph,
                 scale,
@@ -676,6 +731,43 @@ fn decode_formula(c: &mut Cursor) -> Result<Formula> {
                 w: c.u32v()?,
                 h: c.u32v()?,
             },
+            3 => {
+                let (dx, dy) = (c.i32v()?, c.i32v()?);
+                let n = c.count()?;
+                let mut ops = Vec::with_capacity(n);
+                let mut pen = (0i64, 0i64);
+                let mut point = |c: &mut Cursor| -> Result<(i32, i32)> {
+                    pen.0 += c.i32v()? as i64;
+                    pen.1 += c.i32v()? as i64;
+                    let fit = |v: i64| {
+                        i32::try_from(v).map_err(|_| corrupt("path coordinate out of range"))
+                    };
+                    Ok((fit(pen.0)?, fit(pen.1)?))
+                };
+                for _ in 0..n {
+                    ops.push(match c.u8()? {
+                        0 => {
+                            let (x, y) = point(c)?;
+                            PathOp::Move(x, y)
+                        }
+                        1 => {
+                            let (x, y) = point(c)?;
+                            PathOp::Line(x, y)
+                        }
+                        2 => {
+                            let (a, b) = (point(c)?, point(c)?);
+                            PathOp::Quad(a.0, a.1, b.0, b.1)
+                        }
+                        3 => {
+                            let (a, b, e) = (point(c)?, point(c)?, point(c)?);
+                            PathOp::Cubic(a.0, a.1, b.0, b.1, e.0, e.1)
+                        }
+                        4 => PathOp::Close,
+                        k => return Err(corrupt(format!("unknown path command {k}"))),
+                    });
+                }
+                MathItem::Path { dx, dy, ops }
+            }
             t => return Err(corrupt(format!("unknown math item {t}"))),
         };
         f.items.push(item);
@@ -985,6 +1077,17 @@ mod tests {
                     sy: 720,
                     dx: 751,
                     dy: -12,
+                },
+                MathItem::Path {
+                    dx: -5,
+                    dy: 40_000,
+                    ops: vec![
+                        PathOp::Move(0, 0),
+                        PathOp::Line(400_000, -3),
+                        PathOp::Quad(1, 2, -3, 4),
+                        PathOp::Cubic(5, -6, 7, 8, -9, 10),
+                        PathOp::Close,
+                    ],
                 },
                 MathItem::Rule {
                     dx: 1001,

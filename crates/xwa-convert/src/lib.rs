@@ -8,6 +8,7 @@
 pub mod html;
 pub mod images;
 pub mod links;
+pub mod math;
 pub mod mathml;
 
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use xwa_format::Profile;
-use xwa_format::content::{Article, Ref};
+use xwa_format::content::{Article, Formula, MathItem, Ref};
 use xwa_format::writer::{ArchiveWriter, Summary, WriterOptions};
 use xwa_zim::Target;
 
@@ -73,6 +74,8 @@ pub struct Options {
     pub images: bool,
     /// JPEG quality for photos, 1-100.
     pub jpeg_quality: u8,
+    /// Draw formulas as math; otherwise write them as text.
+    pub math: bool,
 }
 
 impl Options {
@@ -82,6 +85,7 @@ impl Options {
             threads: 0,
             images: true,
             jpeg_quality: 75,
+            math: true,
         }
     }
 }
@@ -147,6 +151,8 @@ struct Tables {
     /// Image path to an index into the image entries; `None` when pictures
     /// are off.
     images: Option<PathTable>,
+    /// `None` when formulas are written as text.
+    math: Option<math::MathEngine>,
 }
 
 impl Resolver for Tables {
@@ -156,6 +162,10 @@ impl Resolver for Tables {
 
     fn image(&self, path: &str) -> Option<u32> {
         self.images.as_ref()?.get(path)
+    }
+
+    fn formula(&self, tex: &str, display: bool) -> Option<Formula> {
+        self.math.as_ref()?.layout(tex, display)
     }
 }
 
@@ -355,6 +365,7 @@ fn convert_inner(
                 .collect(),
         ),
         images: opts.images.then(|| PathTable::from_hashed(image_paths)),
+        math: opts.math.then(math::MathEngine::new),
     };
     let main_article = zim.header().main_page.and_then(follow);
     drop(leads_to);
@@ -410,6 +421,9 @@ fn convert_inner(
     // Image ids in order of first use; each image is stored once.
     let mut image_ids: HashMap<u32, u32> = HashMap::new();
     let mut image_uses: Vec<html::ImageUse> = Vec::new();
+    // Math glyphs, also numbered in order of first use.
+    let mut glyph_ids: HashMap<u32, u32> = HashMap::new();
+    let mut glyph_order: Vec<u32> = Vec::new();
     let groups = cluster_groups(&articles);
     check(Stage::Articles, 0, total)?;
     for batch in groups.chunks(threads * 4) {
@@ -452,6 +466,18 @@ fn convert_inner(
                         })
                         .collect();
                     html::for_each_image_mut(&mut x.article, &mut |i| *i = global[*i as usize]);
+                    html::for_each_formula_mut(&mut x.article, &mut |f| {
+                        for item in &mut f.items {
+                            if let MathItem::Glyph { glyph, .. } | MathItem::GlyphXY { glyph, .. } =
+                                item
+                            {
+                                *glyph = *glyph_ids.entry(*glyph).or_insert_with(|| {
+                                    glyph_order.push(*glyph);
+                                    glyph_order.len() as u32 - 1
+                                });
+                            }
+                        }
+                    });
                     xwa_format::content::walk_refs(&x.article, &mut |r| {
                         if let Ref::Link(target) = r
                             && target != id
@@ -531,6 +557,16 @@ fn convert_inner(
     }
 
     check(Stage::Finishing, 0, 1)?;
+    if let Some(engine) = &table.math
+        && !glyph_order.is_empty()
+    {
+        let glyphs = xwa_format::math_glyphs::encode(&engine.glyph_table(&glyph_order))?;
+        writer.set_math_glyphs(glyphs);
+        writer.set_meta(
+            "license.math_font",
+            "Formula glyphs from the KaTeX fonts, SIL Open Font License 1.1",
+        );
+    }
     for (title, id) in &resolved_redirects {
         writer.add_redirect(title, *id);
     }

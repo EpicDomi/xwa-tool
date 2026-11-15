@@ -29,6 +29,8 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 image = { version = "0.25", default-features = false, features = ["webp", "png", "jpeg", "gif"] }
 jpeg-encoder = "0.7"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+katex-native = "0.1.1"
+ttf-parser = "0.25"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 
 [profile.release]
