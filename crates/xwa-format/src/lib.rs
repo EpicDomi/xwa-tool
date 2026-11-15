@@ -13,6 +13,7 @@ pub mod normalize;
 pub mod reader;
 pub mod records;
 pub mod superblock;
+pub mod text;
 pub mod title_index;
 pub mod varint;
 pub mod writer;

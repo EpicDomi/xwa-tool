@@ -1,8 +1,9 @@
-//! Plain-text rendering of an article, for checking converter output.
+//! Plain-text (Markdown-like) rendering of an article, for checking
+//! converter output and for previews.
 
 use std::fmt::Write;
 
-use xwa_format::content::{
+use crate::content::{
     Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Style, Table,
 };
 

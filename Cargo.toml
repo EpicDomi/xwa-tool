@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/xwa-zim", "crates/xwa-format", "crates/xwa-cli", "crates/xwa-gui"]
+members = ["crates/xwa-zim", "crates/xwa-format", "crates/xwa-convert", "crates/xwa-cli", "crates/xwa-gui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ repository = "https://github.com/EpicDomi/xwa-tool"
 [workspace.dependencies]
 xwa-zim = { path = "crates/xwa-zim" }
 xwa-format = { path = "crates/xwa-format" }
+xwa-convert = { path = "crates/xwa-convert" }
 zstd = "0.14"
 lzma-rs = "0.3"
 thiserror = "2"
@@ -20,6 +21,11 @@ caseless = "0.2"
 crc32c = "0.6"
 libdeflater = "1.25"
 iced = "0.14"
+scraper = { version = "0.29", default-features = false }
+ego-tree = "0.11"
+rayon = "1.12"
+percent-encoding = "2.3"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 
 [profile.release]

@@ -1,5 +1,3 @@
-mod dump;
-
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::io::{IsTerminal, Read, Write};
@@ -7,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use xwa_convert::{Device, Stage};
 use xwa_format::normalize::search_key;
 use xwa_format::reader::{self, Archive as Xwa};
 use xwa_format::records::image_encoding;
@@ -30,6 +29,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Convert a ZIM file into an XWA archive.
+    Convert {
+        /// The ZIM file.
+        zim: PathBuf,
+        /// Where to write the archive (default: next to the ZIM, ending in .xwa).
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        /// The e-reader the archive is for.
+        #[arg(long, value_enum, default_value_t = DeviceArg::X4Pro)]
+        device: DeviceArg,
+        /// Worker threads (default: one per CPU).
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+    },
     /// Describe a ZIM or XWA file.
     Info {
         /// The ZIM or XWA file.
@@ -52,6 +65,17 @@ enum Command {
         #[arg(long = "query")]
         queries: Vec<String>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DeviceArg {
+    /// X4 Pro: full profile.
+    #[value(name = "x4-pro")]
+    X4Pro,
+    /// X4: compact profile.
+    X4,
+    /// X3: compact profile.
+    X3,
 }
 
 #[derive(Args)]
@@ -81,8 +105,20 @@ struct DumpArgs {
 }
 
 fn main() -> ExitCode {
+    // Stop quietly when the output is piped into something like `head`.
+    #[cfg(unix)]
+    // SAFETY: restoring the default signal disposition at startup, before any threads exist.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let result = match cli.command {
+        Command::Convert {
+            zim,
+            out,
+            device,
+            threads,
+        } => convert(&zim, out, device, threads),
         Command::Info { file, decompress } => info(&file, decompress),
         Command::Verify { file } => verify(&file),
         Command::Dump(args) => dump_cmd(&args),
@@ -95,6 +131,68 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn convert(zim: &Path, out: Option<PathBuf>, device: DeviceArg, threads: usize) -> CliResult {
+    let device = match device {
+        DeviceArg::X4Pro => Device::X4Pro,
+        DeviceArg::X4 => Device::X4,
+        DeviceArg::X3 => Device::X3,
+    };
+    let out = out.unwrap_or_else(|| zim.with_extension("xwa"));
+    if out == zim {
+        return Err("the output would overwrite the ZIM file".into());
+    }
+    let opts = xwa_convert::Options { device, threads };
+    let mut progress = Progress::new();
+    let report = xwa_convert::convert(zim, &out, &opts, &mut |p| {
+        let stage = match p.stage {
+            Stage::Scanning => "reading the ZIM directory",
+            Stage::Articles => "converting articles",
+            Stage::Finishing => "writing the title index and tables",
+        };
+        progress.update(stage, p.done, p.total);
+        true
+    });
+    progress.clear();
+    let r = report?;
+    let s = &r.summary;
+    println!(
+        "wrote {} for the {}: {} articles, {} redirects, {:.1} MB (ZIM: {:.1} MB)",
+        out.display(),
+        device.name(),
+        s.articles,
+        s.redirects,
+        mb(s.file_size),
+        mb(r.zim_bytes)
+    );
+    println!(
+        "  text: {:.1} MB of article content, {:.1} MB stored in {} chunks{}",
+        mb(s.text_raw),
+        mb(s.text_stored),
+        s.chunks,
+        if s.dictionary_bytes > 0 {
+            " (zstd with dictionary)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "  links: {} ({} to pages not in this ZIM, kept as text); tables: {}",
+        r.stats.links, r.stats.unresolved_links, r.stats.tables
+    );
+    println!(
+        "  formulas: {} (as text until the math engine lands); images left out: {}",
+        r.stats.formulas, r.stats.images_skipped
+    );
+    if r.failed_articles > 0 || r.dangling_redirects > 0 {
+        println!(
+            "  unreadable articles kept as titles only: {}; redirects to missing pages: {}",
+            r.failed_articles, r.dangling_redirects
+        );
+    }
+    println!("  took {:.1}s", r.elapsed.as_secs_f64());
+    Ok(())
 }
 
 /// Picks the reader by the file's signature.
@@ -286,7 +384,7 @@ fn dump_cmd(args: &DumpArgs) -> CliResult {
             "article {id}: chunk {} offset {}, {} chunk(s), flags {:#06x}, popularity {}",
             rec.first_chunk, rec.offset_in_chunk, rec.chunk_count, rec.flags, rec.popularity
         );
-        print!("{}", dump::article_text(&article, &title_of));
+        print!("{}", xwa_format::text::article_text(&article, &title_of));
         return Ok(());
     }
     if let Some(prefix) = &args.search {
