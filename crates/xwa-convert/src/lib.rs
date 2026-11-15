@@ -121,6 +121,8 @@ pub struct Report {
     pub failed_images: u64,
     /// Redirects that lead nowhere in the archive.
     pub dangling_redirects: u64,
+    /// Pages outside Wikipedia's article namespace, such as category pages.
+    pub pages_left_out: u64,
     pub zim_bytes: u64,
     pub elapsed: Duration,
 }
@@ -136,6 +138,15 @@ struct ArticleEntry {
 struct Redirect {
     entry: u32,
     title: String,
+}
+
+/// What an HTML page in the ZIM is.
+enum PageKind {
+    Article,
+    /// An HTML redirect, to this archive path.
+    Redirect(String),
+    /// A MediaWiki page outside the article namespace (a category, say).
+    OtherNamespace,
 }
 
 /// Where an image's bytes are in the ZIM.
@@ -295,9 +306,10 @@ fn convert_inner(
     candidates.sort_by_key(|a| (a.cluster, a.blob));
     let by_path = PathTable::from_hashed(paths);
 
-    // mwoffliner writes redirects to a section as tiny HTML pages; find them
-    // so they become redirects rather than articles.
-    let refresh: Vec<Option<String>> = pool.install(|| {
+    // mwoffliner writes redirects to a section as tiny HTML pages, and newer
+    // ZIMs also hold category pages: find both, so the first become
+    // redirects and the second are left out.
+    let kinds: Vec<PageKind> = pool.install(|| {
         cluster_groups(&candidates)
             .par_iter()
             .flat_map_iter(|range| {
@@ -305,18 +317,31 @@ fn convert_inner(
                 range
                     .clone()
                     .map(|i| {
-                        let html = cluster.as_ref()?.blob(candidates[i].blob as usize)?;
-                        let url = links::refresh_target(html)?;
-                        links::resolve_href(&candidates[i].path, &url).map(|h| h.path)
+                        let Some(html) = cluster
+                            .as_ref()
+                            .and_then(|c| c.blob(candidates[i].blob as usize))
+                        else {
+                            return PageKind::Article;
+                        };
+                        if let Some(url) = links::refresh_target(html)
+                            && let Some(h) = links::resolve_href(&candidates[i].path, &url)
+                        {
+                            return PageKind::Redirect(h.path);
+                        }
+                        match links::page_namespace(html) {
+                            Some(ns) if ns != 0 => PageKind::OtherNamespace,
+                            _ => PageKind::Article,
+                        }
                     })
                     .collect::<Vec<_>>()
             })
             .collect()
     });
     let mut articles = Vec::with_capacity(candidates.len());
-    for (a, target) in candidates.into_iter().zip(refresh) {
-        match target {
-            Some(path) => {
+    let mut pages_left_out = 0u64;
+    for (a, kind) in candidates.into_iter().zip(kinds) {
+        match kind {
+            PageKind::Redirect(path) => {
                 if let Some(to) = by_path.get(&path) {
                     leads_to[a.entry as usize] = REDIRECT | to;
                 }
@@ -325,7 +350,8 @@ fn convert_inner(
                     title: a.title,
                 });
             }
-            None => articles.push(a),
+            PageKind::OtherNamespace => pages_left_out += 1,
+            PageKind::Article => articles.push(a),
         }
     }
     if articles.is_empty() {
@@ -583,6 +609,7 @@ fn convert_inner(
         failed_articles,
         failed_images,
         dangling_redirects,
+        pages_left_out,
         zim_bytes,
         elapsed: started.elapsed(),
     })

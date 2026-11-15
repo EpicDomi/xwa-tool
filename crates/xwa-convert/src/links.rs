@@ -84,6 +84,21 @@ pub fn refresh_target(html: &[u8]) -> Option<String> {
     (!url.is_empty()).then_some(url)
 }
 
+/// The MediaWiki namespace a page says it is in (`"wgNamespaceNumber":14`
+/// for a category, 0 for an article), from the script near the top of the
+/// page. `None` for pages without one, such as mwoffliner's own main page.
+pub fn page_namespace(html: &[u8]) -> Option<i32> {
+    const KEY: &[u8] = b"\"wgNamespaceNumber\":";
+    let head = &html[..html.len().min(64 << 10)];
+    let at = head.windows(KEY.len()).position(|w| w == KEY)? + KEY.len();
+    let rest = &head[at..];
+    let end = rest
+        .iter()
+        .position(|b| !(b.is_ascii_digit() || *b == b'-'))
+        .unwrap_or(rest.len());
+    std::str::from_utf8(&rest[..end]).ok()?.parse().ok()
+}
+
 /// A link target inside the archive: the path and an optional fragment,
 /// both percent-decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +242,15 @@ mod tests {
             refresh_target(b"<html><body><p>An article</p></body></html>"),
             None
         );
+    }
+
+    #[test]
+    fn reads_page_namespaces() {
+        let page = br#"<script>RLCONF = {"wgCanonicalNamespace":"Category","wgNamespaceNumber":14,"wgPageName":"X"};</script>"#;
+        assert_eq!(page_namespace(page), Some(14));
+        assert_eq!(page_namespace(br#"{"wgNamespaceNumber":0,"#), Some(0));
+        assert_eq!(page_namespace(br#"{"wgNamespaceNumber":-1}"#), Some(-1));
+        assert_eq!(page_namespace(b"<html><body>Welcome</body></html>"), None);
     }
 
     #[test]
