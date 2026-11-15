@@ -152,8 +152,10 @@ impl Archive {
         let mut ptrs = vec![0u8; header.cluster_count as usize * 8];
         io::read_exact_at(&file, &mut ptrs, header.cluster_ptr_pos)?;
         let cluster_ptrs = ptrs
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_le_bytes(*c))
             .collect();
         Ok(Self {
             file,
@@ -232,9 +234,9 @@ impl Archive {
                 bytes,
                 self.header.path_ptr_pos + first as u64 * 8,
             )?;
-            for (i, chunk) in bytes.chunks_exact(8).enumerate() {
+            for (i, chunk) in bytes.as_chunks::<8>().0.iter().enumerate() {
                 let index = first + i as u32;
-                let offset = u64::from_le_bytes(chunk.try_into().unwrap());
+                let offset = u64::from_le_bytes(*chunk);
                 let parsed =
                     if offset >= window_start && offset < window_start + window.len() as u64 {
                         parse_dirent(&window[(offset - window_start) as usize..], index)?
@@ -398,8 +400,10 @@ impl Archive {
         let bytes = self.content(&entry)?;
         Ok(Some(
             bytes
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
                 .collect(),
         ))
     }
