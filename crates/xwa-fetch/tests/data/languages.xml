@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:dc="http://purl.org/dc/terms/"
+      xmlns:opds="https://specs.opds.io/opds-1.2"
+      xmlns:thr="http://purl.org/syndication/thread/1.0">
+  <id>68ecc6d8-4f43-cebe-e011-5d261f0b3792</id>
+  <link rel="self"
+        href="/catalog/v2/languages"
+        type="application/atom+xml;profile=opds-catalog;kind=navigation"/>
+  <link rel="start"
+        href="/catalog/v2/root.xml"
+        type="application/atom+xml;profile=opds-catalog;kind=navigation"/>
+  <title>List of languages</title>
+  <updated>2026-11-15T08:22:11Z</updated>
+
+  <entry>
+    <title>Abkhazian</title>
+    <dc:language>abk</dc:language>
+    <thr:count>2</thr:count>
+    <link rel="subsection"
+          href="/catalog/v2/entries?lang=abk"
+          type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
+    <updated>2026-11-15T08:22:11Z</updated>
+    <id>64ac3bcc-b687-9239-a8ed-63bce28a9471</id>
+  </entry>
+  <entry>
+    <title>English</title>
+    <dc:language>eng</dc:language>
+    <thr:count>1309</thr:count>
+    <link rel="subsection"
+          href="/catalog/v2/entries?lang=eng"
+          type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
+    <updated>2026-11-15T08:22:11Z</updated>
+    <id>45151570-9c8f-6e1a-c8ce-2b73f937958c</id>
+  </entry>
+  <entry>
+    <title>français</title>
+    <dc:language>fra</dc:language>
+    <thr:count>518</thr:count>
+    <link rel="subsection"
+          href="/catalog/v2/entries?lang=fra"
+          type="application/atom+xml;profile=opds-catalog;kind=acquisition"/>
+    <updated>2026-11-15T08:22:11Z</updated>
+    <id>8c174a4c-8eea-fb9e-bbb1-7e9065616108</id>
+  </entry>
+</feed>

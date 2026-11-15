@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/xwa-zim", "crates/xwa-format", "crates/xwa-convert", "crates/xwa-cli", "crates/xwa-gui"]
+members = ["crates/xwa-zim", "crates/xwa-format", "crates/xwa-convert", "crates/xwa-fetch", "crates/xwa-cli", "crates/xwa-gui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ repository = "https://github.com/EpicDomi/xwa-tool"
 xwa-zim = { path = "crates/xwa-zim" }
 xwa-format = { path = "crates/xwa-format" }
 xwa-convert = { path = "crates/xwa-convert" }
+xwa-fetch = { path = "crates/xwa-fetch" }
 zstd = "0.14"
 lzma-rs = "0.3"
 thiserror = "2"
@@ -31,6 +32,11 @@ jpeg-encoder = "0.7"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 katex-native = "0.1.1"
 ttf-parser = "0.25"
+ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
+quick-xml = "0.42"
+sha2 = "0.11"
+sysinfo = { version = "0.40", default-features = false, features = ["disk"] }
+dirs = "7"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 
 [profile.release]

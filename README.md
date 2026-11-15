@@ -27,10 +27,15 @@ Early. What works today:
   citation markers, reference lists and external-link lists are left out.
   Redirects, including mwoffliner's redirects to a section, become
   searchable alternative titles.
-- `xwa-tool`: command line with `convert`, `info`, `verify`, `dump` and
-  `title-index`.
-- `xwa-tool-gui`: a desktop window: choose a ZIM (or drop one on it), pick
-  your e-reader, convert.
+- `xwa-fetch`: the Kiwix library catalog, downloads (resumed after an
+  interruption, mirrors tried in turn, checked against their SHA-256), and
+  copying archives to SD cards (with FAT32's 4 GB limit checked first).
+- `xwa-tool`: command line with `catalog`, `download`, `convert`, `copy`,
+  `info`, `verify`, `dump` and `title-index`.
+- `xwa-tool-gui`: a desktop app. "Get Wikipedia" lists the Kiwix library
+  by language and downloads a ZIM; "Convert" takes it (or any ZIM, also by
+  drag and drop), converts it for your e-reader, and copies the result to
+  an SD card.
 
 ## Building
 
@@ -57,6 +62,17 @@ formulas:
 Without pictures the same archives are 2.2, 27.2 and 71.6 MB for the X4
 Pro. `xwa-tool dump wiki.xwa --title "Pythagorean theorem" --formulas
 page.html` draws an article's formulas into a web page, for checking.
+
+Getting ZIMs and putting archives on the card:
+
+```
+xwa-tool catalog                            # English Wikipedia ZIMs in the Kiwix library
+xwa-tool catalog --lang fra --search medecine
+xwa-tool catalog --languages
+xwa-tool download wikipedia_en_ray-charles --flavour maxi --dir ~/Downloads
+xwa-tool copy wiki.xwa                      # to the SD card, if exactly one is inserted
+xwa-tool copy wiki.xwa --to /media/me/SDCARD
+```
 
 For ZIM and XWA files:
 
