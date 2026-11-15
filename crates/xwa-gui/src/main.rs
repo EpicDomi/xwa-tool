@@ -248,8 +248,7 @@ fn summary(r: &xwa_convert::Report, out: &Path, device: xwa_convert::Device) -> 
     };
     format!(
         "Done: {} articles and {pictures} in {} ({:.0} MB), made for the {}.\n\
-         Copy it to your e-reader's SD card.\n\
-         Formulas appear as text for now.",
+         Copy it to your e-reader's SD card.",
         r.summary.articles,
         name,
         (r.summary.file_size as f64 / 1e6).max(1.0),

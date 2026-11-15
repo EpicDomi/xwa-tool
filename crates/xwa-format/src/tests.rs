@@ -214,10 +214,22 @@ fn image(id: u32) -> (ImageInfo, Vec<u8>) {
 }
 
 fn math_glyphs() -> Vec<u8> {
-    let mut b = Vec::new();
-    b.extend_from_slice(&1000u16.to_le_bytes());
-    b.extend_from_slice(&(GLYPHS as u16).to_le_bytes());
-    b
+    use crate::math_glyphs::{GlyphOp, GlyphTable, Outline, encode};
+    let square = Outline {
+        bbox: [0, 0, 500, 500],
+        ops: vec![
+            GlyphOp::Move(0, 0),
+            GlyphOp::Line(500, 0),
+            GlyphOp::Line(500, 500),
+            GlyphOp::Close,
+        ],
+    };
+    encode(&GlyphTable {
+        upem: 1000,
+        scales: vec![256, 179, 128],
+        glyphs: vec![square; GLYPHS as usize],
+    })
+    .unwrap()
 }
 
 fn options(profile: Profile) -> WriterOptions {

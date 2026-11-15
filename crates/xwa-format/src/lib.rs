@@ -8,6 +8,8 @@ pub mod codec;
 pub mod content;
 mod error;
 pub mod la2;
+pub mod math_glyphs;
+pub mod math_svg;
 pub mod meta;
 pub mod normalize;
 pub mod reader;

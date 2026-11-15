@@ -17,7 +17,8 @@ use crate::records::{ArticleRecord, ChunkEntry, ImageRecord, article_flags, imag
 use crate::superblock::{SectionEntry, Superblock};
 use crate::title_index::{self, BlockSource, Hit, IndexReader, ReadError};
 use crate::{
-    BLOCK_SIZE, Error, Result, TextCodec, VERSION_MAJOR, la2, meta, required, section, varint,
+    BLOCK_SIZE, Error, Result, TextCodec, VERSION_MAJOR, la2, math_glyphs, meta, required, section,
+    varint,
 };
 
 /// Random-access bytes: a file or a buffer.
@@ -486,11 +487,29 @@ impl<S: Source> Archive<S> {
         Ok(r)
     }
 
+    /// The MATH_GLYPHS table, if the archive has one.
+    pub fn math_glyphs(&self) -> Result<Option<math_glyphs::GlyphTable>> {
+        let Some(s) = self.superblock.section(section::MATH_GLYPHS) else {
+            return Ok(None);
+        };
+        let len = usize::try_from(s.length).map_err(|_| corrupt("MATH_GLYPHS too large"))?;
+        let bytes = self.read_at(s.offset, len)?;
+        Ok(Some(math_glyphs::decode(&bytes)?))
+    }
+
     fn verify_sections(
         &self,
         r: &mut VerifyReport,
         progress: &mut dyn FnMut(&str, u64, u64),
     ) -> Result<()> {
+        match self.math_glyphs() {
+            Ok(Some(t)) if t.upem == 0 || t.scales.is_empty() => {
+                r.problem("MATH_GLYPHS has no size table or em size")
+            }
+            Ok(_) => {}
+            Err(Error::Io(e)) => return Err(Error::Io(e)),
+            Err(e) => r.problem(describe(&e)),
+        }
         let mut sections: Vec<&SectionEntry> = self.superblock.sections.iter().collect();
         sections.sort_by_key(|s| s.offset);
         for w in sections.windows(2) {
@@ -618,7 +637,7 @@ impl<S: Source> Archive<S> {
                     let glyphs = f.items.iter().filter_map(|i| match i {
                         content::MathItem::Glyph { glyph, .. }
                         | content::MathItem::GlyphXY { glyph, .. } => Some(*glyph),
-                        content::MathItem::Rule { .. } => None,
+                        content::MathItem::Rule { .. } | content::MathItem::Path { .. } => None,
                     });
                     match self.glyph_count {
                         Some(n) => {
