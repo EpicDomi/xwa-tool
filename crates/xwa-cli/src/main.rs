@@ -52,6 +52,40 @@ enum Command {
         #[arg(long)]
         math_as_text: bool,
     },
+    /// List the ZIM files in the Kiwix library.
+    Catalog {
+        /// Language, as an ISO 639-3 code (eng, fra, deu...).
+        #[arg(long, default_value = "eng")]
+        lang: String,
+        /// Category; "all" for every category.
+        #[arg(long, default_value = "wikipedia")]
+        category: String,
+        /// Only books whose name or title contains this.
+        #[arg(long)]
+        search: Option<String>,
+        /// List the languages instead.
+        #[arg(long)]
+        languages: bool,
+    },
+    /// Download a ZIM file from the Kiwix library (resumes, checks its checksum).
+    Download {
+        /// The book's name, as `catalog` lists it (e.g. wikipedia_en_ray-charles).
+        name: String,
+        /// maxi (complete, with pictures), nopic or mini.
+        #[arg(long, default_value = "maxi")]
+        flavour: String,
+        /// Folder to download into.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Copy an archive to an SD card (or another folder).
+    Copy {
+        /// The XWA file.
+        file: PathBuf,
+        /// Folder to copy into (default: the one removable drive, if there is exactly one).
+        #[arg(long)]
+        to: Option<PathBuf>,
+    },
     /// Describe a ZIM or XWA file.
     Info {
         /// The ZIM or XWA file.
@@ -149,6 +183,14 @@ fn main() -> ExitCode {
             };
             convert(&zim, out, &opts)
         }
+        Command::Catalog {
+            lang,
+            category,
+            search,
+            languages,
+        } => catalog(&lang, &category, search.as_deref(), languages),
+        Command::Download { name, flavour, dir } => download(&name, &flavour, &dir),
+        Command::Copy { file, to } => copy(&file, to.as_deref()),
         Command::Info { file, decompress } => info(&file, decompress),
         Command::Verify { file } => verify(&file),
         Command::Dump(args) => dump_cmd(&args),
@@ -219,6 +261,12 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         r.stats.formulas_drawn,
         r.stats.formulas - r.stats.formulas_drawn
     );
+    if r.pages_left_out > 0 {
+        println!(
+            "  left out {} pages that are not articles (categories and the like)",
+            r.pages_left_out
+        );
+    }
     if r.failed_articles > 0 || r.failed_images > 0 || r.dangling_redirects > 0 {
         println!(
             "  unreadable: {} articles (kept as titles), {} pictures (left blank); redirects to missing pages: {}",
@@ -226,6 +274,113 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         );
     }
     println!("  took {:.1}s", r.elapsed.as_secs_f64());
+    Ok(())
+}
+
+fn catalog(lang: &str, category: &str, search: Option<&str>, languages: bool) -> CliResult {
+    let client = xwa_fetch::Client::new();
+    if languages {
+        for l in client.languages()? {
+            println!("{:<5} {:<30} {:>5} books", l.code, l.name, l.books);
+        }
+        return Ok(());
+    }
+    let filter = xwa_fetch::Filter {
+        lang: Some(lang).filter(|l| !l.is_empty() && *l != "all"),
+        category: Some(category).filter(|c| !c.is_empty() && *c != "all"),
+        name: None,
+    };
+    let needle = search.map(str::to_lowercase);
+    let books = client.books(&filter)?;
+    let mut shown = 0;
+    for b in &books {
+        if let Some(n) = &needle
+            && !b.name.to_lowercase().contains(n)
+            && !b.title.to_lowercase().contains(n)
+        {
+            continue;
+        }
+        shown += 1;
+        println!(
+            "{:<45} {:<6} {}  {:>9}  {:>10} articles  {}",
+            b.name,
+            b.flavour,
+            b.date,
+            xwa_fetch::size_text(b.size),
+            b.article_count,
+            b.title
+        );
+    }
+    println!("{shown} books");
+    Ok(())
+}
+
+/// Throttled progress for downloads and copies.
+fn transfer_progress(progress: &mut Progress, p: xwa_fetch::Progress) {
+    let stage = match p.stage {
+        xwa_fetch::Stage::Downloading => "transferring",
+        xwa_fetch::Stage::Checking => "checking",
+    };
+    progress.update(stage, p.done, p.total);
+}
+
+fn download(name: &str, flavour: &str, dir: &Path) -> CliResult {
+    let client = xwa_fetch::Client::new();
+    let books = client.books(&xwa_fetch::Filter {
+        name: Some(name),
+        ..Default::default()
+    })?;
+    let book = books.iter().find(|b| b.flavour == flavour).ok_or_else(|| {
+        let flavours: Vec<&str> = books.iter().map(|b| b.flavour.as_str()).collect();
+        if flavours.is_empty() {
+            format!("the Kiwix library has no book named {name}; see `xwa-tool catalog`")
+        } else {
+            format!("{name} comes in these flavours: {}", flavours.join(", "))
+        }
+    })?;
+    println!(
+        "{} ({}, {}): {}",
+        book.file_name(),
+        book.flavour_description(),
+        book.date,
+        xwa_fetch::size_text(book.size)
+    );
+    std::fs::create_dir_all(dir)?;
+    let mut progress = Progress::new();
+    let result = client.download(&book.url, dir, &mut |p| {
+        transfer_progress(&mut progress, p);
+        true
+    });
+    progress.clear();
+    println!("saved {}", result?.display());
+    Ok(())
+}
+
+fn copy(file: &Path, to: Option<&Path>) -> CliResult {
+    let drives = xwa_fetch::drives::removable();
+    let (dir, drive) = match to {
+        Some(dir) => (
+            dir.to_path_buf(),
+            drives.iter().find(|d| dir.starts_with(&d.mount)),
+        ),
+        None => match drives.as_slice() {
+            [one] => (one.mount.clone(), Some(one)),
+            [] => return Err("no SD card found; insert one or pass --to with a folder".into()),
+            many => {
+                for d in many {
+                    println!("{}", d.label());
+                }
+                return Err("several removable drives found; pass --to with the one to use".into());
+            }
+        },
+    };
+    let mut progress = Progress::new();
+    let result = xwa_fetch::drives::copy(file, &dir, drive, &mut |p| {
+        transfer_progress(&mut progress, p);
+        true
+    });
+    progress.clear();
+    println!("copied to {}", result?.display());
     Ok(())
 }
 

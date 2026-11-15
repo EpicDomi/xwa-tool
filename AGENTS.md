@@ -12,6 +12,8 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   encoding, title index, archive writer, reader and verifier.
 - `crates/xwa-convert`: ZIM to XWA conversion (HTML extraction, link
   resolution, the parallel pipeline), shared by the CLI and the GUI.
+- `crates/xwa-fetch`: Kiwix library catalog (OPDS), downloads (Metalink,
+  resume, SHA-256), removable drives and copying to them.
 - `crates/xwa-cli`: the `xwa-tool` command line.
 - `crates/xwa-gui`: the `xwa-tool-gui` desktop app (iced).
 - `docs/format-spec-v0.md`: the format specification.

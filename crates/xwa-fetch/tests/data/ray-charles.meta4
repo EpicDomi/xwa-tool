@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <generator>MirrorBrain/2.19.0</generator>
+  <origin dynamic="true">https://lb.download.kiwix.org/zim/wikipedia/wikipedia_en_ray-charles_maxi_2026-10.zim.meta4</origin>
+  <published>2026-11-15T08:24:03Z</published>
+  <publisher>
+    <name>Kiwix project</name>
+    <url>https://kiwix.org</url>
+  </publisher>
+
+  <file name="wikipedia_en_ray-charles_maxi_2026-10.zim">
+    <size>29887083</size>
+
+    <!-- <mtime>1793631680</mtime> -->
+
+    <!-- internal id: 12453 -->
+    <hash type="md5">32d7c2cf20c3f8827a3cf76d24a0b74e</hash>
+    <hash type="sha-1">10f78b7e2d0ec86453c0a9c1312f4097907113ea</hash>
+    <hash type="sha-256">a0804b170cac5215edd673559fca430e07ef2ab4c4fe73a060fd37eab1b0b95e</hash>
+    <pieces length="4194304" type="sha-1">
+      <hash>8bbcbc426791d24f2fd43b5da907f7d4550f1837</hash>
+      <hash>73f1dc617b103822fbbae95b667eabdba23d1109</hash>
+      <hash>b9034b9295cfc6ba262b144fd426c97295aa3c67</hash>
+      <hash>1740214243166dbc4310f62d1f482bbcba22d816</hash>
+      <hash>a7b144dcf7acdc5a234277b68e3992dc095a6e69</hash>
+      <hash>8457044f41f7fda0c685f44fef3db9e7a9186da2</hash>
+      <hash>1a8d2fc97cbf3e29f6d285c561904eda26422fbd</hash>
+      <hash>2ed9dc7ed9623d803cf976cef078a71b433da14f</hash>
+    </pieces>
+
+
+    <!-- Found 11 mirrors: 0 in the same network prefix, 0 in the same autonomous system,
+         3 handling this country, 0 in the same region, 3 elsewhere -->
+
+    <!-- Mirrors in the same network (unknown): -->
+
+    <!-- Mirrors in the same AS (unknown): -->
+
+    <!-- Mirrors which handle this country (US): -->
+    <url location="us" priority="1">https://wi.mirror.driftle.ss/kiwix/zim/wikipedia/wikipedia_en_ray-charles_maxi_2026-10.zim</url>
+    <url location="us" priority="2">https://dumps.wikimedia.org/kiwix/zim/wikipedia/wikipedia_en_ray-charles_maxi_2026-10.zim</url>
+    <url location="us" priority="3">https://ftpmirror.your.org/pub/kiwix/zim/wikipedia/wikipedia_en_ray-charles_maxi_2026-10.zim</url>
+
+    <!-- Mirrors in the same continent (NA): -->
+
+    <!-- Mirrors in the rest of the world: -->
+    <url location="nl" priority="4">https://ftp.nluug.nl/pub/kiwix/zim/wikipedia/wikipedia_en_ray-charles_maxi_2026-10.zim</url>
+    <url location="fr" priority="5">https://mirror.download.kiwix.org/zim/wikipedia/wikipedia_en_ray-charles_maxi_2026-10.zim</url>
+    <url location="dk" priority="6">https://mirrors.dotsrc.org/kiwix/zim/wikipedia/wikipedia_en_ray-charles_maxi_2026-10.zim</url>
+  </file>
+</metalink>
