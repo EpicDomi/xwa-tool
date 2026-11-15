@@ -10,6 +10,8 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
 - `crates/xwa-zim`: ZIM reader.
 - `crates/xwa-format`: XWA format reference implementation: content
   encoding, title index, archive writer, reader and verifier.
+- `crates/xwa-convert`: ZIM to XWA conversion (HTML extraction, link
+  resolution, the parallel pipeline), shared by the CLI and the GUI.
 - `crates/xwa-cli`: the `xwa-tool` command line.
 - `crates/xwa-gui`: the `xwa-tool-gui` desktop app (iced).
 - `docs/format-spec-v0.md`: the format specification.
