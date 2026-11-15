@@ -36,6 +36,7 @@ ttf-parser = "0.25"
 ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
 quick-xml = "0.42"
 sha2 = "0.11"
+md-5 = "0.11"
 sysinfo = { version = "0.40", default-features = false, features = ["disk"] }
 dirs = "7"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }

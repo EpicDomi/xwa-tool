@@ -448,6 +448,12 @@ diagram-size setting and the zoom viewer need no extra data. 1-bit display
 is derived from LA2 by threshold or patterns; 4-grey uses the levels as
 stored.
 
+HD downloads (optional, when converting): for diagrams drawn from SVG,
+xwa-tool fetches Wikimedia's rendering at the smallest standard thumbnail
+width that gives at least 800 px on the long side, and stores it in place
+of the ZIM's picture with flag bit 0 set; the archive then has optional
+feature bit 3.
+
 ## 10. Fallback font (FONT)
 
 A complete `.cpfont` v4 file (the firmware's existing SD font format),

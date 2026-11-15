@@ -13,12 +13,14 @@ pub mod mathml;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
+use xwa_fetch::wikimedia::{Diagrams, FetchReport, Wanted};
 use xwa_format::Profile;
 use xwa_format::content::{Article, Formula, MathItem, Ref};
-use xwa_format::writer::{ArchiveWriter, Summary, WriterOptions};
+use xwa_format::writer::{ArchiveWriter, Summary, WriterOptions, image_flags};
 use xwa_zim::Target;
 
 use crate::html::{Extracted, Resolver, Stats};
@@ -76,6 +78,9 @@ pub struct Options {
     pub jpeg_quality: u8,
     /// Draw formulas as math; otherwise write them as text.
     pub math: bool,
+    /// Where to get sharper copies of diagrams than the ZIM's pictures
+    /// (Wikimedia, over the internet), if anywhere.
+    pub diagrams: Option<Arc<Diagrams>>,
 }
 
 impl Options {
@@ -86,6 +91,7 @@ impl Options {
             images: true,
             jpeg_quality: 75,
             math: true,
+            diagrams: None,
         }
     }
 }
@@ -97,6 +103,8 @@ pub enum Stage {
     Scanning,
     /// Converting articles; `done` and `total` count articles.
     Articles,
+    /// Downloading sharper diagrams; `done` and `total` count diagrams.
+    Diagrams,
     /// Converting pictures; `done` and `total` count images.
     Images,
     /// Building the title index and writing the tables.
@@ -123,6 +131,10 @@ pub struct Report {
     pub dangling_redirects: u64,
     /// Pages outside Wikipedia's article namespace, such as category pages.
     pub pages_left_out: u64,
+    /// What fetching sharper diagrams did, when asked to.
+    pub diagrams: Option<FetchReport>,
+    /// Pictures stored from a sharper copy.
+    pub sharper_images: u64,
     pub zim_bytes: u64,
     pub elapsed: Duration,
 }
@@ -145,11 +157,12 @@ enum PageKind {
     OtherNamespace,
 }
 
-/// Where an image's bytes are in the ZIM.
+/// Where an image's bytes are in the ZIM, and its directory entry.
 #[derive(Clone, Copy)]
 struct ImageEntry {
     cluster: u32,
     blob: u32,
+    entry: u32,
 }
 
 /// Link and image lookups for the extractor.
@@ -249,7 +262,11 @@ fn convert_inner(
             && zim.mime_type(&e).is_some_and(is_raster)
         {
             image_paths.push((links::path_hash(&e.path), image_entries.len() as u32));
-            image_entries.push(ImageEntry { cluster, blob });
+            image_entries.push(ImageEntry {
+                cluster,
+                blob,
+                entry: e.index,
+            });
             return Ok(());
         }
         // mwoffliner's own files (styles, scripts, assets) start with "_".
@@ -577,6 +594,52 @@ fn convert_inner(
     let math_engine = table.math;
     drop((table.links, table.images, articles, image_ids));
 
+    // Sharper diagrams, fetched before the pictures are converted: the
+    // image ids of SVG diagrams, and their wiki file names and sizes.
+    let mut sharper_ids: Vec<u32> = Vec::new();
+    let mut wanted: Vec<Wanted> = Vec::new();
+    let mut diagram_report = None;
+    if let Some(source) = &opts.diagrams {
+        for (id, u) in image_uses.iter().enumerate() {
+            if u.kind != images::Kind::Drawing {
+                continue;
+            }
+            let entry = zim.entry(image_entries[u.key as usize].entry);
+            if let Some(file) = entry
+                .ok()
+                .and_then(|e| xwa_fetch::wikimedia::svg_file_name(&e.path))
+            {
+                let (width, height) = u.source_size;
+                sharper_ids.push(id as u32);
+                wanted.push(Wanted {
+                    file,
+                    width,
+                    height,
+                });
+            }
+        }
+        let wiki = wiki_code(&zim);
+        let fetched = source.fetch(&wanted, wiki.as_deref(), &mut |done, total| {
+            check(Progress {
+                stage: Stage::Diagrams,
+                done,
+                total,
+            })
+            .is_ok()
+        });
+        diagram_report = Some(match fetched {
+            Ok(r) => r,
+            Err(xwa_fetch::Error::Cancelled) => return Err(Error::Cancelled),
+            // Sharper diagrams are a bonus: the ZIM's pictures still do.
+            Err(e) => FetchReport {
+                wanted: wanted.len() as u64,
+                failed: wanted.len() as u64,
+                stopped: Some(e.to_string()),
+                ..Default::default()
+            },
+        });
+    }
+
     // Pictures, a batch of ZIM clusters at a time, in the ZIM's order.
     let total = image_uses.len() as u64;
     let settings = images::Settings {
@@ -584,6 +647,7 @@ fn convert_inner(
         ..images::Settings::new(profile)
     };
     let mut failed_images = 0u64;
+    let mut sharper_images = 0u64;
     writer.reserve_images(total as u32);
     let mut order: Vec<(ImageEntry, u32)> = image_uses
         .iter()
@@ -603,7 +667,7 @@ fn convert_inner(
     while !groups.is_empty() {
         let take = groups.len().min(threads * 2);
         let batch: Vec<&[(ImageEntry, u32)]> = groups.drain(..take).collect();
-        let converted: Vec<Vec<(u32, Option<images::Encoded>)>> = pool.install(|| {
+        let converted: Vec<Vec<(u32, Option<images::Encoded>, bool)>> = pool.install(|| {
             batch
                 .par_iter()
                 .map(|group| {
@@ -611,22 +675,32 @@ fn convert_inner(
                     group
                         .iter()
                         .map(|(entry, id)| {
-                            let bytes = cluster.as_ref().and_then(|c| c.blob(entry.blob as usize));
                             let kind = image_uses[*id as usize].kind;
-                            (
-                                *id,
-                                bytes.and_then(|b| images::convert(b, kind, &settings).ok()),
-                            )
+                            // The sharper copy, if one was fetched and reads well.
+                            let hd = opts.diagrams.as_ref().and_then(|source| {
+                                let i = sharper_ids.binary_search(id).ok()?;
+                                let png = source.get(&wanted[i])?;
+                                let mut e = images::convert(&png, kind, &settings).ok()?;
+                                e.info.flags |= image_flags::HD_SOURCE;
+                                Some(e)
+                            });
+                            if hd.is_some() {
+                                return (*id, hd, true);
+                            }
+                            let bytes = cluster.as_ref().and_then(|c| c.blob(entry.blob as usize));
+                            let e = bytes.and_then(|b| images::convert(b, kind, &settings).ok());
+                            (*id, e, false)
                         })
                         .collect()
                 })
                 .collect()
         });
-        for (id, encoded) in converted.into_iter().flatten() {
+        for (id, encoded, hd) in converted.into_iter().flatten() {
             let e = encoded.unwrap_or_else(|| {
                 failed_images += 1;
                 images::placeholder(profile)
             });
+            sharper_images += hd as u64;
             writer.add_image(id, e.info, e.data)?;
             done += 1;
         }
@@ -670,9 +744,20 @@ fn convert_inner(
         failed_images,
         dangling_redirects,
         pages_left_out,
+        diagrams: diagram_report,
+        sharper_images,
         zim_bytes,
         elapsed: started.elapsed(),
     })
+}
+
+/// The code of the wiki a ZIM was made from ("en" for
+/// `wikipedia_en_all`), where diagrams not on Commons are looked for.
+fn wiki_code(zim: &xwa_zim::Archive) -> Option<String> {
+    let name = zim.metadata("Name").ok()??;
+    let name = String::from_utf8_lossy(&name);
+    let code = name.strip_prefix("wikipedia_")?.split('_').next()?;
+    (!code.is_empty()).then(|| code.to_string())
 }
 
 /// Progress through the scanning stage's three passes (the directory, the
