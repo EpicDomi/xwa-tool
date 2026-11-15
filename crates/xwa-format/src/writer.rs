@@ -164,7 +164,8 @@ pub struct ArchiveWriter<W: Write + Seek> {
     articles: Vec<ArticleRecord>,
     titles: Vec<u8>,
     title_entries: Vec<TitleEntry>,
-    images: Vec<ImageRecord>,
+    /// Image records by id; ids may arrive in any order.
+    images: Vec<Option<ImageRecord>>,
     meta: Vec<(String, String)>,
     extra_sections: Vec<(u32, Vec<u8>)>,
     required: u32,
@@ -274,7 +275,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         self.articles.len() as u32
     }
 
-    /// Number of images added so far, which is also the next image id.
+    /// One more than the highest image id added so far (the next id when
+    /// images are added in order).
     pub fn image_count(&self) -> u32 {
         self.images.len() as u32
     }
@@ -373,14 +375,12 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         Ok(())
     }
 
-    /// Adds image `id`, which must be the next id in sequence, with its
-    /// encoded bytes (spec 9.2).
+    /// Adds image `id` with its encoded bytes (spec 9.2). Ids may come in
+    /// any order, but every id below the highest must be added before
+    /// [`ArchiveWriter::finish`].
     pub fn add_image(&mut self, id: u32, info: ImageInfo, data: Vec<u8>) -> Result<()> {
-        if id as usize != self.images.len() {
-            return Err(Error::Invalid(format!(
-                "image {id} added out of order; expected {}",
-                self.images.len()
-            )));
+        if self.images.get(id as usize).is_some_and(Option::is_some) {
+            return Err(Error::Invalid(format!("image {id} added twice")));
         }
         let size = u32::try_from(data.len())
             .ok()
@@ -399,7 +399,10 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         if info.flags & image_flags::HD_SOURCE != 0 {
             self.optional |= optional::HD_IMAGES;
         }
-        self.images.push(ImageRecord {
+        if self.images.len() <= id as usize {
+            self.images.resize(id as usize + 1, None);
+        }
+        self.images[id as usize] = Some(ImageRecord {
             offset: 0,
             size,
             encoding: info.encoding,
@@ -522,7 +525,9 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                 }
                 Blob::Image { id, data } => {
                     self.write_blob(&data)?;
-                    self.images[id as usize].offset = offset;
+                    if let Some(rec) = &mut self.images[id as usize] {
+                        rec.offset = offset;
+                    }
                 }
             }
         }
@@ -579,6 +584,9 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         debug_assert!(self.ready.is_empty() && self.chunks.len() == self.chunks_cut as usize);
 
         let article_count = self.articles.len() as u32;
+        if let Some(missing) = self.images.iter().position(Option::is_none) {
+            return Err(Error::Invalid(format!("image {missing} was never added")));
+        }
         if let Some(e) = self
             .title_entries
             .iter()
@@ -644,7 +652,12 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         let chunks: Vec<u8> = self.chunks.iter().flat_map(|c| c.encode()).collect();
         self.write_section(&mut sections, section::CHUNK_TABLE, &chunks)?;
         if !self.images.is_empty() {
-            let images: Vec<u8> = self.images.iter().flat_map(|i| i.encode()).collect();
+            let images: Vec<u8> = self
+                .images
+                .iter()
+                .flatten()
+                .flat_map(|i| i.encode())
+                .collect();
             self.write_section(&mut sections, section::IMAGE_TABLE, &images)?;
         }
         for (kind, data) in std::mem::take(&mut self.extra_sections) {

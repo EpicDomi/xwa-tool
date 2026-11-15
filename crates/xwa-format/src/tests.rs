@@ -425,7 +425,6 @@ fn writer_rejects_bad_input() {
     let mut w = new();
     assert!(w.add_article(1, &article(1), 0).is_err());
     let (info, data) = image(0);
-    assert!(w.add_image(3, info, data).is_err());
     assert!(
         w.add_image(
             0,
@@ -437,6 +436,21 @@ fn writer_rejects_bad_input() {
         )
         .is_err()
     );
+
+    // Images may arrive in any order, but not twice, and none may be missing.
+    let mut w = new();
+    w.add_image(1, info, data.clone()).unwrap();
+    assert!(
+        matches!(w.add_image(1, info, data.clone()), Err(Error::Invalid(m)) if m.contains("twice"))
+    );
+    assert!(matches!(w.finish(), Err(Error::Invalid(m)) if m.contains("image 0 was never added")));
+    let mut w = new();
+    w.add_image(1, info, data.clone()).unwrap();
+    w.add_image(0, info, data).unwrap();
+    let (bytes, _) = finish(w);
+    let a = Archive::from_source(bytes).unwrap();
+    assert_eq!(a.image_count(), 2);
+    assert!(a.verify(&mut |_, _, _| {}).unwrap().ok());
 
     let mut w = new();
     w.add_article(0, &article(0), 0).unwrap();

@@ -42,6 +42,12 @@ enum Command {
         /// Worker threads (default: one per CPU).
         #[arg(long, default_value_t = 0)]
         threads: usize,
+        /// Leave pictures out (a much smaller archive).
+        #[arg(long)]
+        no_images: bool,
+        /// JPEG quality for photos, 1-100.
+        #[arg(long, default_value_t = 75, value_parser = clap::value_parser!(u8).range(1..=100))]
+        jpeg_quality: u8,
     },
     /// Describe a ZIM or XWA file.
     Info {
@@ -118,7 +124,22 @@ fn main() -> ExitCode {
             out,
             device,
             threads,
-        } => convert(&zim, out, device, threads),
+            no_images,
+            jpeg_quality,
+        } => {
+            let device = match device {
+                DeviceArg::X4Pro => Device::X4Pro,
+                DeviceArg::X4 => Device::X4,
+                DeviceArg::X3 => Device::X3,
+            };
+            let opts = xwa_convert::Options {
+                device,
+                threads,
+                images: !no_images,
+                jpeg_quality,
+            };
+            convert(&zim, out, &opts)
+        }
         Command::Info { file, decompress } => info(&file, decompress),
         Command::Verify { file } => verify(&file),
         Command::Dump(args) => dump_cmd(&args),
@@ -133,22 +154,18 @@ fn main() -> ExitCode {
     }
 }
 
-fn convert(zim: &Path, out: Option<PathBuf>, device: DeviceArg, threads: usize) -> CliResult {
-    let device = match device {
-        DeviceArg::X4Pro => Device::X4Pro,
-        DeviceArg::X4 => Device::X4,
-        DeviceArg::X3 => Device::X3,
-    };
+fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> CliResult {
+    let device = opts.device;
     let out = out.unwrap_or_else(|| zim.with_extension("xwa"));
     if out == zim {
         return Err("the output would overwrite the ZIM file".into());
     }
-    let opts = xwa_convert::Options { device, threads };
     let mut progress = Progress::new();
-    let report = xwa_convert::convert(zim, &out, &opts, &mut |p| {
+    let report = xwa_convert::convert(zim, &out, opts, &mut |p| {
         let stage = match p.stage {
             Stage::Scanning => "reading the ZIM directory",
             Stage::Articles => "converting articles",
+            Stage::Images => "converting pictures",
             Stage::Finishing => "writing the title index and tables",
         };
         progress.update(stage, p.done, p.total);
@@ -182,13 +199,20 @@ fn convert(zim: &Path, out: Option<PathBuf>, device: DeviceArg, threads: usize) 
         r.stats.links, r.stats.unresolved_links, r.stats.tables
     );
     println!(
-        "  formulas: {} (as text until the math engine lands); images left out: {}",
-        r.stats.formulas, r.stats.images_skipped
+        "  pictures: {} stored ({:.1} MB) for {} places in articles; {} left out",
+        s.images,
+        mb(s.image_bytes),
+        r.stats.images,
+        r.stats.images_skipped
     );
-    if r.failed_articles > 0 || r.dangling_redirects > 0 {
+    println!(
+        "  formulas: {} (as text until the math engine lands)",
+        r.stats.formulas
+    );
+    if r.failed_articles > 0 || r.failed_images > 0 || r.dangling_redirects > 0 {
         println!(
-            "  unreadable articles kept as titles only: {}; redirects to missing pages: {}",
-            r.failed_articles, r.dangling_redirects
+            "  unreadable: {} articles (kept as titles), {} pictures (left blank); redirects to missing pages: {}",
+            r.failed_articles, r.failed_images, r.dangling_redirects
         );
     }
     println!("  took {:.1}s", r.elapsed.as_secs_f64());

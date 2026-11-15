@@ -15,3 +15,7 @@ rayon.workspace = true
 percent-encoding.workspace = true
 xxhash-rust.workspace = true
 thiserror.workspace = true
+image.workspace = true
+jpeg-encoder.workspace = true
+flate2.workspace = true
+zstd.workspace = true

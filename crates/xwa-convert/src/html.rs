@@ -17,6 +17,7 @@ use xwa_format::content::{
 };
 use xwa_format::records::article_flags;
 
+use crate::images::Kind;
 use crate::links::resolve_href;
 use crate::mathml;
 
@@ -24,6 +25,20 @@ use crate::mathml;
 pub trait Resolver: Sync {
     /// Article id for a decoded archive path, after redirects.
     fn article(&self, path: &str) -> Option<u32>;
+    /// A key for the image at a decoded archive path, if it is stored and
+    /// images are wanted.
+    fn image(&self, _path: &str) -> Option<u32> {
+        None
+    }
+}
+
+/// An image an article uses. The article's content refers to images by
+/// their index in [`Extracted::images`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageUse {
+    /// The key [`Resolver::image`] gave.
+    pub key: u32,
+    pub kind: Kind,
 }
 
 /// Counts for the conversion report.
@@ -34,6 +49,8 @@ pub struct Stats {
     pub unresolved_links: u64,
     /// Formulas, written as text until the math engine draws them.
     pub formulas: u64,
+    /// Images placed in articles.
+    pub images: u64,
     pub images_skipped: u64,
     pub tables: u64,
     /// Tables that only make sense as drawings (cladograms).
@@ -46,6 +63,7 @@ impl std::ops::AddAssign for Stats {
         self.links += o.links;
         self.unresolved_links += o.unresolved_links;
         self.formulas += o.formulas;
+        self.images += o.images;
         self.images_skipped += o.images_skipped;
         self.tables += o.tables;
         self.tables_dropped += o.tables_dropped;
@@ -58,6 +76,8 @@ pub struct Extracted {
     /// Flags the writer cannot work out from the content (disambiguation).
     pub flags: u16,
     pub stats: Stats,
+    /// The images the content refers to, by index.
+    pub images: Vec<ImageUse>,
 }
 
 /// Self links wait for their section number in this range of `section`.
@@ -83,6 +103,8 @@ pub fn extract(
         flags: 0,
         fragments: Vec::new(),
         in_cell: 0,
+        images: Vec::new(),
+        image_slots: HashMap::new(),
     };
     let mut flow = Flow::default();
     cx.flow_children(root, &mut flow);
@@ -124,6 +146,7 @@ pub fn extract(
         article,
         flags: cx.flags,
         stats: cx.stats,
+        images: cx.images,
     }
 }
 
@@ -345,6 +368,9 @@ struct Cx<'a> {
     fragments: Vec<String>,
     /// Inside a table cell or infobox, where tables flatten to text.
     in_cell: u32,
+    images: Vec<ImageUse>,
+    /// Image key to its index in `images`.
+    image_slots: HashMap<u32, u32>,
 }
 
 impl Cx<'_> {
@@ -382,7 +408,7 @@ impl Cx<'_> {
             }
             "ul" | "ol" => {
                 if has_class(e, "gallery") {
-                    self.stats.images_skipped += count_images(node);
+                    self.gallery(node, flow);
                 } else if self.in_cell == 0 && is_link_or_citation_list(node) {
                     self.stats.citations_dropped += 1;
                 } else if let Some(b) = self.list(node, e) {
@@ -413,9 +439,28 @@ impl Cx<'_> {
             }
             "hr" => flow.block(Block::Rule),
             "table" => self.table(node, e, flow),
-            "figure" => self.stats.images_skipped += count_images(node).max(1),
+            "figure" => {
+                let caption = child_elements(node)
+                    .find(|(_, ce)| ce.name() == "figcaption")
+                    .map(|(c, _)| c);
+                self.figure(node, caption, flow);
+            }
             "br" => flow.run.push(Inline::Break),
-            "img" => self.stats.images_skipped += 1,
+            _ if e.name() == "img"
+                || e.attr("typeof").is_some_and(|t| t.starts_with("mw:File")) =>
+            {
+                // An image on its own in running text: an icon if small, else a figure.
+                if let Some(image) = self.image(node, true) {
+                    if self.images[image as usize].kind == Kind::Icon {
+                        flow.run.push(Inline::Icon(image));
+                    } else {
+                        flow.block(Block::Figure {
+                            image,
+                            caption: Vec::new(),
+                        });
+                    }
+                }
+            }
             _ if is_display_math(e) => {
                 let mut run = Vec::new();
                 self.formula(node, true, &mut run);
@@ -441,8 +486,12 @@ impl Cx<'_> {
                     flow.block(Block::Para(vec![styled(Style::Italic, run)]));
                 }
             }
-            "div" if has_class(e, "thumb") || has_class(e, "gallery") => {
-                self.stats.images_skipped += count_images(node).max(1);
+            "div" if has_class(e, "gallery") => self.gallery(node, flow),
+            "div" if has_class(e, "thumb") => {
+                let caption = node
+                    .descendants()
+                    .find(|d| element(d).is_some_and(|de| has_class(de, "thumbcaption")));
+                self.figure(node, caption, flow);
             }
             name if is_block_tag(name) => self.flow_children(node, flow),
             // Inline wrappers that hold blocks (a transclusion span around a
@@ -454,6 +503,88 @@ impl Cx<'_> {
                 self.flow_children(node, flow);
             }
             _ => self.inline_node(node, &mut flow.run),
+        }
+    }
+
+    /// The first image in `node` (or `node` itself), as an index into
+    /// `self.images`. `inline` images that are small become icons.
+    fn image(&mut self, node: NodeRef<'_, Node>, inline: bool) -> Option<u32> {
+        let img = node.descendants().find_map(|d| {
+            element(&d).filter(|e| {
+                e.name() == "img" && !e.classes().any(|c| c.starts_with("mwe-math-fallback"))
+            })
+        })?;
+        let key = img
+            .attr("src")
+            .and_then(|src| resolve_href(self.path, src))
+            .and_then(|target| self.resolver.image(&target.path));
+        let Some(key) = key else {
+            self.stats.images_skipped += 1;
+            return None;
+        };
+        let dim = |name: &str| img.attr(name).and_then(|v| v.trim().parse::<u32>().ok());
+        let small =
+            matches!((dim("width"), dim("height")), (Some(w), Some(h)) if w <= 64 && h <= 64);
+        let drawing = img.attr("data-file-type") == Some("drawing")
+            || img.attr("src").is_some_and(|s| s.contains(".svg."));
+        let kind = if inline && small {
+            Kind::Icon
+        } else if drawing {
+            Kind::Drawing
+        } else {
+            Kind::Photo
+        };
+        self.stats.images += 1;
+        let next = self.images.len() as u32;
+        let images = &mut self.images;
+        Some(*self.image_slots.entry(key).or_insert_with(|| {
+            images.push(ImageUse { key, kind });
+            next
+        }))
+    }
+
+    fn figure(
+        &mut self,
+        node: NodeRef<'_, Node>,
+        caption: Option<NodeRef<'_, Node>>,
+        flow: &mut Flow,
+    ) {
+        let Some(image) = self.image(node, false) else {
+            return;
+        };
+        let mut run = Vec::new();
+        if let Some(c) = caption {
+            self.inline_children(c, &mut run);
+            normalize(&mut run);
+        }
+        flow.block(Block::Figure {
+            image,
+            caption: run,
+        });
+    }
+
+    fn gallery(&mut self, node: NodeRef<'_, Node>, flow: &mut Flow) {
+        let mut items = Vec::new();
+        let boxes: Vec<NodeRef<Node>> = node
+            .descendants()
+            .filter(|d| element(d).is_some_and(|e| has_class(e, "gallerybox")))
+            .collect();
+        for b in boxes {
+            let Some(image) = self.image(b, false) else {
+                continue;
+            };
+            let mut caption = Vec::new();
+            if let Some(t) = b
+                .descendants()
+                .find(|d| element(d).is_some_and(|e| has_class(e, "gallerytext")))
+            {
+                self.inline_children(t, &mut caption);
+                normalize(&mut caption);
+            }
+            items.push((image, caption));
+        }
+        if !items.is_empty() {
+            flow.block(Block::Gallery(items));
         }
     }
 
@@ -706,8 +837,23 @@ impl Cx<'_> {
                         && (has_class(ce, "infobox-image")
                             || text_content(*cell).trim().len() < 200)
                     {
-                        // An image row; the caption means little without the image.
-                        self.stats.images_skipped += count_images(*cell);
+                        // An image row. Without the image (pictures off, or
+                        // not in the ZIM) its caption means little.
+                        if let Some(image) = self.image(*cell, false) {
+                            let caption = cell
+                                .descendants()
+                                .find(|d| {
+                                    element(d).is_some_and(|de| has_class(de, "infobox-caption"))
+                                })
+                                .map(|c| {
+                                    let mut run = Vec::new();
+                                    self.inline_children(c, &mut run);
+                                    normalize(&mut run);
+                                    run
+                                })
+                                .unwrap_or_default();
+                            out.push(InfoboxRow::Image { image, caption });
+                        }
                         continue;
                     }
                     let content = self.cell_inlines(*cell);
@@ -804,8 +950,16 @@ impl Cx<'_> {
             "br" if !is_script_stack(node) => out.push(Inline::Break),
             "br" => {}
             "a" => self.link(node, e, out),
-            "img" => self.stats.images_skipped += 1,
-            "figure" => self.stats.images_skipped += count_images(node).max(1),
+            "img" => {
+                if let Some(image) = self.image(node, true) {
+                    out.push(Inline::Icon(image));
+                }
+            }
+            "figure" => {
+                if let Some(image) = self.image(node, true) {
+                    out.push(Inline::Icon(image));
+                }
+            }
             "math" => {
                 self.stats.formulas += 1;
                 out.extend(mathml::to_inlines(node, false));
@@ -1273,6 +1427,65 @@ fn drop_empty_headings(
         .unzip()
 }
 
+/// Calls `f` on every image id in the article.
+pub fn for_each_image_mut(a: &mut Article, f: &mut impl FnMut(&mut u32)) {
+    fn formula(x: &mut xwa_format::content::Formula, f: &mut impl FnMut(&mut u32)) {
+        if let Some(i) = &mut x.fallback_image {
+            f(i);
+        }
+    }
+    fn inlines(list: &mut [Inline], f: &mut impl FnMut(&mut u32)) {
+        for i in list {
+            match i {
+                Inline::Icon(image) => f(image),
+                Inline::Math(x) => formula(x, f),
+                Inline::Styled(_, c) | Inline::Link { content: c, .. } => inlines(c, f),
+                Inline::Text(_) | Inline::Break | Inline::NoteRef(_) => {}
+            }
+        }
+    }
+    fn blocks(list: &mut [Block], f: &mut impl FnMut(&mut u32)) {
+        for b in list {
+            match b {
+                Block::Para(c) | Block::Heading { content: c, .. } => inlines(c, f),
+                Block::Figure { image, caption } => {
+                    f(image);
+                    inlines(caption, f);
+                }
+                Block::Gallery(items) => {
+                    for (image, caption) in items {
+                        f(image);
+                        inlines(caption, f);
+                    }
+                }
+                Block::List { items, .. } => items.iter_mut().for_each(|i| blocks(i, f)),
+                Block::Quote(inner) => blocks(inner, f),
+                Block::MathBlock(x) => formula(x, f),
+                Block::Pre(_) | Block::Rule | Block::TableRef(_) | Block::InfoboxRef => {}
+            }
+        }
+    }
+    blocks(&mut a.body, f);
+    for t in &mut a.tables {
+        t.cells.iter_mut().for_each(|c| inlines(&mut c.content, f));
+    }
+    if let Some(ib) = &mut a.infobox {
+        for row in &mut ib.rows {
+            match row {
+                InfoboxRow::Image { image, caption } => {
+                    f(image);
+                    inlines(caption, f);
+                }
+                InfoboxRow::Header(c) | InfoboxRow::Full(c) => inlines(c, f),
+                InfoboxRow::Field { label, value } => {
+                    inlines(label, f);
+                    inlines(value, f);
+                }
+            }
+        }
+    }
+}
+
 fn for_each_link_mut(a: &mut Article, f: &mut impl FnMut(&mut u32)) {
     fn inlines(list: &mut [Inline], f: &mut impl FnMut(&mut u32)) {
         for i in list {
@@ -1663,6 +1876,120 @@ mod more_tests {
                 Style::Bold,
                 vec![text("Bold caption")]
             )])
+        );
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    /// Resolves articles "A" (1) and images under `_assets_/` by name.
+    struct WithImages;
+
+    impl Resolver for WithImages {
+        fn article(&self, path: &str) -> Option<u32> {
+            (path == "A").then_some(1)
+        }
+
+        fn image(&self, path: &str) -> Option<u32> {
+            match path {
+                "_assets_/h/Photo.jpg" => Some(10),
+                "_assets_/h/Diagram.svg.png" => Some(11),
+                "_assets_/h/Flag.png" => Some(12),
+                _ => None,
+            }
+        }
+    }
+
+    fn run(body: &str) -> Extracted {
+        let html =
+            format!("<html><body><div class=\"mw-parser-output\">{body}</div></body></html>");
+        extract(&html, "T", "T", 0, &WithImages)
+    }
+
+    fn text(s: &str) -> Inline {
+        Inline::Text(s.to_string())
+    }
+
+    #[test]
+    fn figures_galleries_infobox_images_and_icons() {
+        let x = run(r#"<table class="infobox"><tbody>
+              <tr><td class="infobox-image"><span typeof="mw:File"><a><img src="./_assets_/h/Photo.jpg" width="220" height="150"></a></span><div class="infobox-caption">A bust</div></td></tr>
+              <tr><th>Flag</th><td><span typeof="mw:File"><img src="./_assets_/h/Flag.png" width="23" height="15"></span> Greece</td></tr>
+            </tbody></table>
+            <figure typeof="mw:File/Thumb"><a><img src="./_assets_/h/Diagram.svg.png" data-file-type="drawing" width="300" height="200"></a><figcaption>The <a rel="mw:WikiLink" href="A">proof</a></figcaption></figure>
+            <figure typeof="mw:File/Thumb"><a><img src="./_assets_/h/Missing.jpg"></a><figcaption>Gone</figcaption></figure>
+            <ul class="gallery mw-gallery-traditional"><li class="gallerybox"><div class="thumb"><span typeof="mw:File"><img src="./_assets_/h/Photo.jpg"></span></div><div class="gallerytext">Again</div></li></ul>
+            <p>See <span typeof="mw:File"><img src="./_assets_/h/Flag.png" width="20" height="14"></span> here.</p>"#);
+        // The photo is used twice but listed once.
+        assert_eq!(
+            x.images,
+            vec![
+                ImageUse {
+                    key: 10,
+                    kind: Kind::Photo
+                },
+                ImageUse {
+                    key: 12,
+                    kind: Kind::Icon
+                },
+                ImageUse {
+                    key: 11,
+                    kind: Kind::Drawing
+                },
+            ]
+        );
+        assert_eq!(
+            x.article.infobox.unwrap().rows,
+            vec![
+                InfoboxRow::Image {
+                    image: 0,
+                    caption: vec![text("A bust")]
+                },
+                InfoboxRow::Field {
+                    label: vec![text("Flag")],
+                    value: vec![Inline::Icon(1), text(" Greece")]
+                },
+            ]
+        );
+        assert_eq!(
+            x.article.body,
+            vec![
+                Block::InfoboxRef,
+                Block::Figure {
+                    image: 2,
+                    caption: vec![
+                        text("The "),
+                        Inline::Link {
+                            article: 1,
+                            section: 0,
+                            content: vec![text("proof")]
+                        }
+                    ]
+                },
+                Block::Gallery(vec![(0, vec![text("Again")])]),
+                Block::Para(vec![text("See "), Inline::Icon(1), text(" here.")]),
+            ]
+        );
+        assert_eq!((x.stats.images, x.stats.images_skipped), (5, 1));
+    }
+
+    #[test]
+    fn image_ids_can_be_remapped() {
+        let mut x = run(
+            r#"<figure typeof="mw:File/Thumb"><img src="./_assets_/h/Photo.jpg"></figure><p><img src="./_assets_/h/Flag.png" width="20" height="10"></p>"#,
+        );
+        for_each_image_mut(&mut x.article, &mut |i| *i += 100);
+        assert_eq!(
+            x.article.body,
+            vec![
+                Block::Figure {
+                    image: 100,
+                    caption: vec![]
+                },
+                Block::Para(vec![Inline::Icon(101)])
+            ]
         );
     }
 }

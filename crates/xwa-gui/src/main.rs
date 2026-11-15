@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use iced::widget::{button, column, pick_list, progress_bar, row, text};
+use iced::widget::{button, checkbox, column, pick_list, progress_bar, row, text};
 use iced::{Element, Subscription, Task, event, window};
 use xwa_convert::Stage;
 
@@ -53,6 +53,7 @@ struct App {
     zim: Option<PathBuf>,
     details: Option<Result<String, String>>,
     device: Device,
+    images: bool,
     loading: bool,
     job: Job,
 }
@@ -63,6 +64,7 @@ enum Message {
     ZimChosen(Option<PathBuf>),
     DetailsLoaded(Result<String, String>),
     DeviceChosen(Device),
+    ImagesToggled(bool),
     Convert,
     OutputChosen(Option<PathBuf>),
     Conversion(Event),
@@ -82,6 +84,7 @@ impl App {
             zim: None,
             details: None,
             device: Device::default(),
+            images: true,
             loading: false,
             job: Job::Idle,
         };
@@ -126,6 +129,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.device = device;
             Task::none()
         }
+        Message::ImagesToggled(on) => {
+            app.images = on;
+            Task::none()
+        }
         Message::Convert => {
             let Some(zim) = app.zim.clone() else {
                 return Task::none();
@@ -166,9 +173,13 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 cancel: cancel.clone(),
             };
             let device = app.device.converter();
+            let with_images = app.images;
             let (tx, rx) = iced::futures::channel::mpsc::unbounded();
             std::thread::spawn(move || {
-                let opts = xwa_convert::Options::new(device);
+                let opts = xwa_convert::Options {
+                    images: with_images,
+                    ..xwa_convert::Options::new(device)
+                };
                 let result = xwa_convert::convert(&zim, &out, &opts, &mut |p| {
                     let _ = tx.unbounded_send(Event::Progress(p));
                     !cancel.load(Ordering::Relaxed)
@@ -190,9 +201,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 *stage = match p.stage {
                     Stage::Scanning => "Reading the ZIM file…",
                     Stage::Articles => "Converting articles…",
+                    Stage::Images => "Converting pictures…",
                     Stage::Finishing => "Finishing…",
                 };
-                // Reading takes a few percent of the time, articles most of it.
+                // Rough shares of the time: reading 5%, articles 55%,
+                // pictures 35%, finishing 5%.
                 let part = if p.total == 0 {
                     1.0
                 } else {
@@ -200,7 +213,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 };
                 *fraction = match p.stage {
                     Stage::Scanning => 0.05 * part,
-                    Stage::Articles => 0.05 + 0.9 * part,
+                    Stage::Articles => 0.05 + 0.55 * part,
+                    Stage::Images => 0.60 + 0.35 * part,
                     Stage::Finishing => 0.95 + 0.05 * part,
                 };
             }
@@ -228,10 +242,14 @@ fn summary(r: &xwa_convert::Report, out: &Path, device: xwa_convert::Device) -> 
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let pictures = match r.summary.images {
+        0 => "no pictures".to_string(),
+        n => format!("{n} pictures"),
+    };
     format!(
-        "Done: {} articles in {} ({:.0} MB), made for the {}.\n\
+        "Done: {} articles and {pictures} in {} ({:.0} MB), made for the {}.\n\
          Copy it to your e-reader's SD card.\n\
-         Pictures are not included yet, and formulas appear as text for now.",
+         Formulas appear as text for now.",
         r.summary.articles,
         name,
         (r.summary.file_size as f64 / 1e6).max(1.0),
@@ -297,6 +315,9 @@ fn view(app: &App) -> Element<'_, Message> {
         row![choose, text(file)].spacing(12),
         details,
         row![text("Device"), devices].spacing(12),
+        checkbox(app.images)
+            .label("Include pictures")
+            .on_toggle_maybe((!running).then_some(Message::ImagesToggled)),
         convert,
         status,
     ]
