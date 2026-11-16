@@ -53,6 +53,8 @@ pub struct ArticleRecord {
 
 impl ArticleRecord {
     pub const SIZE: usize = 16;
+    /// Where the popularity byte is in an encoded record.
+    pub const POPULARITY: usize = 14;
 
     pub fn encode(&self) -> [u8; Self::SIZE] {
         let mut b = [0u8; Self::SIZE];
@@ -61,7 +63,7 @@ impl ArticleRecord {
         b[6..8].copy_from_slice(&self.chunk_count.to_le_bytes());
         b[8..12].copy_from_slice(&self.title_ref.to_le_bytes());
         b[12..14].copy_from_slice(&self.flags.to_le_bytes());
-        b[14] = self.popularity;
+        b[Self::POPULARITY] = self.popularity;
         b
     }
 

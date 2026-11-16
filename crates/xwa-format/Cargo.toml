@@ -13,3 +13,4 @@ crc32c.workspace = true
 libdeflater.workspace = true
 zstd.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true

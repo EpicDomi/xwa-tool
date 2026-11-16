@@ -5082,6 +5082,7 @@ dependencies = [
  "caseless",
  "crc32c",
  "libdeflater",
+ "tempfile",
  "thiserror 2.0.21",
  "unicode-normalization",
  "zstd",
