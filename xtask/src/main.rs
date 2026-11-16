@@ -3,9 +3,11 @@
 //! `cargo xtask licenses [--target TRIPLE]... [--out FILE]` writes the
 //! third-party notice that ships with releases: every crate compiled into
 //! the xwa-tool and xwa-tool-gui programs for the given targets (all release
-//! targets by default), then their licence texts. It fails when a crate's
-//! licence is not one of [`ACCEPTED`], or when a crate ships no licence text
-//! and there is no standard one for its licence in `xtask/licenses/`.
+//! targets by default), then their licence texts. It puts no limits on which
+//! crates may be used: a crate whatever its licence is listed with the texts
+//! it ships, one that ships none gets the standard text of its licence when
+//! `xtask/licenses/` has one, and anything missing is a warning, never an
+//! error.
 
 mod spdx;
 
@@ -27,27 +29,17 @@ const RELEASE_TARGETS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
 ];
 
-/// Licences the shipped programs may contain code under, in order of
-/// preference where a crate offers a choice. Copyleft licences are left out
-/// on purpose: xwa-tool is public domain, and anyone may use its programs
-/// for anything.
-const ACCEPTED: &[&str] = &[
+/// The order standard texts are picked in, for a crate that ships no text
+/// and offers a choice of licences.
+const PREFERENCE: &[&str] = &[
     "MIT",
     "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
     "Zlib",
-    "BSD-3-Clause",
-    "BSD-2-Clause",
-    "ISC",
-    "0BSD",
-    "Unlicense",
-    "CC0-1.0",
     "BSL-1.0",
-    "Unicode-3.0",
     "MPL-2.0",
-    "IJG",
-    "OFL-1.1",
-    "CDLA-Permissive-2.0",
+    "CC0-1.0",
+    "Unlicense",
+    "0BSD",
 ];
 
 /// Statements some licences require in a program's documentation.
@@ -112,7 +104,7 @@ fn licenses(args: &[String]) -> Result<(), String> {
                 .or_insert(c);
         }
     }
-    let notice = notice(&crates.into_values().collect::<Vec<_>>(), &targets)?;
+    let notice = notice(&crates.into_values().collect::<Vec<_>>(), &targets);
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -251,15 +243,13 @@ struct Notice {
 }
 
 fn rank(id: &str) -> usize {
-    ACCEPTED.iter().position(|a| *a == id).unwrap_or(usize::MAX)
+    PREFERENCE
+        .iter()
+        .position(|a| *a == id)
+        .unwrap_or(usize::MAX)
 }
 
-fn accepted(id: &str) -> bool {
-    ACCEPTED.contains(&id)
-}
-
-fn notice(crates: &[Crate], targets: &[String]) -> Result<Notice, String> {
-    let mut problems = Vec::new();
+fn notice(crates: &[Crate], targets: &[String]) -> Notice {
     let mut warnings = Vec::new();
     // Licence texts, each with the crates that ship it, in order of first use.
     let mut texts: Vec<(String, Vec<String>)> = Vec::new();
@@ -277,28 +267,16 @@ fn notice(crates: &[Crate], targets: &[String]) -> Result<Notice, String> {
 
     for c in crates {
         let label = format!("{} {}", c.name, c.version);
-        let files = match licence_files(c) {
-            Ok(files) => files,
-            Err(e) => {
-                problems.push(e);
-                continue;
-            }
-        };
-        if c.license == "LicenseRef-file" {
-            // Only a licence file: nothing to check it against.
-            for (_, body) in files {
-                add_text(body, label.clone());
-            }
-            continue;
-        }
+        let (files, trouble) = licence_files(c);
+        warnings.extend(trouble);
         let expr = match spdx::parse(&c.license) {
-            Ok(e) => e,
+            Ok(e) => Some(e),
             Err(e) => {
-                problems.push(format!("{label}: {e}"));
-                continue;
+                warnings.push(format!("{label}: {e}"));
+                None
             }
         };
-        for id in spdx::ids(&expr) {
+        for id in expr.iter().flat_map(spdx::ids) {
             if let Some((_, statement)) = ACKNOWLEDGEMENTS.iter().find(|(l, _)| *l == id) {
                 acknowledged.insert(*statement);
             }
@@ -310,38 +288,28 @@ fn notice(crates: &[Crate], targets: &[String]) -> Result<Notice, String> {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
-        let covered = |id: &str| accepted(id) && shows(&all_text, id);
-        // Prefer the licences whose texts the crate ships; fill in the rest
-        // from the standard texts.
-        let missing = if spdx::choose(&expr, &covered, &rank).is_some() {
-            Vec::new()
-        } else {
-            let usable =
-                |id: &str| accepted(id) && (shows(&all_text, id) || standard(id).is_some());
-            match spdx::choose(&expr, &usable, &rank) {
-                Some(ids) => ids.into_iter().filter(|id| !shows(&all_text, id)).collect(),
-                None if spdx::choose(&expr, &accepted, &rank).is_some() => {
-                    problems.push(format!(
-                        "{label} ({}) ships no text for its licence; add one to xtask/licenses/",
-                        c.license
-                    ));
-                    continue;
-                }
-                None => {
-                    problems.push(format!(
-                        "{label} is under {}, which is not an accepted licence",
-                        c.license
-                    ));
-                    continue;
+        // The crate's own texts, plus standard texts for licences they leave
+        // out, where there are some.
+        let missing: Vec<String> = match &expr {
+            Some(expr) => {
+                let shown = |id: &str| shows(&all_text, id);
+                let usable = |id: &str| shows(&all_text, id) || standard(id).is_some();
+                if spdx::choose(expr, &shown, &rank).is_some() {
+                    Vec::new()
+                } else {
+                    spdx::choose(expr, &usable, &rank)
+                        .map(|ids| ids.into_iter().filter(|id| !shown(id)).collect())
+                        .unwrap_or_default()
                 }
             }
+            None => Vec::new(),
         };
         let ships_texts = !files.is_empty();
         for (_, body) in files {
             add_text(body, label.clone());
         }
-        for id in missing {
-            let text = standard(&id).expect("chosen from the standard texts");
+        for id in &missing {
+            let text = standard(id).expect("chosen from the standard texts");
             let body = if ["MIT", "Zlib"].contains(&id.as_str()) {
                 format!("Copyright (c) {}\n\n{text}", c.holders)
             } else {
@@ -354,9 +322,16 @@ fn notice(crates: &[Crate], targets: &[String]) -> Result<Notice, String> {
             }
             add_text(body, label.clone());
         }
-    }
-    if !problems.is_empty() {
-        return Err(problems.join("\n"));
+        if !ships_texts && missing.is_empty() {
+            warnings.push(format!("{label}: no licence text found for {}", c.license));
+            add_text(
+                format!(
+                    "{label} is under {}; its source, which states its terms, is at {}.",
+                    c.license, c.url
+                ),
+                label.clone(),
+            );
+        }
     }
 
     let mut out = String::new();
@@ -391,12 +366,12 @@ fn notice(crates: &[Crate], targets: &[String]) -> Result<Notice, String> {
         out.push_str(body);
         out.push('\n');
     }
-    Ok(Notice {
+    Notice {
         text: out,
         crates: crates.len(),
         texts: texts.len(),
         warnings,
-    })
+    }
 }
 
 const HEADER: &str = "\
@@ -436,11 +411,18 @@ fn is_licence_name(name: &str) -> bool {
 
 /// The crate's licence files, as (path in the crate, text): those in its top
 /// folder or a `LICENSES` folder there, its `license-file`, and any listed
-/// in [`NESTED`].
-fn licence_files(c: &Crate) -> Result<Vec<(String, String)>, String> {
+/// in [`NESTED`]. Files that cannot be read are warnings.
+fn licence_files(c: &Crate) -> (Vec<(String, String)>, Vec<String>) {
+    let mut warnings = Vec::new();
     let mut paths = BTreeSet::new();
-    let entries = std::fs::read_dir(&c.dir).map_err(|e| format!("{}: {e}", c.dir.display()))?;
-    for entry in entries.flatten() {
+    let entries = match std::fs::read_dir(&c.dir) {
+        Ok(entries) => entries.flatten().collect(),
+        Err(e) => {
+            warnings.push(format!("{}: {e}", c.dir.display()));
+            Vec::new()
+        }
+    };
+    for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !is_licence_name(&name) {
             continue;
@@ -461,23 +443,24 @@ fn licence_files(c: &Crate) -> Result<Vec<(String, String)>, String> {
     }
     for (_, nested) in NESTED.iter().filter(|(n, _)| *n == c.name) {
         for path in *nested {
-            if !c.dir.join(path).is_file() {
-                return Err(format!(
-                    "{} {}: {path} is gone; update NESTED in xtask/src/main.rs",
+            if c.dir.join(path).is_file() {
+                paths.insert(path.to_string());
+            } else {
+                warnings.push(format!(
+                    "{} {}: {path} is gone; NESTED in xtask/src/main.rs lists it",
                     c.name, c.version
                 ));
             }
-            paths.insert(path.to_string());
         }
     }
-    paths
-        .into_iter()
-        .map(|p| {
-            let bytes = std::fs::read(c.dir.join(&p))
-                .map_err(|e| format!("{} {}: {p}: {e}", c.name, c.version))?;
-            Ok((p, decode(&bytes)))
-        })
-        .collect()
+    let mut files = Vec::new();
+    for p in paths {
+        match std::fs::read(c.dir.join(&p)) {
+            Ok(bytes) => files.push((p, decode(&bytes))),
+            Err(e) => warnings.push(format!("{} {}: {p}: {e}", c.name, c.version)),
+        }
+    }
+    (files, warnings)
 }
 
 /// UTF-8, or Latin-1 for the odd older file.
@@ -639,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_texts_and_refuses_what_it_cannot_cover() {
+    fn writes_texts_for_any_licence_and_never_refuses() {
         let tmp = std::env::temp_dir().join(format!("xtask-notice-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let shipped = fake(
@@ -662,7 +645,7 @@ mod tests {
             )],
         );
         let targets = ["x86_64-unknown-linux-gnu".to_string()];
-        let n = notice(&[bare.clone(), shipped.clone(), twin], &targets).unwrap();
+        let n = notice(&[bare.clone(), shipped.clone(), twin], &targets);
         assert!(n.warnings.is_empty(), "{:?}", n.warnings);
         assert_eq!(n.crates, 3);
         assert_eq!(n.texts, 2, "the two copies of Bob's text are one");
@@ -689,25 +672,29 @@ mod tests {
         );
         assert!(
             notice(&[ijg], &targets)
-                .unwrap()
                 .text
                 .contains("based in part on the work of the Independent JPEG Group")
         );
 
+        // Any licence goes in, with its own text and no complaint.
         let gpl = fake(
             &tmp,
             "gpl",
             "GPL-3.0-only",
             &[("COPYING", "GNU GENERAL PUBLIC LICENSE")],
         );
-        let err = notice(&[shipped.clone(), gpl], &targets).err().unwrap();
-        assert!(err.contains("gpl 1.0.0 is under GPL-3.0-only"), "{err}");
+        let n = notice(&[shipped.clone(), gpl], &targets);
+        assert!(n.warnings.is_empty(), "{:?}", n.warnings);
+        assert!(n.text.contains("Used by gpl 1.0.0\n") && n.text.contains("GNU GENERAL"));
+        // With no text to be had, the notice says where the terms are.
         let unicode = fake(&tmp, "uni", "Unicode-3.0", &[]);
-        let err = notice(&[unicode], &targets).err().unwrap();
-        assert!(
-            err.contains("uni 1.0.0 (Unicode-3.0) ships no text"),
-            "{err}"
-        );
+        let odd = fake(&tmp, "odd", "MIT OR", &[("LICENSE", "Some terms")]);
+        let n = notice(&[unicode, odd], &targets);
+        assert_eq!(n.warnings.len(), 2, "{:?}", n.warnings);
+        assert!(n.text.contains(
+            "uni 1.0.0 is under Unicode-3.0; its source, which states its terms, is at https://example.org/uni."
+        ));
+        assert!(n.text.contains("Some terms"));
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

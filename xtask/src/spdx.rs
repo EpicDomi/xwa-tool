@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn chooses_the_preferred_acceptable_licences() {
+    fn chooses_the_preferred_available_licences() {
         let order = ["MIT", "Apache-2.0", "Unicode-3.0", "IJG"];
         let accepted = |id: &str| order.contains(&id);
         let rank = |id: &str| order.iter().position(|o| *o == id).unwrap_or(usize::MAX);

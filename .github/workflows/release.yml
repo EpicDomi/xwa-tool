@@ -68,7 +68,9 @@ jobs:
           cp -r LICENSE licenses dist/
           targets=""
           for t in ${{ matrix.targets }}; do targets="$targets --target $t"; done
-          cargo xtask licenses $targets --out dist/THIRD-PARTY-LICENSES.txt
+          # The notice never holds a release up.
+          cargo xtask licenses $targets --out dist/THIRD-PARTY-LICENSES.txt \
+            || echo "::warning::the third-party notice could not be written"
           cd dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then 7z a ../xwa-tool-${{ matrix.name }}.zip .; else zip -r ../xwa-tool-${{ matrix.name }}.zip .; fi
       - name: Publish

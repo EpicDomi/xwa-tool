@@ -30,6 +30,4 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   and `cargo test --workspace` passing; CI runs all three on Windows, macOS
   and Linux.
 - The GUI targets non-technical users: plain wording, no jargon.
-- New dependencies must be under a licence `xtask/src/main.rs` accepts (no
-  copyleft); CI runs `cargo xtask licenses` to check.
 - Do not commit, tag, or push unless the user asks.

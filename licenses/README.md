@@ -2,8 +2,8 @@
 
 Every release zip has a `THIRD-PARTY-LICENSES.txt`: each Rust crate built
 into the programs, with its licence and source repository, then the licence
-texts. `cargo xtask licenses` writes it (to `target/` by default); CI checks
-that every dependency is under an accepted licence.
+texts. `cargo xtask licenses` writes it (to `target/` by default). It is
+for information only: it never limits which crates xwa-tool may use.
 
 xwa-tool embeds KaTeX's fonts (through the katex-native crate) to draw
 formulas. They are under the SIL Open Font License 1.1; see
