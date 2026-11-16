@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use xwa_convert::{Device, Stage};
+use xwa_fetch::wikimedia::Diagrams;
 use xwa_format::normalize::search_key;
 use xwa_format::reader::{self, Archive as Xwa};
 use xwa_format::records::image_encoding;
@@ -51,6 +52,13 @@ enum Command {
         /// Write formulas as text instead of drawing them.
         #[arg(long)]
         math_as_text: bool,
+        /// Download sharper copies of diagrams from Wikimedia (needs the internet).
+        #[arg(long)]
+        hd_diagrams: bool,
+        /// Where downloaded diagrams are kept for next time (default: the
+        /// system's cache folder).
+        #[arg(long, requires = "hd_diagrams")]
+        hd_cache: Option<PathBuf>,
     },
     /// List the ZIM files in the Kiwix library.
     Catalog {
@@ -82,7 +90,9 @@ enum Command {
     Copy {
         /// The XWA file.
         file: PathBuf,
-        /// Folder to copy into (default: the one removable drive, if there is exactly one).
+        /// The SD card, or a folder standing for it (default: the one removable
+        /// drive, if there is exactly one). The archive goes in its `wiki` folder,
+        /// where the e-reader looks for archives.
         #[arg(long)]
         to: Option<PathBuf>,
     },
@@ -168,20 +178,28 @@ fn main() -> ExitCode {
             no_images,
             jpeg_quality,
             math_as_text,
+            hd_diagrams,
+            hd_cache,
         } => {
             let device = match device {
                 DeviceArg::X4Pro => Device::X4Pro,
                 DeviceArg::X4 => Device::X4,
                 DeviceArg::X3 => Device::X3,
             };
-            let opts = xwa_convert::Options {
-                device,
-                threads,
-                images: !no_images,
-                jpeg_quality,
-                math: !math_as_text,
-            };
-            convert(&zim, out, &opts)
+            match diagram_source(hd_diagrams && !no_images, hd_cache) {
+                Ok(diagrams) => {
+                    let opts = xwa_convert::Options {
+                        device,
+                        threads,
+                        images: !no_images,
+                        jpeg_quality,
+                        math: !math_as_text,
+                        diagrams,
+                    };
+                    convert(&zim, out, &opts)
+                }
+                Err(e) => Err(e),
+            }
         }
         Command::Catalog {
             lang,
@@ -205,6 +223,23 @@ fn main() -> ExitCode {
     }
 }
 
+/// Wikimedia, for `--hd-diagrams`. `XWA_TOOL_UPLOADS` points it at another
+/// server laid out the same way, for testing.
+fn diagram_source(
+    wanted: bool,
+    cache: Option<PathBuf>,
+) -> Result<Option<std::sync::Arc<Diagrams>>, Box<dyn Error>> {
+    if !wanted {
+        return Ok(None);
+    }
+    let cache = cache
+        .or_else(Diagrams::default_cache)
+        .ok_or("no cache folder for diagrams; pass --hd-cache")?;
+    let base = std::env::var("XWA_TOOL_UPLOADS")
+        .unwrap_or_else(|_| xwa_fetch::wikimedia::UPLOADS.to_string());
+    Ok(Some(std::sync::Arc::new(Diagrams::with_base(&base, cache))))
+}
+
 fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> CliResult {
     let device = opts.device;
     let out = out.unwrap_or_else(|| zim.with_extension("xwa"));
@@ -216,6 +251,7 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         let stage = match p.stage {
             Stage::Scanning => "reading the ZIM directory",
             Stage::Articles => "converting articles",
+            Stage::Diagrams => "downloading sharper diagrams",
             Stage::Images => "converting pictures",
             Stage::Finishing => "writing the title index and tables",
         };
@@ -256,6 +292,20 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         r.stats.images,
         r.stats.images_skipped
     );
+    if let Some(d) = &r.diagrams {
+        println!(
+            "  sharper diagrams: {} of {} pictures drawn from SVG; {} downloaded ({:.1} MB), {} not on Wikimedia, {} failed",
+            r.sharper_images,
+            d.wanted,
+            d.downloaded,
+            mb(d.bytes),
+            d.missing,
+            d.failed
+        );
+        if let Some(why) = &d.stopped {
+            println!("  sharper diagrams stopped early: {why}");
+        }
+    }
     println!(
         "  formulas: {} drawn as math, {} as text",
         r.stats.formulas_drawn,
@@ -358,7 +408,7 @@ fn download(name: &str, flavour: &str, dir: &Path) -> CliResult {
 
 fn copy(file: &Path, to: Option<&Path>) -> CliResult {
     let drives = xwa_fetch::drives::removable();
-    let (dir, drive) = match to {
+    let (card, drive) = match to {
         Some(dir) => (
             dir.to_path_buf(),
             drives.iter().find(|d| dir.starts_with(&d.mount)),
@@ -374,6 +424,7 @@ fn copy(file: &Path, to: Option<&Path>) -> CliResult {
             }
         },
     };
+    let dir = xwa_fetch::drives::archive_dir(&card);
     let mut progress = Progress::new();
     let result = xwa_fetch::drives::copy(file, &dir, drive, &mut |p| {
         transfer_progress(&mut progress, p);

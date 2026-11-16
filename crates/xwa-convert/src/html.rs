@@ -44,6 +44,9 @@ pub struct ImageUse {
     /// The key [`Resolver::image`] gave.
     pub key: u32,
     pub kind: Kind,
+    /// The original's size on the wiki (`data-file-width`, `-height`), or
+    /// zeros if the page does not say.
+    pub source_size: (u32, u32),
 }
 
 /// Counts for the conversion report.
@@ -542,11 +545,19 @@ impl Cx<'_> {
         } else {
             Kind::Photo
         };
+        let source_size = (
+            dim("data-file-width").unwrap_or(0),
+            dim("data-file-height").unwrap_or(0),
+        );
         self.stats.images += 1;
         let next = self.images.len() as u32;
         let images = &mut self.images;
         Some(*self.image_slots.entry(key).or_insert_with(|| {
-            images.push(ImageUse { key, kind });
+            images.push(ImageUse {
+                key,
+                kind,
+                source_size,
+            });
             next
         }))
     }
@@ -1979,7 +1990,7 @@ mod image_tests {
               <tr><td class="infobox-image"><span typeof="mw:File"><a><img src="./_assets_/h/Photo.jpg" width="220" height="150"></a></span><div class="infobox-caption">A bust</div></td></tr>
               <tr><th>Flag</th><td><span typeof="mw:File"><img src="./_assets_/h/Flag.png" width="23" height="15"></span> Greece</td></tr>
             </tbody></table>
-            <figure typeof="mw:File/Thumb"><a><img src="./_assets_/h/Diagram.svg.png" data-file-type="drawing" width="300" height="200"></a><figcaption>The <a rel="mw:WikiLink" href="A">proof</a></figcaption></figure>
+            <figure typeof="mw:File/Thumb"><a><img src="./_assets_/h/Diagram.svg.png" data-file-type="drawing" data-file-width="600" data-file-height="400" width="300" height="200"></a><figcaption>The <a rel="mw:WikiLink" href="A">proof</a></figcaption></figure>
             <figure typeof="mw:File/Thumb"><a><img src="./_assets_/h/Missing.jpg"></a><figcaption>Gone</figcaption></figure>
             <ul class="gallery mw-gallery-traditional"><li class="gallerybox"><div class="thumb"><span typeof="mw:File"><img src="./_assets_/h/Photo.jpg"></span></div><div class="gallerytext">Again</div></li></ul>
             <p>See <span typeof="mw:File"><img src="./_assets_/h/Flag.png" width="20" height="14"></span> here.</p>"#);
@@ -1989,15 +2000,18 @@ mod image_tests {
             vec![
                 ImageUse {
                     key: 10,
-                    kind: Kind::Photo
+                    kind: Kind::Photo,
+                    source_size: (0, 0)
                 },
                 ImageUse {
                     key: 12,
-                    kind: Kind::Icon
+                    kind: Kind::Icon,
+                    source_size: (0, 0)
                 },
                 ImageUse {
                     key: 11,
-                    kind: Kind::Drawing
+                    kind: Kind::Drawing,
+                    source_size: (600, 400)
                 },
             ]
         );

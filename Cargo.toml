@@ -27,6 +27,7 @@ ego-tree = "0.11"
 rayon = "1.12"
 percent-encoding = "2.3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+tempfile = "3.27"
 image = { version = "0.25", default-features = false, features = ["webp", "png", "jpeg", "gif"] }
 jpeg-encoder = "0.7"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
@@ -35,6 +36,7 @@ ttf-parser = "0.25"
 ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
 quick-xml = "0.42"
 sha2 = "0.11"
+md-5 = "0.11"
 sysinfo = { version = "0.40", default-features = false, features = ["disk"] }
 dirs = "7"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }

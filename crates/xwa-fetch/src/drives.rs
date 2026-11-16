@@ -19,6 +19,22 @@ pub struct Drive {
 /// The largest file FAT32 can hold.
 pub const FAT32_MAX: u64 = (4 << 30) - 1;
 
+/// The folder at the top of the card where the firmware looks for archives.
+pub const ARCHIVE_FOLDER: &str = "wiki";
+
+/// Where archives go on a card, or on a folder standing for one: its
+/// [`ARCHIVE_FOLDER`], or `card` itself if it already is that folder.
+pub fn archive_dir(card: &Path) -> PathBuf {
+    if card
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case(ARCHIVE_FOLDER))
+    {
+        card.to_path_buf()
+    } else {
+        card.join(ARCHIVE_FOLDER)
+    }
+}
+
 impl Drive {
     pub fn is_fat32(&self) -> bool {
         matches!(
@@ -180,6 +196,22 @@ mod tests {
                 .is_none()
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn archives_go_in_the_wiki_folder() {
+        assert_eq!(
+            archive_dir(Path::new("/media/me/SDCARD")),
+            Path::new("/media/me/SDCARD/wiki")
+        );
+        assert_eq!(
+            archive_dir(Path::new("E:\\")),
+            Path::new("E:\\").join("wiki")
+        );
+        assert_eq!(
+            archive_dir(Path::new("/media/me/SDCARD/WIKI")),
+            Path::new("/media/me/SDCARD/WIKI")
+        );
     }
 
     #[test]

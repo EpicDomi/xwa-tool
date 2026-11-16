@@ -29,7 +29,8 @@ Early. What works today:
   searchable alternative titles.
 - `xwa-fetch`: the Kiwix library catalog, downloads (resumed after an
   interruption, mirrors tried in turn, checked against their SHA-256), and
-  copying archives to SD cards (with FAT32's 4 GB limit checked first).
+  copying archives to SD cards (into the card's `wiki` folder, where the
+  e-reader looks for them, with FAT32's 4 GB limit checked first).
 - `xwa-tool`: command line with `catalog`, `download`, `convert`, `copy`,
   `info`, `verify`, `dump` and `title-index`.
 - `xwa-tool-gui`: a desktop app. "Get Wikipedia" lists the Kiwix library
@@ -50,6 +51,15 @@ cargo build --release
 `--jpeg-quality` (default 75) trades photo quality for size, and
 `--math-as-text` writes formulas as text instead of drawing them.
 
+`--hd-diagrams` (in the app: "Download sharper diagrams from Wikipedia")
+replaces the ZIM's small pictures of SVG diagrams with sharper renderings,
+800 px on the long side, from Wikimedia's thumbnail service. It needs the
+internet and takes longer: requests go a few at a time, at Wikimedia's
+standard thumbnail widths, and wait whenever Wikimedia asks. Diagrams it
+cannot get keep the ZIM's picture. Downloads are kept in `xwa-tool/diagrams`
+in the system's cache folder (or `--hd-cache DIR`), so converting again
+downloads nothing; delete that folder to free the space.
+
 Measured on English Wikipedia ZIMs (4 cores), with pictures and drawn
 formulas:
 
@@ -63,6 +73,14 @@ Without pictures the same archives are 2.2, 27.2 and 71.6 MB for the X4
 Pro. `xwa-tool dump wiki.xwa --title "Pythagorean theorem" --formulas
 page.html` draws an article's formulas into a web page, for checking.
 
+Memory use stays small whatever the size of the Wikipedia: titles are
+sorted on disk in batches, and the converter keeps 12 bytes per page.
+Swedish Wikipedia (the 4.0 GB "mini" ZIM: 5.0 million entries, 2.6 million
+articles) converts in 9 min 39 s with at most 335 MB of memory, where it
+took 10 min 48 s and 1,430 MB before. A title index the size of English
+Wikipedia's (18.5 million titles) builds in 83 MB instead of 3.2 GB.
+Temporary files go next to the archive and disappear once it is written.
+
 Getting ZIMs and putting archives on the card:
 
 ```
@@ -70,8 +88,8 @@ xwa-tool catalog                            # English Wikipedia ZIMs in the Kiwi
 xwa-tool catalog --lang fra --search medecine
 xwa-tool catalog --languages
 xwa-tool download wikipedia_en_ray-charles --flavour maxi --dir ~/Downloads
-xwa-tool copy wiki.xwa                      # to the SD card, if exactly one is inserted
-xwa-tool copy wiki.xwa --to /media/me/SDCARD
+xwa-tool copy wiki.xwa                      # to the SD card's wiki folder, if one card is inserted
+xwa-tool copy wiki.xwa --to /media/me/SDCARD  # into /media/me/SDCARD/wiki
 ```
 
 For ZIM and XWA files:

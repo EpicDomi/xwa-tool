@@ -2132,6 +2132,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5065,6 +5075,7 @@ dependencies = [
  "scraper",
  "thiserror 2.0.21",
  "ttf-parser",
+ "xwa-fetch",
  "xwa-format",
  "xwa-zim",
  "xxhash-rust",
@@ -5075,6 +5086,9 @@ dependencies = [
 name = "xwa-fetch"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "md-5",
+ "percent-encoding",
  "quick-xml 0.42.0",
  "sha2",
  "sysinfo",
@@ -5089,6 +5103,7 @@ dependencies = [
  "caseless",
  "crc32c",
  "libdeflater",
+ "tempfile",
  "thiserror 2.0.21",
  "unicode-normalization",
  "zstd",

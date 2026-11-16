@@ -13,12 +13,14 @@ pub mod mathml;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
+use xwa_fetch::wikimedia::{Diagrams, FetchReport, Wanted};
 use xwa_format::Profile;
 use xwa_format::content::{Article, Formula, MathItem, Ref};
-use xwa_format::writer::{ArchiveWriter, Summary, WriterOptions};
+use xwa_format::writer::{ArchiveWriter, Summary, WriterOptions, image_flags};
 use xwa_zim::Target;
 
 use crate::html::{Extracted, Resolver, Stats};
@@ -76,6 +78,9 @@ pub struct Options {
     pub jpeg_quality: u8,
     /// Draw formulas as math; otherwise write them as text.
     pub math: bool,
+    /// Where to get sharper copies of diagrams than the ZIM's pictures
+    /// (Wikimedia, over the internet), if anywhere.
+    pub diagrams: Option<Arc<Diagrams>>,
 }
 
 impl Options {
@@ -86,6 +91,7 @@ impl Options {
             images: true,
             jpeg_quality: 75,
             math: true,
+            diagrams: None,
         }
     }
 }
@@ -97,6 +103,8 @@ pub enum Stage {
     Scanning,
     /// Converting articles; `done` and `total` count articles.
     Articles,
+    /// Downloading sharper diagrams; `done` and `total` count diagrams.
+    Diagrams,
     /// Converting pictures; `done` and `total` count images.
     Images,
     /// Building the title index and writing the tables.
@@ -123,37 +131,38 @@ pub struct Report {
     pub dangling_redirects: u64,
     /// Pages outside Wikipedia's article namespace, such as category pages.
     pub pages_left_out: u64,
+    /// What fetching sharper diagrams did, when asked to.
+    pub diagrams: Option<FetchReport>,
+    /// Pictures stored from a sharper copy.
+    pub sharper_images: u64,
     pub zim_bytes: u64,
     pub elapsed: Duration,
 }
 
+/// An HTML page in the ZIM. Its path and title stay in the ZIM's directory
+/// until they are needed, which keeps memory to 12 bytes a page.
 struct ArticleEntry {
     entry: u32,
-    path: String,
-    title: String,
     cluster: u32,
     blob: u32,
 }
 
-struct Redirect {
-    entry: u32,
-    title: String,
-}
-
 /// What an HTML page in the ZIM is.
+#[derive(Clone, Copy)]
 enum PageKind {
     Article,
-    /// An HTML redirect, to this archive path.
-    Redirect(String),
+    /// An HTML redirect, to this ZIM entry (`NONE` if it leads nowhere).
+    Redirect(u32),
     /// A MediaWiki page outside the article namespace (a category, say).
     OtherNamespace,
 }
 
-/// Where an image's bytes are in the ZIM.
+/// Where an image's bytes are in the ZIM, and its directory entry.
 #[derive(Clone, Copy)]
 struct ImageEntry {
     cluster: u32,
     blob: u32,
+    entry: u32,
 }
 
 /// Link and image lookups for the extractor.
@@ -190,6 +199,8 @@ fn is_raster(mime: &str) -> bool {
 
 const NONE: u32 = u32::MAX;
 const REDIRECT: u32 = 1 << 31;
+/// A redirect whose target is missing; `follow` finds no such entry.
+const NOWHERE: u32 = REDIRECT | (NONE >> 1);
 
 /// Converts the ZIM at `zim_path` into an archive at `out_path`.
 ///
@@ -230,7 +241,6 @@ fn convert_inner(
 
     // Directory scan: candidate articles, redirects, and every content path.
     let mut candidates: Vec<ArticleEntry> = Vec::new();
-    let mut redirects: Vec<Redirect> = Vec::new();
     let mut paths: Vec<(u64, u32)> = Vec::new();
     let mut leads_to = vec![NONE; entry_count as usize];
     let mut image_paths: Vec<(u64, u32)> = Vec::new();
@@ -239,13 +249,7 @@ fn convert_inner(
     let mut cancelled = false;
     let scan = zim.for_each_entry(|e| {
         scanned += 1;
-        if scanned.is_multiple_of(65_536)
-            && !progress(Progress {
-                stage: Stage::Scanning,
-                done: scanned,
-                total: entry_count as u64,
-            })
-        {
+        if scanned.is_multiple_of(65_536) && !progress(scanning(0, scanned, entry_count as u64)) {
             cancelled = true;
             return Err(xwa_zim::Error::Corrupt("cancelled".into()));
         }
@@ -258,7 +262,11 @@ fn convert_inner(
             && zim.mime_type(&e).is_some_and(is_raster)
         {
             image_paths.push((links::path_hash(&e.path), image_entries.len() as u32));
-            image_entries.push(ImageEntry { cluster, blob });
+            image_entries.push(ImageEntry {
+                cluster,
+                blob,
+                entry: e.index,
+            });
             return Ok(());
         }
         // mwoffliner's own files (styles, scripts, assets) start with "_".
@@ -267,23 +275,14 @@ fn convert_inner(
         }
         paths.push((links::path_hash(&e.path), e.index));
         match e.target {
-            Target::Redirect(to) => {
-                leads_to[e.index as usize] = REDIRECT | to;
-                redirects.push(Redirect {
-                    entry: e.index,
-                    title: e.display_title().to_string(),
-                });
-            }
+            Target::Redirect(to) => leads_to[e.index as usize] = REDIRECT | to,
             Target::Blob { cluster, blob }
                 if zim
                     .mime_type(&e)
                     .is_some_and(|m| m.starts_with("text/html")) =>
             {
-                let title = e.display_title().to_string();
                 candidates.push(ArticleEntry {
                     entry: e.index,
-                    path: e.path,
-                    title,
                     cluster,
                     blob,
                 });
@@ -296,8 +295,8 @@ fn convert_inner(
         return Err(Error::Cancelled);
     }
     scan?;
-    let mut check = |stage, done, total| {
-        if progress(Progress { stage, done, total }) {
+    let mut check = |p: Progress| {
+        if progress(p) {
             Ok(())
         } else {
             Err(Error::Cancelled)
@@ -309,54 +308,70 @@ fn convert_inner(
     // mwoffliner writes redirects to a section as tiny HTML pages, and newer
     // ZIMs also hold category pages: find both, so the first become
     // redirects and the second are left out.
-    let kinds: Vec<PageKind> = pool.install(|| {
-        cluster_groups(&candidates)
-            .par_iter()
-            .flat_map_iter(|range| {
-                let cluster = zim.cluster(candidates[range.start].cluster).ok();
-                range
-                    .clone()
-                    .map(|i| {
-                        let Some(html) = cluster
-                            .as_ref()
-                            .and_then(|c| c.blob(candidates[i].blob as usize))
-                        else {
-                            return PageKind::Article;
-                        };
-                        if let Some(url) = links::refresh_target(html)
-                            && let Some(h) = links::resolve_href(&candidates[i].path, &url)
-                        {
-                            return PageKind::Redirect(h.path);
-                        }
-                        match links::page_namespace(html) {
-                            Some(ns) if ns != 0 => PageKind::OtherNamespace,
-                            _ => PageKind::Article,
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    });
-    let mut articles = Vec::with_capacity(candidates.len());
-    let mut pages_left_out = 0u64;
-    for (a, kind) in candidates.into_iter().zip(kinds) {
-        match kind {
-            PageKind::Redirect(path) => {
-                if let Some(to) = by_path.get(&path) {
-                    leads_to[a.entry as usize] = REDIRECT | to;
-                }
-                redirects.push(Redirect {
-                    entry: a.entry,
-                    title: a.title,
-                });
-            }
-            PageKind::OtherNamespace => pages_left_out += 1,
-            PageKind::Article => articles.push(a),
-        }
+    let page_groups = cluster_groups(&candidates);
+    let mut kinds: Vec<PageKind> = Vec::with_capacity(candidates.len());
+    for (n, batch) in page_groups.chunks(threads * 8).enumerate() {
+        let part: Vec<Vec<PageKind>> = pool.install(|| {
+            batch
+                .par_iter()
+                .map(|range| {
+                    let cluster = zim.cluster(candidates[range.start].cluster).ok();
+                    range
+                        .clone()
+                        .map(|i| {
+                            let Some(html) = cluster
+                                .as_ref()
+                                .and_then(|c| c.blob(candidates[i].blob as usize))
+                            else {
+                                return PageKind::Article;
+                            };
+                            if let Some(url) = links::refresh_target(html) {
+                                // The target is relative to the page's own path.
+                                let to = zim
+                                    .entry(candidates[i].entry)
+                                    .ok()
+                                    .and_then(|e| links::resolve_href(&e.path, &url))
+                                    .and_then(|h| by_path.get(&h.path));
+                                return PageKind::Redirect(to.unwrap_or(NONE));
+                            }
+                            match links::page_namespace(html) {
+                                Some(ns) if ns != 0 => PageKind::OtherNamespace,
+                                _ => PageKind::Article,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        });
+        kinds.extend(part.into_iter().flatten());
+        let done = ((n + 1) * threads * 8).min(page_groups.len());
+        check(scanning(1, done as u64, page_groups.len() as u64))?;
     }
+    drop(page_groups);
+    // The candidates that are articles stay, in place.
+    let mut articles = candidates;
+    let mut pages_left_out = 0u64;
+    let mut kind = kinds.into_iter();
+    articles.retain(|a| match kind.next() {
+        Some(PageKind::Redirect(NONE)) => {
+            leads_to[a.entry as usize] = NOWHERE;
+            false
+        }
+        Some(PageKind::Redirect(to)) => {
+            leads_to[a.entry as usize] = REDIRECT | to;
+            false
+        }
+        Some(PageKind::OtherNamespace) => {
+            pages_left_out += 1;
+            false
+        }
+        Some(PageKind::Article) | None => true,
+    });
+    drop(kind);
     if articles.is_empty() {
         return Err(Error::NoArticles);
     }
+    articles.shrink_to_fit();
     for (id, a) in articles.iter().enumerate() {
         leads_to[a.entry as usize] = id as u32;
     }
@@ -370,17 +385,6 @@ fn convert_inner(
         }
         None
     };
-    let mut dangling_redirects = 0u64;
-    let resolved_redirects: Vec<(String, u32)> = redirects
-        .into_iter()
-        .filter_map(|r| match follow(r.entry) {
-            Some(id) => Some((r.title, id)),
-            None => {
-                dangling_redirects += 1;
-                None
-            }
-        })
-        .collect();
     // Links resolve through every path that leads to an article.
     let table = Tables {
         links: PathTable::from_hashed(
@@ -394,13 +398,19 @@ fn convert_inner(
         math: opts.math.then(math::MathEngine::new),
     };
     let main_article = zim.header().main_page.and_then(follow);
-    drop(leads_to);
 
     let profile = opts.device.profile();
+    // Temporary files go next to the archive: the system's temporary folder
+    // may be small, or held in memory.
+    let temp_dir = match out_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
     let mut writer = ArchiveWriter::create(
         out_path,
         WriterOptions {
             threads,
+            temp_dir: Some(temp_dir),
             ..WriterOptions::new(opts.device.profile())
         },
     )?;
@@ -439,19 +449,59 @@ fn convert_inner(
         writer.set_meta("main_article", id.to_string());
     }
 
+    // Every article has its id now, so redirects can be followed; their
+    // titles come from a second pass over the directory, and the entry
+    // table is no longer needed after it.
+    let mut dangling_redirects = 0u64;
+    let mut scanned = 0u64;
+    let mut failure: Option<Error> = None;
+    let rescan = zim.for_each_entry(|e| {
+        scanned += 1;
+        if scanned.is_multiple_of(65_536)
+            && let Err(err) = check(scanning(2, scanned, entry_count as u64))
+        {
+            failure = Some(err);
+            return Err(xwa_zim::Error::Corrupt("cancelled".into()));
+        }
+        let lead = leads_to[e.index as usize];
+        if lead == NONE || lead & REDIRECT == 0 {
+            return Ok(());
+        }
+        match follow(e.index) {
+            Some(id) => {
+                if let Err(err) = writer.add_redirect(e.display_title(), id) {
+                    failure = Some(err.into());
+                    return Err(xwa_zim::Error::Corrupt("stopped".into()));
+                }
+            }
+            None => dangling_redirects += 1,
+        }
+        Ok(())
+    });
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    rescan?;
+    drop(leads_to);
+
     // Articles, a batch of clusters at a time, written in id order.
     let total = articles.len() as u64;
     let mut stats = Stats::default();
     let mut failed_articles = 0u64;
     let mut incoming = vec![0u32; articles.len()];
-    // Image ids in order of first use; each image is stored once.
-    let mut image_ids: HashMap<u32, u32> = HashMap::new();
+    // Image ids in order of first use, by image entry; each image is
+    // stored once.
+    let mut image_ids: Vec<u32> = vec![NONE; image_entries.len()];
     let mut image_uses: Vec<html::ImageUse> = Vec::new();
     // Math glyphs, also numbered in order of first use.
     let mut glyph_ids: HashMap<u32, u32> = HashMap::new();
     let mut glyph_order: Vec<u32> = Vec::new();
     let groups = cluster_groups(&articles);
-    check(Stage::Articles, 0, total)?;
+    check(Progress {
+        stage: Stage::Articles,
+        done: 0,
+        total,
+    })?;
     for batch in groups.chunks(threads * 4) {
         let converted: Vec<Vec<(u32, Option<Extracted>)>> = pool.install(|| {
             batch
@@ -463,11 +513,11 @@ fn convert_inner(
                         .map(|id| {
                             let a = &articles[id];
                             let html = cluster.as_ref().ok().and_then(|c| c.blob(a.blob as usize));
-                            let x = html.map(|h| {
+                            let x = html.zip(zim.entry(a.entry).ok()).map(|(h, e)| {
                                 html::extract(
                                     &String::from_utf8_lossy(h),
-                                    &a.title,
-                                    &a.path,
+                                    e.display_title(),
+                                    &e.path,
                                     id as u32,
                                     &table,
                                 )
@@ -485,10 +535,12 @@ fn convert_inner(
                         .images
                         .iter()
                         .map(|u| {
-                            *image_ids.entry(u.key).or_insert_with(|| {
+                            let id = &mut image_ids[u.key as usize];
+                            if *id == NONE {
                                 image_uses.push(*u);
-                                image_uses.len() as u32 - 1
-                            })
+                                *id = image_uses.len() as u32 - 1;
+                            }
+                            *id
                         })
                         .collect();
                     html::for_each_image_mut(&mut x.article, &mut |i| *i = global[*i as usize]);
@@ -516,7 +568,10 @@ fn convert_inner(
                 }
                 None => {
                     failed_articles += 1;
-                    let title = articles[id as usize].title.clone();
+                    let title = zim
+                        .entry(articles[id as usize].entry)
+                        .map(|e| e.display_title().to_string())
+                        .unwrap_or_default();
                     writer.add_article(
                         id,
                         &Article {
@@ -528,7 +583,61 @@ fn convert_inner(
                 }
             }
         }
-        check(Stage::Articles, writer.article_count() as u64, total)?;
+        check(Progress {
+            stage: Stage::Articles,
+            done: writer.article_count() as u64,
+            total,
+        })?;
+    }
+
+    // Only the formula engine is needed from here on.
+    let math_engine = table.math;
+    drop((table.links, table.images, articles, image_ids));
+
+    // Sharper diagrams, fetched before the pictures are converted: the
+    // image ids of SVG diagrams, and their wiki file names and sizes.
+    let mut sharper_ids: Vec<u32> = Vec::new();
+    let mut wanted: Vec<Wanted> = Vec::new();
+    let mut diagram_report = None;
+    if let Some(source) = &opts.diagrams {
+        for (id, u) in image_uses.iter().enumerate() {
+            if u.kind != images::Kind::Drawing {
+                continue;
+            }
+            let entry = zim.entry(image_entries[u.key as usize].entry);
+            if let Some(file) = entry
+                .ok()
+                .and_then(|e| xwa_fetch::wikimedia::svg_file_name(&e.path))
+            {
+                let (width, height) = u.source_size;
+                sharper_ids.push(id as u32);
+                wanted.push(Wanted {
+                    file,
+                    width,
+                    height,
+                });
+            }
+        }
+        let wiki = wiki_code(&zim);
+        let fetched = source.fetch(&wanted, wiki.as_deref(), &mut |done, total| {
+            check(Progress {
+                stage: Stage::Diagrams,
+                done,
+                total,
+            })
+            .is_ok()
+        });
+        diagram_report = Some(match fetched {
+            Ok(r) => r,
+            Err(xwa_fetch::Error::Cancelled) => return Err(Error::Cancelled),
+            // Sharper diagrams are a bonus: the ZIM's pictures still do.
+            Err(e) => FetchReport {
+                wanted: wanted.len() as u64,
+                failed: wanted.len() as u64,
+                stopped: Some(e.to_string()),
+                ..Default::default()
+            },
+        });
     }
 
     // Pictures, a batch of ZIM clusters at a time, in the ZIM's order.
@@ -538,6 +647,8 @@ fn convert_inner(
         ..images::Settings::new(profile)
     };
     let mut failed_images = 0u64;
+    let mut sharper_images = 0u64;
+    writer.reserve_images(total as u32);
     let mut order: Vec<(ImageEntry, u32)> = image_uses
         .iter()
         .enumerate()
@@ -548,11 +659,15 @@ fn convert_inner(
         order.chunk_by(|a, b| a.0.cluster == b.0.cluster).collect();
     // Keep batches small enough to hold in memory: large clusters alone.
     let mut done = 0u64;
-    check(Stage::Images, 0, total)?;
+    check(Progress {
+        stage: Stage::Images,
+        done: 0,
+        total,
+    })?;
     while !groups.is_empty() {
         let take = groups.len().min(threads * 2);
         let batch: Vec<&[(ImageEntry, u32)]> = groups.drain(..take).collect();
-        let converted: Vec<Vec<(u32, Option<images::Encoded>)>> = pool.install(|| {
+        let converted: Vec<Vec<(u32, Option<images::Encoded>, bool)>> = pool.install(|| {
             batch
                 .par_iter()
                 .map(|group| {
@@ -560,30 +675,48 @@ fn convert_inner(
                     group
                         .iter()
                         .map(|(entry, id)| {
-                            let bytes = cluster.as_ref().and_then(|c| c.blob(entry.blob as usize));
                             let kind = image_uses[*id as usize].kind;
-                            (
-                                *id,
-                                bytes.and_then(|b| images::convert(b, kind, &settings).ok()),
-                            )
+                            // The sharper copy, if one was fetched and reads well.
+                            let hd = opts.diagrams.as_ref().and_then(|source| {
+                                let i = sharper_ids.binary_search(id).ok()?;
+                                let png = source.get(&wanted[i])?;
+                                let mut e = images::convert(&png, kind, &settings).ok()?;
+                                e.info.flags |= image_flags::HD_SOURCE;
+                                Some(e)
+                            });
+                            if hd.is_some() {
+                                return (*id, hd, true);
+                            }
+                            let bytes = cluster.as_ref().and_then(|c| c.blob(entry.blob as usize));
+                            let e = bytes.and_then(|b| images::convert(b, kind, &settings).ok());
+                            (*id, e, false)
                         })
                         .collect()
                 })
                 .collect()
         });
-        for (id, encoded) in converted.into_iter().flatten() {
+        for (id, encoded, hd) in converted.into_iter().flatten() {
             let e = encoded.unwrap_or_else(|| {
                 failed_images += 1;
                 images::placeholder(profile)
             });
+            sharper_images += hd as u64;
             writer.add_image(id, e.info, e.data)?;
             done += 1;
         }
-        check(Stage::Images, done, total)?;
+        check(Progress {
+            stage: Stage::Images,
+            done,
+            total,
+        })?;
     }
 
-    check(Stage::Finishing, 0, 1)?;
-    if let Some(engine) = &table.math
+    check(Progress {
+        stage: Stage::Finishing,
+        done: 0,
+        total: 1,
+    })?;
+    if let Some(engine) = &math_engine
         && !glyph_order.is_empty()
     {
         let glyphs = xwa_format::math_glyphs::encode(&engine.glyph_table(&glyph_order))?;
@@ -593,16 +726,17 @@ fn convert_inner(
             "Formula glyphs from the KaTeX fonts, SIL Open Font License 1.1",
         );
     }
-    for (title, id) in &resolved_redirects {
-        writer.add_redirect(title, *id);
-    }
     for (id, n) in incoming.iter().enumerate() {
         // Log scale: 1 link -> 13, 1,000 -> 130, 500,000+ -> 255.
         let popularity = ((1.0 + *n as f64).log2() * 13.0).round().min(255.0) as u8;
         writer.set_popularity(id as u32, popularity)?;
     }
     let (_, summary) = writer.finish()?;
-    check(Stage::Finishing, 1, 1)?;
+    check(Progress {
+        stage: Stage::Finishing,
+        done: 1,
+        total: 1,
+    })?;
     Ok(Report {
         summary,
         stats,
@@ -610,9 +744,31 @@ fn convert_inner(
         failed_images,
         dangling_redirects,
         pages_left_out,
+        diagrams: diagram_report,
+        sharper_images,
         zim_bytes,
         elapsed: started.elapsed(),
     })
+}
+
+/// The code of the wiki a ZIM was made from ("en" for
+/// `wikipedia_en_all`), where diagrams not on Commons are looked for.
+fn wiki_code(zim: &xwa_zim::Archive) -> Option<String> {
+    let name = zim.metadata("Name").ok()??;
+    let name = String::from_utf8_lossy(&name);
+    let code = name.strip_prefix("wikipedia_")?.split('_').next()?;
+    (!code.is_empty()).then(|| code.to_string())
+}
+
+/// Progress through the scanning stage's three passes (the directory, the
+/// pages, the directory again for redirects) as one figure.
+fn scanning(pass: u64, done: u64, total: u64) -> Progress {
+    const PART: u64 = 1 << 20;
+    Progress {
+        stage: Stage::Scanning,
+        done: pass * PART + done.min(total) * PART / total.max(1),
+        total: 3 * PART,
+    }
 }
 
 /// Index ranges of entries that share a cluster (input sorted by cluster).

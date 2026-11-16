@@ -76,7 +76,7 @@ fn build(path: &Path) {
     };
     w.add_article(0, &pythagoras, 0).unwrap();
     w.add_article(1, &geometry, 0).unwrap();
-    w.add_redirect("Pythagoras' theorem", 0);
+    w.add_redirect("Pythagoras' theorem", 0).unwrap();
     let info = ImageInfo {
         encoding: image_encoding::LINE_ART,
         width: 4,
