@@ -68,7 +68,8 @@ fn main() {
     }
     for r in 0..redirects {
         let target = (r % articles as u64) as u32;
-        w.add_redirect(&title(articles as u64 + r), target).unwrap();
+        w.add_redirect(&title(articles as u64 + r), target, None)
+            .unwrap();
     }
     let (_, s) = w.finish().unwrap();
     eprintln!(

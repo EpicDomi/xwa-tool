@@ -26,7 +26,9 @@ Early. What works today:
   written as text with real superscripts and subscripts). Navigation boxes,
   citation markers, reference lists and external-link lists are left out.
   Redirects, including mwoffliner's redirects to a section, become
-  searchable alternative titles.
+  searchable alternative titles. Links to a section of another article,
+  and redirects to a section (from links or from search), open the article
+  at that section.
 - `xwa-fetch`: the Kiwix library catalog, downloads (resumed after an
   interruption, mirrors tried in turn, checked against their SHA-256), and
   copying archives to SD cards (into the card's `wiki` folder, where the

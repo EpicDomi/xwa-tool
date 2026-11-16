@@ -324,7 +324,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                 flags |= article_flags::MATH;
             }
             Ref::Image(_) => flags |= article_flags::IMAGES,
-            Ref::Link(_) | Ref::Table(_) | Ref::Infobox => {}
+            Ref::Link(..) | Ref::Table(_) | Ref::Infobox => {}
         });
         if formulas > 0 {
             self.required |= required::MATH;
@@ -360,7 +360,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         self.titles.write(&len)?;
         self.titles.write(article.title.as_bytes())?;
         if !article.title.is_empty() {
-            self.title_sorter.push(&article.title, id, false)?;
+            self.title_sorter.push(&article.title, id, false, None)?;
         }
         let record = ArticleRecord {
             first_chunk,
@@ -376,9 +376,10 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     }
 
     /// Adds a searchable alternative title for article `target`, which may
-    /// be added later. Redirects that normalise to their target's own key
-    /// are dropped by the index.
-    pub fn add_redirect(&mut self, title: &str, target: u32) -> Result<()> {
+    /// be added later; `anchor` is the hash of the place in it a redirect to
+    /// a section leads to (spec 6.2). Redirects that normalise to their
+    /// target's own key are dropped by the index.
+    pub fn add_redirect(&mut self, title: &str, target: u32, anchor: Option<u32>) -> Result<()> {
         if title.is_empty() {
             return Ok(());
         }
@@ -389,7 +390,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         {
             self.max_redirect = Some((target, title.to_string()));
         }
-        self.title_sorter.push(title, target, true)?;
+        self.title_sorter.push(title, target, true, anchor)?;
         Ok(())
     }
 
@@ -688,7 +689,9 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         let offset = self.start_section()?;
         let sorter = std::mem::replace(&mut self.title_sorter, TitleSorter::new(0, None));
         let mut leaves = LeafWriter::new(&mut self.out);
-        sorter.finish(|key, display, article, flags| leaves.push(key, display, article, flags))?;
+        sorter.finish(|key, display, article, flags, anchor| {
+            leaves.push(key, display, article, flags, anchor)
+        })?;
         let Leaves {
             first_keys,
             redirect_count,

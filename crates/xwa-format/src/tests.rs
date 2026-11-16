@@ -3,11 +3,12 @@
 use std::io::Cursor;
 
 use crate::content::{
-    Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, MathItem, Style, Table,
+    Anchor, Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, MathItem, Place,
+    Style, Table, anchor_hash,
 };
 use crate::reader::Archive;
 use crate::records::{image_encoding, image_kind};
-use crate::title_index::FLAG_REDIRECT;
+use crate::title_index::{FLAG_ANCHOR, FLAG_REDIRECT};
 use crate::writer::{ArchiveWriter, ImageInfo, Summary, WriterOptions};
 use crate::{Error, Profile};
 
@@ -101,7 +102,11 @@ fn article(id: u32) -> Article {
             Inline::Text(words(&mut rng, 30)),
             Inline::Link {
                 article: rng.below(ARTICLES),
-                section: 0,
+                place: if p % 2 == 0 {
+                    Place::TOP
+                } else {
+                    Place::Anchor(anchor_hash(&format!("Section {p}")))
+                },
                 content: vec![Inline::Styled(
                     Style::Italic,
                     vec![Inline::Text(words(&mut rng, 2))],
@@ -163,11 +168,21 @@ fn article(id: u32) -> Article {
             ],
         }
     });
+    // A named place in the first section, when there is one.
+    let anchors = if body.iter().any(|b| matches!(b, Block::Heading { .. })) {
+        vec![Anchor {
+            hash: anchor_hash("Legacy.27s_name"),
+            section: 1,
+        }]
+    } else {
+        Vec::new()
+    };
     Article {
         title,
         body,
         tables,
         infobox,
+        anchors,
     }
 }
 
@@ -286,8 +301,11 @@ fn check_archive(bytes: Vec<u8>, summary: &Summary, profile: Profile) {
     let hits = a.search("alias of 12", 5).unwrap();
     assert_eq!(
         (hits[0].display.as_str(), hits[0].article, hits[0].flags),
-        ("Alias of 12", 12, FLAG_REDIRECT)
+        ("Alias of 12", 12, FLAG_REDIRECT | FLAG_ANCHOR)
     );
+    assert_eq!(hits[0].anchor, Some(anchor_hash("Section 12")));
+    let hits = a.search("alias of 3", 1).unwrap();
+    assert_eq!((hits[0].flags, hits[0].anchor), (FLAG_REDIRECT, None));
     assert!(a.search("zz no such title", 5).unwrap().is_empty());
 
     let report = a.verify(&mut |_, _, _| {}).unwrap();
@@ -318,10 +336,17 @@ fn archive(opts: WriterOptions) -> (Vec<u8>, Summary) {
             add_image(&mut w);
         }
         if id % 3 == 0 {
-            w.add_redirect(&format!("Alias of {id}"), id).unwrap();
-            // Same key as the article's own title: dropped by the index.
-            w.add_redirect(&format!("article {id} {}", WORDS[(id % 16) as usize]), id)
+            // Every sixth alias leads to a section.
+            let anchor = (id % 6 == 0).then(|| anchor_hash(&format!("Section {id}")));
+            w.add_redirect(&format!("Alias of {id}"), id, anchor)
                 .unwrap();
+            // Same key as the article's own title: dropped by the index.
+            w.add_redirect(
+                &format!("article {id} {}", WORDS[(id % 16) as usize]),
+                id,
+                None,
+            )
+            .unwrap();
         }
     }
     while w.image_count() < IMAGES {
@@ -467,7 +492,7 @@ fn writer_rejects_bad_input() {
 
     let mut w = new();
     w.add_article(0, &article(0), 0).unwrap();
-    w.add_redirect("Elsewhere", 5).unwrap();
+    w.add_redirect("Elsewhere", 5, None).unwrap();
     assert!(matches!(w.finish(), Err(Error::Invalid(m)) if m.contains("missing article")));
 
     let mut w = new();

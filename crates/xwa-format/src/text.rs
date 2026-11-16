@@ -4,7 +4,7 @@
 use std::fmt::Write;
 
 use crate::content::{
-    Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Style, Table,
+    Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Place, Style, Table,
 };
 
 /// Renders `a` as Markdown-like text. `title_of` names link targets.
@@ -169,15 +169,15 @@ impl Renderer<'_> {
                 }
                 Inline::Link {
                     article,
-                    section,
+                    place,
                     content,
                 } => {
                     let target = (self.title_of)(*article)
                         .unwrap_or_else(|| format!("missing article {article}"));
-                    let section = if *section > 0 {
-                        format!(" §{section}")
-                    } else {
-                        String::new()
+                    let section = match place {
+                        Place::Section(0) => String::new(),
+                        Place::Section(n) => format!(" §{n}"),
+                        Place::Anchor(hash) => format!(" §#{hash:08x}"),
                     };
                     let _ = write!(
                         s,
@@ -300,7 +300,7 @@ mod tests {
                 Inline::Text("see ".into()),
                 Inline::Link {
                     article: 3,
-                    section: 0,
+                    place: Place::TOP,
                     content: vec![Inline::Styled(Style::Bold, vec![Inline::Text("x".into())])],
                 },
             ])],

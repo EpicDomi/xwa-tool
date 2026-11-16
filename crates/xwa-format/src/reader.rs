@@ -10,15 +10,15 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::codec::{ChunkCodec, Decoder, MAX_CHUNK};
-use crate::content::{self, Article, Ref};
+use crate::content::{self, Article, Place, Ref};
 use crate::error::corrupt;
 use crate::normalize::search_key;
 use crate::records::{ArticleRecord, ChunkEntry, ImageRecord, article_flags, image_encoding};
 use crate::superblock::{SectionEntry, Superblock};
 use crate::title_index::{self, BlockSource, Hit, IndexReader, ReadError};
 use crate::{
-    BLOCK_SIZE, Error, Result, TextCodec, VERSION_MAJOR, la2, math_glyphs, meta, required, section,
-    varint,
+    BLOCK_SIZE, Error, Result, TextCodec, VERSION_MAJOR, VERSION_MINOR, la2, math_glyphs, meta,
+    required, section, varint,
 };
 
 /// Random-access bytes: a file or a buffer.
@@ -134,9 +134,15 @@ impl<S: Source> Archive<S> {
         let mut sb_bytes = vec![0u8; Superblock::SIZE];
         src.read_exact_at(&mut sb_bytes, 0)?;
         let sb = Superblock::decode(&sb_bytes)?;
-        if sb.version_major != VERSION_MAJOR {
+        let draft_mismatch = VERSION_MAJOR == 0 && sb.version_minor != VERSION_MINOR;
+        if sb.version_major != VERSION_MAJOR || draft_mismatch {
+            let advice = if (sb.version_major, sb.version_minor) < (VERSION_MAJOR, VERSION_MINOR) {
+                "it was made by an older xwa-tool; convert it again"
+            } else {
+                "it was made by a newer xwa-tool; update this one"
+            };
             return Err(Error::Unsupported(format!(
-                "format version {}.{}; this reader supports {VERSION_MAJOR}.x",
+                "format version {}.{} ({advice}); this reader supports {VERSION_MAJOR}.{VERSION_MINOR}",
                 sb.version_major, sb.version_minor
             )));
         }
@@ -452,6 +458,15 @@ impl<S: Source> Archive<S> {
             .map_err(|e| corrupt(format!("article {id}: {e}")))
     }
 
+    /// The section of article `id` a named place is in (spec 7.2), if the
+    /// article has that place.
+    pub fn find_place(&self, id: u32, anchor: u32) -> Result<Option<u32>> {
+        let stream = self.article_stream(id)?;
+        let (header, _) =
+            content::decode_header(&stream).map_err(|e| corrupt(format!("article {id}: {e}")))?;
+        Ok(content::find_anchor(&header, anchor))
+    }
+
     /// An image's record and encoded bytes.
     pub fn image(&self, id: u32) -> Result<(ImageRecord, Vec<u8>)> {
         let rec = self.image_record(id)?;
@@ -561,7 +576,13 @@ impl<S: Source> Archive<S> {
             (self.article_count(), self.image_count(), self.chunk_count());
         let mut touched = vec![false; chunks as usize];
         let mut cache = ChunkCache::default();
+        // Every article's named places (spec 7.2), as anchor hashes, to
+        // check links to them once all are known.
+        let mut places: Vec<u32> = Vec::new();
+        let mut places_at: Vec<u64> = Vec::with_capacity(count as usize + 1);
+        let mut anchor_links: Vec<(u32, u32)> = Vec::new();
         for id in 0..count {
+            places_at.push(places.len() as u64);
             if id % 256 == 0 {
                 progress("articles", id as u64, count as u64);
             }
@@ -602,6 +623,21 @@ impl<S: Source> Archive<S> {
                     ));
                 }
             }
+            let sections = header.toc.len() as u32;
+            for a in &header.anchors {
+                if a.section > sections {
+                    r.problem(format!(
+                        "article {id}: a named place is in section {}, of {sections}",
+                        a.section
+                    ));
+                }
+            }
+            places.extend(header.anchors.iter().map(|a| a.hash));
+            places.extend(
+                content::heading_anchors(header.toc.iter().map(|e| e.text.as_str()))
+                    .iter()
+                    .map(|name| content::anchor_hash(name)),
+            );
             match self.title(id) {
                 Ok(t) if t == article.title => {}
                 Ok(t) => r.problem(format!(
@@ -619,10 +655,17 @@ impl<S: Source> Archive<S> {
             }
             let mut problems = Vec::new();
             content::walk_refs(&article, &mut |x| match x {
-                Ref::Link(target) => {
+                Ref::Link(target, place) => {
                     r.links += 1;
                     if target >= count {
                         problems.push(format!("links to missing article {target}"));
+                    }
+                    match place {
+                        Place::Anchor(hash) => anchor_links.push((target, hash)),
+                        Place::Section(n) if target == id && n > sections => {
+                            problems.push(format!("links to its section {n}, of {sections}"))
+                        }
+                        Place::Section(_) => {}
                     }
                 }
                 Ref::Image(img) => {
@@ -677,6 +720,16 @@ impl<S: Source> Archive<S> {
             }
         }
         progress("articles", count as u64, count as u64);
+        places_at.push(places.len() as u64);
+        r.anchor_links = anchor_links.len() as u64;
+        r.anchor_links_found = anchor_links
+            .iter()
+            .filter(|(target, hash)| {
+                let t = *target as usize;
+                t + 1 < places_at.len()
+                    && places[places_at[t] as usize..places_at[t + 1] as usize].contains(hash)
+            })
+            .count() as u64;
         r.articles = count;
         r.chunks = chunks;
         r.chunk_reads = cache.reads;
@@ -770,7 +823,7 @@ impl<S: Source> Archive<S> {
             } else if hit.flags & title_index::FLAG_REDIRECT == 0 {
                 titled[hit.article as usize] = true;
             }
-            if hit.flags & !title_index::FLAG_REDIRECT != 0 {
+            if hit.flags & !(title_index::FLAG_REDIRECT | title_index::FLAG_ANCHOR) != 0 {
                 problems.push(format!(
                     "title index: {:?} has reserved flags set",
                     hit.display
@@ -935,6 +988,10 @@ pub struct VerifyReport {
     pub redirects: u64,
     pub formulas: u64,
     pub links: u64,
+    /// Links to named places in articles (spec 7.2), and how many of those
+    /// places exist; the others open their article at the top.
+    pub anchor_links: u64,
+    pub anchor_links_found: u64,
     pub text_bytes: u64,
     pub image_bytes: u64,
     /// The first [`VerifyReport::MAX_LISTED`] problems.

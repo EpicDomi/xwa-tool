@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use xwa_convert::{Device, Stage};
 use xwa_fetch::wikimedia::Diagrams;
+use xwa_format::content::{Place, for_each_link_mut};
 use xwa_format::normalize::search_key;
 use xwa_format::reader::{self, Archive as Xwa};
 use xwa_format::records::image_encoding;
@@ -576,6 +577,14 @@ fn verify(path: &Path) -> CliResult {
         r.links,
         r.formulas
     );
+    if r.anchor_links > 0 {
+        println!(
+            "{} links to sections of other articles: {} lead to their section, {} to the top (no such place)",
+            r.anchor_links,
+            r.anchor_links_found,
+            r.anchor_links - r.anchor_links_found
+        );
+    }
     println!(
         "{} images ({:.1} MB), {} titles ({} redirects); checked in {:.1}s",
         r.images,
@@ -618,7 +627,15 @@ fn dump_cmd(args: &DumpArgs) -> CliResult {
         None
     };
     if let Some(id) = id {
-        let article = a.article(id)?;
+        let mut article = a.article(id)?;
+        // Show links to places in other articles by their section number.
+        for_each_link_mut(&mut article, &mut |target, place| {
+            if let Place::Anchor(hash) = *place
+                && let Ok(Some(n)) = a.find_place(target, hash)
+            {
+                *place = Place::Section(n);
+            }
+        });
         let rec = a.article_record(id)?;
         println!(
             "article {id}: chunk {} offset {}, {} chunk(s), flags {:#06x}, popularity {}",
@@ -650,7 +667,14 @@ fn dump_cmd(args: &DumpArgs) -> CliResult {
         for h in a.search(prefix, args.limit)? {
             if h.flags & title_index::FLAG_REDIRECT != 0 {
                 let target = title_of(h.article).unwrap_or_default();
-                println!("{:>9}  {} -> {target}", h.article, h.display);
+                let section = match h.anchor {
+                    Some(hash) => match a.find_place(h.article, hash)? {
+                        Some(n) => format!(" §{n}"),
+                        None => format!(" §#{hash:08x} (not found)"),
+                    },
+                    None => String::new(),
+                };
+                println!("{:>9}  {} -> {target}{section}", h.article, h.display);
             } else {
                 println!("{:>9}  {}", h.article, h.display);
             }
