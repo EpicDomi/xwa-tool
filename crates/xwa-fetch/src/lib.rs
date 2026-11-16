@@ -10,6 +10,7 @@
 pub mod catalog;
 pub mod drives;
 pub mod metalink;
+pub mod wikimedia;
 mod xml;
 
 use std::fs::{File, OpenOptions};

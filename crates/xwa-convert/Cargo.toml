@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 xwa-zim.workspace = true
 xwa-format.workspace = true
+xwa-fetch.workspace = true
 scraper.workspace = true
 ego-tree.workspace = true
 rayon.workspace = true

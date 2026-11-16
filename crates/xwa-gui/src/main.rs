@@ -18,6 +18,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Subscription, Task, event, window};
 use xwa_convert::Stage;
 use xwa_fetch::drives::Drive;
+use xwa_fetch::wikimedia::Diagrams;
 use xwa_fetch::{Book, Language, size_text};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -135,6 +136,8 @@ struct App {
     details: Option<Result<String, String>>,
     device: Device,
     images: bool,
+    /// Fetch sharper diagrams from Wikimedia.
+    sharper: bool,
     loading: bool,
     /// The converting or copying job on the Convert page.
     job: Job,
@@ -161,6 +164,7 @@ enum Message {
     DetailsLoaded(Result<String, String>),
     DeviceChosen(Device),
     ImagesToggled(bool),
+    SharperToggled(bool),
     Convert,
     OutputChosen(Option<PathBuf>),
     Conversion(Event<String>),
@@ -208,6 +212,7 @@ impl App {
             details: None,
             device: Device::default(),
             images: true,
+            sharper: false,
             loading: false,
             job: Job::Idle,
             converted: None,
@@ -303,6 +308,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.images = on;
             Task::none()
         }
+        Message::SharperToggled(on) => {
+            app.sharper = on;
+            Task::none()
+        }
         Message::Convert => {
             let Some(zim) = app.zim.clone() else {
                 return Task::none();
@@ -346,14 +355,20 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.output = Some(out.clone());
             let device = app.device.converter();
             let with_images = app.images;
+            let diagrams = (app.images && app.sharper)
+                .then(Diagrams::default_cache)
+                .flatten()
+                .map(|cache| Arc::new(Diagrams::new(cache)));
+            let sharper = diagrams.is_some();
             let (tx, rx) = iced::futures::channel::mpsc::unbounded();
             std::thread::spawn(move || {
                 let opts = xwa_convert::Options {
                     images: with_images,
+                    diagrams,
                     ..xwa_convert::Options::new(device)
                 };
                 let result = xwa_convert::convert(&zim, &out, &opts, &mut |p| {
-                    let (label, fraction) = conversion_progress(p);
+                    let (label, fraction) = conversion_progress(p, sharper);
                     let _ = tx.unbounded_send(Event::Progress(label.into(), fraction));
                     !cancel.load(Ordering::Relaxed)
                 });
@@ -559,24 +574,29 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
     }
 }
 
-fn conversion_progress(p: xwa_convert::Progress) -> (&'static str, f32) {
+fn conversion_progress(p: xwa_convert::Progress, sharper: bool) -> (&'static str, f32) {
     let label = match p.stage {
         Stage::Scanning => "Reading the ZIM file…",
         Stage::Articles => "Converting articles…",
+        Stage::Diagrams => "Downloading sharper diagrams…",
         Stage::Images => "Converting pictures…",
         Stage::Finishing => "Finishing…",
     };
-    // Rough shares of the time: reading 5%, articles 55%, pictures 35%,
-    // finishing 5%.
     let part = if p.total == 0 {
         1.0
     } else {
         p.done as f32 / p.total as f32
     };
+    // Rough shares of the time: reading 5%, articles 55%, pictures 35%,
+    // finishing 5%; downloading diagrams, when asked for, takes 30% from
+    // articles and pictures.
+    let (articles, diagrams) = if sharper { (0.35, 0.30) } else { (0.55, 0.0) };
+    let pictures = 0.90 - articles - diagrams;
     let fraction = match p.stage {
         Stage::Scanning => 0.05 * part,
-        Stage::Articles => 0.05 + 0.55 * part,
-        Stage::Images => 0.60 + 0.35 * part,
+        Stage::Articles => 0.05 + articles * part,
+        Stage::Diagrams => 0.05 + articles + diagrams * part,
+        Stage::Images => 0.05 + articles + diagrams + pictures * part,
         Stage::Finishing => 0.95 + 0.05 * part,
     };
     (label, fraction)
@@ -591,13 +611,23 @@ fn summary(r: &xwa_convert::Report, out: &Path, device: xwa_convert::Device) -> 
         0 => "no pictures".to_string(),
         n => format!("{n} pictures"),
     };
-    format!(
+    let mut done = format!(
         "Done: {} articles and {pictures} in {} ({:.0} MB), made for the {}.",
         r.summary.articles,
         name,
         (r.summary.file_size as f64 / 1e6).max(1.0),
         device.name()
-    )
+    );
+    if let Some(d) = &r.diagrams {
+        done.push_str(&format!(
+            " {} diagrams are sharper copies from Wikipedia.",
+            r.sharper_images
+        ));
+        if let Some(why) = &d.stopped {
+            done.push_str(&format!(" Some could not be downloaded: {why}."));
+        }
+    }
+    done
 }
 
 /// A short summary read from the ZIM header and metadata (no full scan).
@@ -671,6 +701,9 @@ fn convert_view(app: &App) -> Element<'_, Message> {
         checkbox(app.images)
             .label("Include pictures")
             .on_toggle_maybe((!busy).then_some(Message::ImagesToggled)),
+        checkbox(app.images && app.sharper)
+            .label("Download sharper diagrams from Wikipedia (needs the internet, takes longer)")
+            .on_toggle_maybe((!busy && app.images).then_some(Message::SharperToggled)),
         convert,
         app.job.view("It did not work"),
     ]

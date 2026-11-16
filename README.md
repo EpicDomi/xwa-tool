@@ -51,6 +51,15 @@ cargo build --release
 `--jpeg-quality` (default 75) trades photo quality for size, and
 `--math-as-text` writes formulas as text instead of drawing them.
 
+`--hd-diagrams` (in the app: "Download sharper diagrams from Wikipedia")
+replaces the ZIM's small pictures of SVG diagrams with sharper renderings,
+800 px on the long side, from Wikimedia's thumbnail service. It needs the
+internet and takes longer: requests go a few at a time, at Wikimedia's
+standard thumbnail widths, and wait whenever Wikimedia asks. Diagrams it
+cannot get keep the ZIM's picture. Downloads are kept in `xwa-tool/diagrams`
+in the system's cache folder (or `--hd-cache DIR`), so converting again
+downloads nothing; delete that folder to free the space.
+
 Measured on English Wikipedia ZIMs (4 cores), with pictures and drawn
 formulas:
 
