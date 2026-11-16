@@ -16,17 +16,32 @@
 //!   each side, the power key on top, and two rockers in a tray at the
 //!   bottom of the face.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use iced::widget::canvas::{self, Fill, Frame, Geometry, Path, Stroke, fill, gradient, path};
 use iced::widget::tooltip;
 use iced::{Color, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
 
-/// Whether windows can be transparent here. Windows cannot show a
-/// transparent window with iced's renderers, so there the case fills a
+/// Whether the window is the case's own shape: transparent round it, with
+/// room for the keys that stick out. Windows shows a transparent window
+/// only when DirectX 12 presents through DirectComposition, so it is decided
+/// when the app starts (see `graphics`); otherwise there the case fills a
 /// rectangular window, which the system rounds, and the keys stay within it.
-pub const TRANSPARENT: bool = !cfg!(target_os = "windows");
+static SHAPED: AtomicBool = AtomicBool::new(!cfg!(target_os = "windows"));
+
+pub fn shaped() -> bool {
+    SHAPED.load(Ordering::Relaxed)
+}
+
+/// Set once, before the window opens.
+pub fn set_shaped(on: bool) {
+    SHAPED.store(on, Ordering::Relaxed);
+}
 
 /// Room round the case for keys that stick out of it.
-pub const MARGIN: f32 = if TRANSPARENT { 8.0 } else { 0.0 };
+pub fn margin() -> f32 {
+    if shaped() { 8.0 } else { 0.0 }
+}
 
 /// How far into the case a key on an edge can be clicked: its edge alone is
 /// too thin to aim at.
@@ -187,16 +202,16 @@ impl KeySpec {
         let b = spec.body;
         let r = match self.place {
             Place::Edge(Side::Left, from, to) => Rectangle::new(
-                Point::new(-MARGIN, from),
-                Size::new(MARGIN + EDGE_REACH, to - from),
+                Point::new(-margin(), from),
+                Size::new(margin() + EDGE_REACH, to - from),
             ),
             Place::Edge(Side::Right, from, to) => Rectangle::new(
                 Point::new(b.width - EDGE_REACH, from),
-                Size::new(EDGE_REACH + MARGIN, to - from),
+                Size::new(EDGE_REACH + margin(), to - from),
             ),
             Place::Edge(Side::Top, from, to) => Rectangle::new(
-                Point::new(from, -MARGIN),
-                Size::new(to - from, MARGIN + EDGE_REACH),
+                Point::new(from, -margin()),
+                Size::new(to - from, margin() + EDGE_REACH),
             ),
             Place::Face(r) => Rectangle::new(
                 Point::new(r.x, r.y - 6.0),
@@ -207,7 +222,7 @@ impl KeySpec {
                 Size::new(d + 8.0, d + 8.0),
             ),
         };
-        Rectangle::new(r.position() + Vector::new(MARGIN, MARGIN), r.size())
+        Rectangle::new(r.position() + Vector::new(margin(), margin()), r.size())
     }
 
     /// Where its tooltip goes: inwards, onto the device.
@@ -250,15 +265,15 @@ impl Spec {
     /// The window: the case and the room round it.
     pub fn window(&self) -> Size {
         Size::new(
-            self.body.width + 2.0 * MARGIN,
-            self.body.height + 2.0 * MARGIN,
+            self.body.width + 2.0 * margin(),
+            self.body.height + 2.0 * margin(),
         )
     }
 
     /// The screen, in window coordinates.
     pub fn screen_in_window(&self) -> Rectangle {
         Rectangle::new(
-            self.screen.position() + Vector::new(MARGIN, MARGIN),
+            self.screen.position() + Vector::new(margin(), margin()),
             self.screen.size(),
         )
     }
@@ -512,16 +527,16 @@ impl<Message> canvas::Program<Message> for Body {
             state.made_for.set(made_for);
         }
         let case = state.cache.draw(renderer, bounds.size(), |frame| {
-            frame.translate(Vector::new(MARGIN, MARGIN));
+            frame.translate(Vector::new(margin(), margin()));
             self.draw_case(frame);
         });
         let mut keys = Frame::new(renderer, bounds.size());
-        keys.translate(Vector::new(MARGIN, MARGIN));
+        keys.translate(Vector::new(margin(), margin()));
         self.draw_keys(&mut keys);
         // Keys standing out of the edges go behind the case.
         let mut behind = Frame::new(renderer, bounds.size());
-        behind.translate(Vector::new(MARGIN, MARGIN));
-        if TRANSPARENT {
+        behind.translate(Vector::new(margin(), margin()));
+        if shaped() {
             for k in self.spec.keys {
                 if let Place::Edge(side, from, to) = k.place {
                     self.draw_edge_key(&mut behind, side, from, to, self.key_look(k.key));
@@ -546,7 +561,7 @@ impl Body {
     fn draw_case(&self, frame: &mut Frame) {
         let (spec, look) = (self.spec, self.look);
         let size = spec.body;
-        let radius = if TRANSPARENT { spec.radius } else { 0.0 };
+        let radius = if shaped() { spec.radius } else { 0.0 };
         let outline = Path::rounded_rectangle(Point::ORIGIN, size, radius.into());
         // The rim.
         frame.fill(
@@ -601,7 +616,7 @@ impl Body {
         frame.fill_rectangle(s.position(), s.size(), crate::eink::PAPER);
 
         // Without transparency the edge keys sit within the case.
-        if !TRANSPARENT {
+        if !shaped() {
             for k in spec.keys {
                 if let Place::Edge(side, from, to) = k.place {
                     draw_inset_key(frame, size, side, from, to, look);
@@ -636,7 +651,7 @@ impl Body {
                     shade_pill_half(frame, cap, r, state, look);
                 }
                 Place::Round(c, d) => draw_round_key(frame, c, d, state, look),
-                Place::Edge(side, from, to) if !TRANSPARENT && state != KeyLook::Rest => {
+                Place::Edge(side, from, to) if !shaped() && state != KeyLook::Rest => {
                     let tint = if state == KeyLook::Pressed {
                         Color {
                             a: 0.35,
@@ -929,7 +944,7 @@ impl<Message> canvas::Program<Message> for Glass {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        frame.translate(Vector::new(MARGIN, MARGIN));
+        frame.translate(Vector::new(margin(), margin()));
         let s = self.spec.screen;
         if let Some(colour) = self.flash {
             frame.fill_rectangle(s.position(), s.size(), colour);

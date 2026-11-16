@@ -14,7 +14,7 @@ use xwa_fetch::size_text;
 use crate::app::{
     App, Choice, Job, Message, Popup, SEARCH_ID, Screen, ZOOMS, ZimInfo, conversion_steps, group,
 };
-use crate::device::{Body, Finish, Glass, Key, MARGIN, Model};
+use crate::device::{Body, Finish, Glass, Key, Model, margin};
 use crate::downloads::{Download, Fetch};
 use crate::eink::{
     self, BODY, DARK, Face, INK, Kind, LIGHT, PAD, PAPER, RADIUS, Row, SIDE, SMALL, TITLE, fit,
@@ -838,8 +838,8 @@ impl App {
                     .on_press(Message::Drag)
                     .on_right_press(Message::SystemMenu),
             )
-            .x(MARGIN)
-            .y(MARGIN)
+            .x(margin())
+            .y(margin())
             .into(),
             pin(opaque(self.screen_view()))
                 .x(screen.x)
@@ -1222,8 +1222,8 @@ fn resize_handles(
 ) -> [(iced::Rectangle, iced::window::Direction, mouse::Interaction); 8] {
     use iced::window::Direction::*;
     use mouse::Interaction::*;
-    let t = if crate::device::TRANSPARENT {
-        MARGIN + 4.0
+    let t = if crate::device::shaped() {
+        margin() + 4.0
     } else {
         6.0
     };

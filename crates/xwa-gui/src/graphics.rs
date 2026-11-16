@@ -9,11 +9,35 @@
 //! died before that makes the next one try the next way of drawing, down to
 //! software, which works everywhere. Settings can also pick one outright.
 //!
+//! A launch that fails to draw before it has got going starts the app again
+//! straight away, the next way (see `retry`), so the user meets a working
+//! window rather than an error.
+//!
+//! The window is the device's shape where it can be transparent. On Windows
+//! that takes DirectX 12 presenting through DirectComposition (iced is
+//! patched to allow it, see `vendor/README.md`); drawn any other way the
+//! window there is a rectangle.
+//!
 //! iced reads its choice from the environment (`ICED_BACKEND` for GPU or
-//! software, `WGPU_BACKEND` for the GPU interface); someone who has set
-//! either keeps their own.
+//! software, `WGPU_BACKEND` for the GPU interface,
+//! `WGPU_DX12_PRESENTATION_SYSTEM` for how DirectX 12 presents); someone who
+//! has set any of them keeps their own.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The variables iced and wgpu read the choice from.
+const VARS: [&str; 3] = [
+    "ICED_BACKEND",
+    "WGPU_BACKEND",
+    "WGPU_DX12_PRESENTATION_SYSTEM",
+];
+
+/// How many times in a row the app has started again after failing to draw.
+const TRIES: &str = "XWA_GUI_TRIES";
+
+/// Set once the launch has got going.
+static STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Graphics {
@@ -135,33 +159,99 @@ pub fn decide(preferred: Graphics, last: Option<(Graphics, bool)>) -> Graphics {
     }
 }
 
+/// How this launch draws.
+#[derive(Debug, Clone, Copy)]
+pub struct Launch {
+    pub graphics: Graphics,
+    /// Whether the window can be transparent, and so the device's shape.
+    pub shaped: bool,
+    /// Whether the app chose, rather than the environment.
+    picked: bool,
+}
+
 /// Picks the renderer for this launch, records it, and tells iced. Must be
 /// called before any other thread starts.
-pub fn choose(preferred: Graphics) -> Graphics {
-    let chosen = decide(preferred, read_record());
-    write_record(chosen, false);
-    let user_set =
-        std::env::var_os("ICED_BACKEND").is_some() || std::env::var_os("WGPU_BACKEND").is_some();
-    if !user_set {
-        let (iced, wgpu) = match chosen {
-            Graphics::Software => ("tiny-skia", None),
-            // Should the GPU not start at all, iced falls back to software.
-            g => ("wgpu,tiny-skia", Some(g.key())),
+pub fn choose(preferred: Graphics) -> Launch {
+    let graphics = decide(preferred, read_record());
+    write_record(graphics, false);
+    let windows = cfg!(target_os = "windows");
+    if VARS.iter().any(|v| std::env::var_os(v).is_some()) {
+        // Their own choice, which on Windows may not make a window that
+        // can be transparent.
+        return Launch {
+            graphics,
+            shaped: !windows,
+            picked: false,
         };
-        // SAFETY: called at the start of `main`, before any thread exists.
-        unsafe {
-            std::env::set_var("ICED_BACKEND", iced);
-            if let Some(w) = wgpu {
-                std::env::set_var("WGPU_BACKEND", w);
-            }
+    }
+    let shaped = !windows || graphics == Graphics::Dx12;
+    let iced = match graphics {
+        Graphics::Software => "tiny-skia",
+        // Software drawing cannot show through a transparent window on
+        // Windows, so there the shaped window keeps to DirectX 12: should
+        // it not start, `retry` starts the app again the next way.
+        _ if windows && shaped => "wgpu",
+        // Should the GPU not start at all, iced falls back to software.
+        _ => "wgpu,tiny-skia",
+    };
+    // SAFETY: called at the start of `main`, before any thread exists.
+    unsafe {
+        std::env::set_var("ICED_BACKEND", iced);
+        if graphics != Graphics::Software {
+            std::env::set_var("WGPU_BACKEND", graphics.key());
+        }
+        if windows && shaped {
+            std::env::set_var("WGPU_DX12_PRESENTATION_SYSTEM", "visual");
         }
     }
-    chosen
+    Launch {
+        graphics,
+        shaped,
+        picked: true,
+    }
 }
 
 /// The launch got going: draw the same way next time.
 pub fn confirm(g: Graphics) {
+    STARTED.store(true, Ordering::Relaxed);
     write_record(g, true);
+}
+
+/// Whether a failure to draw now can be met by starting again the next way:
+/// before the launch has got going, when the app chose how to draw, and
+/// while there is another way left.
+pub fn can_retry(launch: &Launch) -> bool {
+    launch.picked
+        && !STARTED.load(Ordering::Relaxed)
+        && launch.graphics != Graphics::Software
+        && tries() < Graphics::chain().len()
+}
+
+/// Starts the app again, to draw the next way (the launch record says this
+/// one failed); gives whether it did.
+pub fn retry(launch: &Launch) -> bool {
+    if !can_retry(launch) {
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let mut again = std::process::Command::new(exe);
+    again
+        .args(std::env::args_os().skip(1))
+        .env(TRIES, (tries() + 1).to_string());
+    // The next launch chooses afresh.
+    for v in VARS {
+        again.env_remove(v);
+    }
+    again.spawn().is_ok()
+}
+
+fn tries() -> usize {
+    std::env::var(TRIES)
+        .ok()
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -184,6 +274,25 @@ mod tests {
         assert_eq!(
             decide(Graphics::Software, Some((chain[0], true))),
             Graphics::Software
+        );
+    }
+
+    #[test]
+    fn only_the_apps_own_choice_starts_again_and_not_past_software() {
+        let launch = |graphics, picked| Launch {
+            graphics,
+            shaped: true,
+            picked,
+        };
+        let first = Graphics::chain()[0];
+        assert!(can_retry(&launch(first, true)));
+        assert!(
+            !can_retry(&launch(first, false)),
+            "a choice from the environment is left alone"
+        );
+        assert!(
+            !can_retry(&launch(Graphics::Software, true)),
+            "nothing comes after software"
         );
     }
 

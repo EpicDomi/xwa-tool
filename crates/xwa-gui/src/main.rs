@@ -20,11 +20,13 @@ mod screens;
 #[cfg(test)]
 mod tests;
 
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 
 use iced::{Color, Theme, theme, window};
 
 use app::App;
+use graphics::{Graphics, Launch};
 use prefs::Prefs;
 
 fn main() -> iced::Result {
@@ -32,12 +34,50 @@ fn main() -> iced::Result {
     let prefs = Prefs::load();
     // Before anything else runs: the renderer is picked through the
     // environment, and failures from here on are reported.
-    let graphics = graphics::choose(prefs.graphics);
-    crash::install(graphics);
+    let launch = graphics::choose(prefs.graphics);
+    device::set_shaped(launch.shaped);
+    crash::install(launch);
+    let chosen = prefs.graphics;
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| run(prefs, open, launch)));
+    // Failing to draw while starting (an error from iced, or a failure on
+    // its thread), the app starts again the next way.
+    let failed = matches!(
+        result,
+        Err(_) | Ok(Err(iced::Error::GraphicsCreationFailed(_)))
+    );
+    if failed && graphics::can_retry(&launch) {
+        if chosen != Graphics::Auto {
+            // The way chosen in Settings does not work here.
+            let mut prefs = Prefs::load();
+            prefs.graphics = Graphics::Auto;
+            prefs.save();
+        }
+        if graphics::retry(&launch) {
+            return Ok(());
+        }
+    }
+    match result {
+        Ok(Err(e)) => {
+            crash::tell(
+                "xwa-tool could not start",
+                format!("xwa-tool could not open its window: {e}"),
+            );
+            Err(e)
+        }
+        Ok(ok) => ok,
+        Err(failure) => {
+            crash::tell_held();
+            std::panic::resume_unwind(failure)
+        }
+    }
+}
+
+fn run(prefs: Prefs, open: Option<PathBuf>, launch: Launch) -> iced::Result {
     // The real size is set once the monitor's is known; until then the
     // window stays hidden.
     let zoom = prefs.zoom.unwrap_or(app::FIRST_ZOOM);
     let window = prefs.model.spec().window();
+    let graphics = launch.graphics;
     iced::application(
         move || App::new(prefs.clone(), zoom, open.clone(), graphics),
         App::update,
@@ -64,9 +104,9 @@ fn main() -> iced::Result {
         // of a window that is not), and the device can be dragged bigger.
         resizable: true,
         decorations: false,
-        transparent: device::TRANSPARENT,
+        transparent: launch.shaped,
         icon: device::window_icon(),
-        platform_specific: platform(),
+        platform_specific: platform(launch.shaped),
         exit_on_close_request: false,
         ..window::Settings::default()
     })
@@ -90,18 +130,27 @@ pub fn eink_theme() -> Theme {
 }
 
 #[cfg(target_os = "windows")]
-fn platform() -> window::settings::PlatformSpecific {
-    // Windows cannot show a transparent window here, so it rounds the
-    // corners and draws the shadow itself.
-    window::settings::PlatformSpecific {
-        undecorated_shadow: true,
-        corner_preference: window::settings::platform::CornerPreference::Round,
-        ..Default::default()
+fn platform(shaped: bool) -> window::settings::PlatformSpecific {
+    use window::settings::platform::CornerPreference;
+    if shaped {
+        // The window is the case's shape, with its own corners.
+        window::settings::PlatformSpecific {
+            undecorated_shadow: false,
+            corner_preference: CornerPreference::DoNotRound,
+            ..Default::default()
+        }
+    } else {
+        // A rectangular window, whose corners and shadow the system draws.
+        window::settings::PlatformSpecific {
+            undecorated_shadow: true,
+            corner_preference: CornerPreference::Round,
+            ..Default::default()
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn platform() -> window::settings::PlatformSpecific {
+fn platform(_shaped: bool) -> window::settings::PlatformSpecific {
     window::settings::PlatformSpecific {
         application_id: "xwa-tool".into(),
         ..Default::default()
@@ -109,6 +158,6 @@ fn platform() -> window::settings::PlatformSpecific {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn platform() -> window::settings::PlatformSpecific {
+fn platform(_shaped: bool) -> window::settings::PlatformSpecific {
     window::settings::PlatformSpecific::default()
 }
