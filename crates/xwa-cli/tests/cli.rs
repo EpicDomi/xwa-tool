@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xwa_format::Profile;
-use xwa_format::content::{Article, Block, Inline, Style};
+use xwa_format::content::{Article, Block, Inline, Place, Style};
 use xwa_format::la2;
 use xwa_format::records::{image_encoding, image_kind};
 use xwa_format::writer::{ArchiveWriter, ImageInfo, WriterOptions};
@@ -53,7 +53,7 @@ fn build(path: &Path) {
                 text("A relation in "),
                 Inline::Link {
                     article: 1,
-                    section: 0,
+                    place: Place::TOP,
                     content: vec![Inline::Styled(Style::Italic, vec![text("geometry")])],
                 },
                 text("."),
@@ -76,7 +76,7 @@ fn build(path: &Path) {
     };
     w.add_article(0, &pythagoras, 0).unwrap();
     w.add_article(1, &geometry, 0).unwrap();
-    w.add_redirect("Pythagoras' theorem", 0).unwrap();
+    w.add_redirect("Pythagoras' theorem", 0, None).unwrap();
     let info = ImageInfo {
         encoding: image_encoding::LINE_ART,
         width: 4,
@@ -101,7 +101,7 @@ fn info_verify_and_dump() {
     let (ok, out) = tool(&["info", file]);
     assert!(ok, "{out}");
     assert!(
-        out.contains("XWA 0.1") && out.contains("2 articles") && out.contains("title: CLI test"),
+        out.contains("XWA 0.2") && out.contains("2 articles") && out.contains("title: CLI test"),
         "{out}"
     );
 

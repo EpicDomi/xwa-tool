@@ -60,7 +60,7 @@ offset 0      Superblock (4096 bytes)
 |---|---|---|
 | 0 | u8[8] | magic `XWA\0\r\n\x1a\n` |
 | 8 | u16 | version_major (0 = draft) |
-| 10 | u16 | version_minor |
+| 10 | u16 | version_minor (2 = this text) |
 | 12 | u32 | superblock_size (4096) |
 | 16 | u64 | file_size |
 | 24 | u32 | required_features (bitset, see 3.3) |
@@ -79,6 +79,11 @@ offset 0      Superblock (4096 bytes)
 `file_size` must equal the size of the file. A reader that finds a shorter
 file reports an incomplete copy rather than reading past the end; copying
 large files to SD cards fails this way often enough to matter.
+
+While `version_major` is 0, every minor version may change the layout:
+readers accept only the minor version they were written for, and tell the
+user to convert the archive again when it is older. Version 0.2 added named
+places (7.2): anchor links (7.3) and anchors on title index entries (6.2).
 
 ### 3.2 Section types
 
@@ -181,10 +186,14 @@ varint key_suffix_len, key suffix bytes
 varint disp_shared     bytes shared with the previous display title
 varint disp_suffix_len, display suffix bytes
 varint article_id
-u8     flags           bit0 redirect, bits1-7 reserved
+u8     flags           bit0 redirect, bit1 anchor follows, bits2-7 reserved
+u32    anchor          only with bit1: the named place (7.2) a redirect to
+                       a section leads to
 ```
 
-The first entry of each block has `*_shared = 0`.
+The first entry of each block has `*_shared = 0`. Choosing an entry with
+an anchor opens its article at that place, found as for an anchor link
+(7.2); when the article has no such place, it opens at the top.
 
 ### 6.3 Leaf blocks (TINDEX_LEAF)
 
@@ -256,6 +265,7 @@ varint body_size
 varint toc_count, then per heading: u8 level, string text, varint pos
 varint table_count, then per table: varint pos
 varint infobox_pos_plus_one   (0 = no infobox)
+varint anchor_count, then per anchor: u32 hash, varint section
 body                   block stream (7.3), body_size bytes
 tables                 table records (7.4), one per table
 infobox                infobox record (7.4), if any
@@ -264,6 +274,33 @@ infobox                infobox record (7.4), if any
 Every `pos` is a byte position measured from the first byte of the body, so
 the header never depends on its own size. Jumping to a section or table
 decompresses only the chunk that holds that position.
+
+Sections are numbered by their contents entries: 1 is the first, and 0 is
+the top of the article.
+
+**Named places.** Links may lead to a named place in another article (the
+`#Early_life` of a URL), and so may redirects to a section. A place is
+known by its anchor hash: 32-bit FNV-1a (offset basis `0x811C9DC5`, prime
+`0x01000193`) over the UTF-8 bytes of its name, with each space byte taken
+as `_`. An article's places are:
+
+1. its anchor list, from the header above: each `hash` with the section
+   it is in;
+2. each contents entry's own anchor, by rule: the entry's text with leading
+   and trailing white space removed and each run of white space replaced
+   by one `_`; when an earlier entry already has that name, `_2`, `_3`, ...
+   is appended, the first number that gives a new one.
+
+To find a place, look through the anchor list first, then the contents
+entries' anchors, and take the first match; with none, use the top. The
+converter lists only what the rule does not give: headings whose anchor on
+Wikipedia differs from the rule's, named places inside sections (template
+anchors, table rows, old-style anchors kept for old links), and nothing in
+the lead, which is the top anyway. Measured: 91.5% of the 14,484 links to
+places in other articles in the chemistry ZIM find their place, and 87% of
+55,760 in mathematics; nearly all the rest are links to sections Wikipedia
+has since renamed or removed. The anchor lists and anchor links add 0.8%
+and 0.7% to the text.
 
 ### 7.3 Block stream
 
@@ -303,10 +340,15 @@ An inline run is `varint length` followed by inline opcodes:
 | 0x86 | ICON | varint image_id (small inline image: flags, symbols) |
 | 0x87 | BREAK | line break |
 | 0x88 | NOTE_REF | varint footnote number (footnotes later) |
+| 0x89 | LINK_ANCHOR | varint target article id, u32 anchor hash (7.2); ends with LINK_END |
 
 Links are resolved at conversion time: redirects are followed to the final
 article id, and links to missing articles are emitted as plain text. The
-device never searches to follow a link.
+device never searches to follow a link. A link to a section of its own
+article is a LINK_START with the section number; a link to a named place in
+another article, or through a redirect to a section, is a LINK_ANCHOR,
+whose section the reader finds in the target's header when it opens it
+(7.2).
 
 Text is stored in logical order. Right-to-left handling (pre-shaping as
 today, or on-device bidi with the existing MiniBidi) is an open question.

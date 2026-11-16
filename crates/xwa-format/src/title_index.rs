@@ -15,6 +15,9 @@ const LEAF_HEADER: usize = 4;
 const INNER_HEADER: usize = 6;
 const PAYLOAD_END: usize = BLOCK_SIZE - 4;
 pub const FLAG_REDIRECT: u8 = 1;
+/// The entry leads to a named place in its article: a `u32` anchor hash
+/// (spec 7.2) follows the flags.
+pub const FLAG_ANCHOR: u8 = 2;
 
 /// An inner-block child: its first key and its index within its own level.
 type ChildRef = (Vec<u8>, u32);
@@ -27,6 +30,8 @@ pub struct TitleEntry {
     pub display: String,
     pub article: u32,
     pub flags: u8,
+    /// The named place it leads to, for a redirect to a section.
+    pub anchor: Option<u32>,
 }
 
 impl TitleEntry {
@@ -37,7 +42,14 @@ impl TitleEntry {
             display,
             article,
             flags: if redirect { FLAG_REDIRECT } else { 0 },
+            anchor: None,
         }
+    }
+
+    /// The same entry leading to the place with this anchor hash.
+    pub fn with_anchor(mut self, anchor: Option<u32>) -> Self {
+        self.anchor = anchor;
+        self
     }
 }
 
@@ -123,7 +135,13 @@ pub fn build(mut entries: Vec<TitleEntry>) -> BuiltIndex {
     let mut leaves = LeafWriter::new(Vec::new());
     for e in &entries {
         leaves
-            .push(e.key.as_bytes(), e.display.as_bytes(), e.article, e.flags)
+            .push(
+                e.key.as_bytes(),
+                e.display.as_bytes(),
+                e.article,
+                e.flags,
+                e.anchor,
+            )
             .expect("titles fit in a block");
     }
     let done = leaves.finish().expect("writing to memory");
@@ -185,7 +203,18 @@ impl<W: Write> LeafWriter<W> {
         }
     }
 
-    pub fn push(&mut self, key: &[u8], display: &[u8], article: u32, flags: u8) -> io::Result<()> {
+    pub fn push(
+        &mut self,
+        key: &[u8],
+        display: &[u8],
+        article: u32,
+        flags: u8,
+        anchor: Option<u32>,
+    ) -> io::Result<()> {
+        let flags = match anchor {
+            Some(_) => flags | FLAG_ANCHOR,
+            None => flags & !FLAG_ANCHOR,
+        };
         loop {
             let (ks, ds) = if self.count == 0 {
                 (0, 0)
@@ -205,6 +234,9 @@ impl<W: Write> LeafWriter<W> {
             s.extend_from_slice(&display[ds..]);
             varint::put(s, article as u64);
             s.push(flags);
+            if let Some(hash) = anchor {
+                s.extend_from_slice(&hash.to_le_bytes());
+            }
             if LEAF_HEADER + self.used + s.len() <= PAYLOAD_END {
                 if self.count == 0 {
                     self.first_keys.push(key.to_vec());
@@ -347,13 +379,14 @@ pub struct TitleSorter {
     budget: usize,
     dir: Option<PathBuf>,
     /// Records, back to back: u16 key length, u16 display length, u32
-    /// article, u8 flags, u16 accents, then the key and display bytes.
+    /// article, u8 flags, u16 accents, u32 anchor (when the flags say), then
+    /// the key and display bytes.
     buf: Vec<u8>,
     starts: Vec<u32>,
     runs: Vec<File>,
 }
 
-const REC_HEADER: usize = 11;
+const REC_HEADER: usize = 15;
 
 /// A record's fields, borrowed from a buffer.
 #[derive(Clone, Copy)]
@@ -363,6 +396,12 @@ struct RecRef<'a> {
     article: u32,
     flags: u8,
     accents: u16,
+    anchor: Option<u32>,
+}
+
+/// The anchor in a record header, if its flags say there is one.
+fn rec_anchor(h: &[u8]) -> Option<u32> {
+    (h[8] & FLAG_ANCHOR != 0).then(|| u32::from_le_bytes(h[11..15].try_into().unwrap()))
 }
 
 impl<'a> RecRef<'a> {
@@ -377,6 +416,7 @@ impl<'a> RecRef<'a> {
             article: u32::from_le_bytes(b[4..8].try_into().unwrap()),
             flags: b[8],
             accents: u16::from_le_bytes([b[9], b[10]]),
+            anchor: rec_anchor(b),
         }
     }
 
@@ -401,6 +441,7 @@ impl<'a> RecRef<'a> {
             article: self.article,
             flags: self.flags,
             accents: self.accents,
+            anchor: self.anchor,
         }
     }
 }
@@ -413,6 +454,7 @@ struct Rec {
     article: u32,
     flags: u8,
     accents: u16,
+    anchor: Option<u32>,
 }
 
 impl Rec {
@@ -445,6 +487,7 @@ impl Rec {
             article: u32::from_le_bytes(h[4..8].try_into().unwrap()),
             flags: h[8],
             accents: u16::from_le_bytes([h[9], h[10]]),
+            anchor: rec_anchor(&h),
         }))
     }
 }
@@ -474,7 +517,14 @@ impl TitleSorter {
         }
     }
 
-    pub fn push(&mut self, display: &str, article: u32, redirect: bool) -> io::Result<()> {
+    /// Adds a title; `anchor` is the place a redirect to a section leads to.
+    pub fn push(
+        &mut self,
+        display: &str,
+        article: u32,
+        redirect: bool,
+        anchor: Option<u32>,
+    ) -> io::Result<()> {
         let key = search_key(display);
         if key.len() > PAYLOAD_END || display.len() > PAYLOAD_END {
             return Err(io::Error::new(
@@ -489,8 +539,10 @@ impl TitleSorter {
         b.extend_from_slice(&(key.len() as u16).to_le_bytes());
         b.extend_from_slice(&(display.len() as u16).to_le_bytes());
         b.extend_from_slice(&article.to_le_bytes());
-        b.push(if redirect { FLAG_REDIRECT } else { 0 });
+        let flags = if redirect { FLAG_REDIRECT } else { 0 };
+        b.push(flags | if anchor.is_some() { FLAG_ANCHOR } else { 0 });
         b.extend_from_slice(&accents(display).to_le_bytes());
+        b.extend_from_slice(&anchor.unwrap_or(0).to_le_bytes());
         b.extend_from_slice(key.as_bytes());
         b.extend_from_slice(display.as_bytes());
         if self.buf.len() + self.starts.len() * 4 >= self.budget {
@@ -533,11 +585,11 @@ impl TitleSorter {
         Ok(())
     }
 
-    /// Calls `f(key, display, article, flags)` for every entry in index
-    /// order, one per (key, article), as [`build`] would store them.
+    /// Calls `f(key, display, article, flags, anchor)` for every entry in
+    /// index order, one per (key, article), as [`build`] would store them.
     pub fn finish(
         mut self,
-        mut f: impl FnMut(&[u8], &[u8], u32, u8) -> io::Result<()>,
+        mut f: impl FnMut(&[u8], &[u8], u32, u8, Option<u32>) -> io::Result<()>,
     ) -> io::Result<()> {
         // Records arrive sorted by key, article and preference. Each key's
         // records are gathered, each article's best spelling kept, and the
@@ -547,7 +599,7 @@ impl TitleSorter {
             group.dedup_by(|later, kept| later.article == kept.article);
             group.sort_by(|a, b| a.display.cmp(&b.display));
             for r in group.drain(..) {
-                f(&r.key, &r.display, r.article, r.flags)?;
+                f(&r.key, &r.display, r.article, r.flags, r.anchor)?;
             }
             Ok(())
         };
@@ -658,6 +710,8 @@ pub struct Hit {
     pub display: String,
     pub article: u32,
     pub flags: u8,
+    /// The place in the article it leads to ([`FLAG_ANCHOR`]).
+    pub anchor: Option<u32>,
 }
 
 /// Prefix search and full scans over an index.
@@ -781,6 +835,13 @@ impl<S: BlockSource> IndexReader<S> {
                 .ok_or_else(bad)?;
             let flags = *payload.get(p).ok_or_else(bad)?;
             p += 1;
+            let anchor = if flags & FLAG_ANCHOR != 0 {
+                let b = payload.get(p..p + 4).ok_or_else(bad)?;
+                p += 4;
+                Some(u32::from_le_bytes(b.try_into().unwrap()))
+            } else {
+                None
+            };
             let display = String::from_utf8(disp.clone()).map_err(|_| bad())?;
             if !f(
                 &key,
@@ -788,6 +849,7 @@ impl<S: BlockSource> IndexReader<S> {
                     display,
                     article,
                     flags,
+                    anchor,
                 },
             ) {
                 return Ok(false);
@@ -874,7 +936,9 @@ mod tests {
                     t.push_str(words[(seed % words.len() as u32) as usize]);
                     t.push_str(&(seed % 997).to_string());
                 }
+                // Some redirects lead to a section.
                 TitleEntry::new(t, i, i % 3 == 0)
+                    .with_anchor((i % 15 == 0).then(|| i.wrapping_mul(2_654_435_761)))
             })
             .collect()
     }
@@ -949,11 +1013,18 @@ mod tests {
         let mut sorter = TitleSorter::new(budget, None);
         for e in entries {
             sorter
-                .push(&e.display, e.article, e.flags & FLAG_REDIRECT != 0)
+                .push(
+                    &e.display,
+                    e.article,
+                    e.flags & FLAG_REDIRECT != 0,
+                    e.anchor,
+                )
                 .unwrap();
         }
         let mut leaves = LeafWriter::new(Vec::new());
-        sorter.finish(|k, d, a, f| leaves.push(k, d, a, f)).unwrap();
+        sorter
+            .finish(|k, d, a, f, anchor| leaves.push(k, d, a, f, anchor))
+            .unwrap();
         let done = leaves.finish().unwrap();
         assert_eq!(done.bytes as usize, done.out.len());
         assert_eq!(done.crc32c, crc32c::crc32c(&done.out));

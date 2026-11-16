@@ -13,7 +13,8 @@ use ego_tree::NodeRef;
 use scraper::node::Element;
 use scraper::{Html, Node};
 use xwa_format::content::{
-    Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Style, Table,
+    Anchor, Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Place, Style,
+    Table, anchor_hash, heading_anchors, plain_text,
 };
 use xwa_format::records::article_flags;
 
@@ -28,6 +29,11 @@ pub trait Resolver: Sync {
     /// A key for the image at a decoded archive path, if it is stored and
     /// images are wanted.
     fn image(&self, _path: &str) -> Option<u32> {
+        None
+    }
+    /// The anchor hash of the place a path leads to, when it is a
+    /// redirect to a section of its article.
+    fn anchor(&self, _path: &str) -> Option<u32> {
         None
     }
     /// A drawn formula for LaTeX source, if formulas are drawn and this one
@@ -90,8 +96,15 @@ pub struct Extracted {
     pub images: Vec<ImageUse>,
 }
 
-/// Self links wait for their section number in this range of `section`.
+/// Links to places in the article itself wait for their section number in
+/// this range of [`Place::Section`].
 const PENDING: u32 = 1 << 31;
+
+/// Whether an element id names a place someone may link to, rather than
+/// being Parsoid's own (`mwAZY`, `mw-reference-text-...`) or a citation's.
+fn is_named_place(id: &str) -> bool {
+    !(id.is_empty() || id.starts_with("mw") || id.starts_with("cite_") || id.starts_with("CITEREF"))
+}
 
 /// Extracts article `self_id`, whose archive path is `path`.
 pub fn extract(
@@ -111,45 +124,75 @@ pub fn extract(
         infobox: None,
         stats: Stats::default(),
         flags: 0,
-        fragments: Vec::new(),
+        pending: Vec::new(),
+        headings: 0,
+        marks: Vec::new(),
         in_cell: 0,
         images: Vec::new(),
         image_slots: HashMap::new(),
     };
-    let mut flow = Flow::default();
+    let mut flow = Flow {
+        top: true,
+        ..Default::default()
+    };
     cx.flow_children(root, &mut flow);
     flow.flush();
-    let (body, anchors) = drop_empty_headings(flow.blocks, flow.anchors);
+    let (body, anchors, kept) = drop_empty_headings(flow.blocks, flow.anchors);
 
-    // Number the remaining top-level headings as the table of contents does.
-    let mut sections: HashMap<&str, u32> = HashMap::new();
+    // Number the remaining top-level headings as the table of contents does,
+    // and find each named place's section. The anchors headings get by rule
+    // (spec 7.2) need not be stored; the others go in the article's list.
+    let texts: Vec<String> = body
+        .iter()
+        .filter_map(|b| match b {
+            Block::Heading { content, .. } => Some(plain_text(content)),
+            _ => None,
+        })
+        .collect();
+    let derived = heading_anchors(texts.iter().map(String::as_str));
+    let mut sections: HashMap<u32, u32> = HashMap::new();
+    let mut listed: Vec<Anchor> = Vec::new();
     let mut n = 0;
     for (b, a) in body.iter().zip(&anchors) {
         if matches!(b, Block::Heading { .. }) {
             n += 1;
+            let by_rule = anchor_hash(&derived[n as usize - 1]);
+            sections.entry(by_rule).or_insert(n);
             if let Some(a) = a {
-                sections.entry(a.as_str()).or_insert(n);
+                let hash = anchor_hash(a);
+                if hash != by_rule && !sections.contains_key(&hash) {
+                    sections.insert(hash, n);
+                    listed.push(Anchor { hash, section: n });
+                }
             }
         }
     }
-    let fragments = std::mem::take(&mut cx.fragments);
-    let section_of = |pending: u32| {
-        let f = &fragments[(pending - PENDING) as usize];
-        sections
-            .get(f.as_str())
-            .or_else(|| sections.get(f.replace(' ', "_").as_str()))
-            .copied()
-            .unwrap_or(0)
-    };
+    for (name, heading) in &cx.marks {
+        let section = match *heading {
+            0 => 0,
+            raw => kept[raw as usize - 1],
+        };
+        let hash = anchor_hash(name);
+        // Places in the lead need nothing: links open at the top anyway.
+        if section > 0 && !sections.contains_key(&hash) {
+            sections.insert(hash, section);
+            listed.push(Anchor { hash, section });
+        }
+    }
+    let pending = std::mem::take(&mut cx.pending);
     let mut article = Article {
         title: title.to_string(),
         body,
         tables: cx.tables,
         infobox: cx.infobox,
+        anchors: listed,
     };
-    for_each_link_mut(&mut article, &mut |section| {
-        if *section >= PENDING {
-            *section = section_of(*section);
+    xwa_format::content::for_each_link_mut(&mut article, &mut |_, place| {
+        if let Place::Section(n) = place
+            && *n >= PENDING
+        {
+            let hash = pending[(*n - PENDING) as usize];
+            *place = Place::Section(sections.get(&hash).copied().unwrap_or(0));
         }
     });
     Extracted {
@@ -339,6 +382,8 @@ struct Flow {
     /// Heading anchors, parallel to `blocks`.
     anchors: Vec<Option<String>>,
     run: Vec<Inline>,
+    /// The article's own flow, whose headings make the table of contents.
+    top: bool,
 }
 
 impl Flow {
@@ -375,7 +420,13 @@ struct Cx<'a> {
     infobox: Option<Infobox>,
     stats: Stats,
     flags: u16,
-    fragments: Vec<String>,
+    /// Anchor hashes of places in this article that links wait for.
+    pending: Vec<u32>,
+    /// Top-level headings so far.
+    headings: u32,
+    /// Named places in the text, with the number of top-level headings
+    /// before them.
+    marks: Vec<(String, u32)>,
     /// Inside a table cell or infobox, where tables flatten to text.
     in_cell: u32,
     images: Vec<ImageUse>,
@@ -410,6 +461,7 @@ impl Cx<'_> {
             self.heading(node, e, level, flow);
             return;
         }
+        self.note_place(e);
         match e.name() {
             "p" => {
                 flow.flush();
@@ -607,12 +659,28 @@ impl Cx<'_> {
         }
     }
 
+    /// Remembers a named place (an `{{anchor}}`, say) and its section.
+    fn note_place(&mut self, e: &Element) {
+        if let Some(id) = e.id().filter(|id| is_named_place(id)) {
+            self.marks.push((id.to_string(), self.headings));
+        }
+    }
+
     fn heading(&mut self, node: NodeRef<'_, Node>, e: &Element, level: u8, flow: &mut Flow) {
         let mut content = Vec::new();
+        let marks_before = self.marks.len();
         self.inline_children(node, &mut content);
         normalize(&mut content);
         if content.is_empty() {
             return;
+        }
+        if flow.top {
+            // Named places inside the heading (the old-style anchors Parsoid
+            // keeps for old links) belong to its section.
+            self.headings += 1;
+            for mark in &mut self.marks[marks_before..] {
+                mark.1 = self.headings;
+            }
         }
         // Parsoid puts the anchor on the heading; the old parser on a span inside.
         let anchor = e.id().map(str::to_string).or_else(|| {
@@ -645,6 +713,7 @@ impl Cx<'_> {
             if ce.name() != "li" || is_chrome(ce) {
                 continue;
             }
+            self.note_place(ce);
             let mut f = Flow::default();
             self.flow_children(child, &mut f);
             let blocks = f.finish();
@@ -680,6 +749,7 @@ impl Cx<'_> {
             if is_chrome(ce) {
                 continue;
             }
+            self.note_place(ce);
             match ce.name() {
                 "dt" => {
                     let mut run = Vec::new();
@@ -723,9 +793,13 @@ impl Cx<'_> {
         if e.attr("role") == Some("presentation") {
             // A layout table: its cells are ordinary content.
             for row in rows(node) {
-                for (cell, _) in
+                if let Some(re) = element(&row) {
+                    self.note_place(re);
+                }
+                for (cell, ce) in
                     child_elements(row).filter(|(_, ce)| matches!(ce.name(), "td" | "th"))
                 {
+                    self.note_place(ce);
                     self.flow_children(cell, flow);
                 }
             }
@@ -777,11 +851,17 @@ impl Cx<'_> {
         let mut cols = 0usize;
         self.in_cell += 1;
         for (r, row) in rows.iter().enumerate() {
+            // Rows are linked to as places, too (isotope tables, lists of
+            // things in a table).
+            if let Some(re) = element(row) {
+                self.note_place(re);
+            }
             let mut c = 0usize;
             for (cell, ce) in child_elements(*row) {
                 if !matches!(ce.name(), "td" | "th") || is_chrome(ce) {
                     continue;
                 }
+                self.note_place(ce);
                 let span = |name: &str| {
                     ce.attr(name)
                         .and_then(|v| v.trim().parse::<usize>().ok())
@@ -957,6 +1037,7 @@ impl Cx<'_> {
             self.count_dropped(node, e);
             return;
         }
+        self.note_place(e);
         let style = match e.name() {
             "b" | "strong" => Some(Style::Bold),
             "i" | "em" | "var" | "dfn" | "cite" => Some(Style::Italic),
@@ -1042,16 +1123,23 @@ impl Cx<'_> {
             out.extend(content);
             return;
         };
-        let section = match target.fragment {
-            Some(f) if article == self.self_id => {
-                self.fragments.push(f);
-                PENDING + self.fragments.len() as u32 - 1
+        // A place in the target: named in the link, or by the redirect the
+        // link goes through.
+        let anchor = match target.fragment {
+            Some(f) => Some(anchor_hash(&f)),
+            None => self.resolver.anchor(&target.path),
+        };
+        let place = match anchor {
+            Some(hash) if article == self.self_id => {
+                self.pending.push(hash);
+                Place::Section(PENDING + self.pending.len() as u32 - 1)
             }
-            _ => 0,
+            Some(hash) => Place::Anchor(hash),
+            None => Place::TOP,
         };
         out.push(Inline::Link {
             article,
-            section,
+            place,
             content,
         });
     }
@@ -1104,11 +1192,11 @@ fn styled(style: Style, run: Vec<Inline>) -> Inline {
                 Inline::Styled(s, c) => out.push(Inline::Styled(s, unwrap(c, style))),
                 Inline::Link {
                     article,
-                    section,
+                    place,
                     content,
                 } => out.push(Inline::Link {
                     article,
-                    section,
+                    place,
                     content: unwrap(content, style),
                 }),
                 other => out.push(other),
@@ -1427,11 +1515,12 @@ fn trim_end(list: &mut Vec<Inline>) {
 }
 
 /// Drops headings with nothing under them before the next heading of the
-/// same or a higher level.
+/// same or a higher level. Also gives, for each heading before (in order),
+/// its section number after: its own, or the one it now falls in.
 fn drop_empty_headings(
     blocks: Vec<Block>,
     anchors: Vec<Option<String>>,
-) -> (Vec<Block>, Vec<Option<String>>) {
+) -> (Vec<Block>, Vec<Option<String>>, Vec<u32>) {
     let level = |b: &Block| match b {
         Block::Heading { level, .. } => Some(*level),
         _ => None,
@@ -1446,13 +1535,22 @@ fn drop_empty_headings(
                 .any(|n| n.is_none()),
         })
         .collect();
-    blocks
+    let mut sections = Vec::new();
+    let mut n = 0;
+    for (b, k) in blocks.iter().zip(&keep) {
+        if level(b).is_some() {
+            n += *k as u32;
+            sections.push(n);
+        }
+    }
+    let (blocks, anchors) = blocks
         .into_iter()
         .zip(anchors)
         .zip(keep)
         .filter(|(_, k)| *k)
         .map(|(ba, _)| ba)
-        .unzip()
+        .unzip();
+    (blocks, anchors, sections)
 }
 
 /// Calls `f` on every formula in the article.
@@ -1558,57 +1656,6 @@ pub fn for_each_image_mut(a: &mut Article, f: &mut impl FnMut(&mut u32)) {
     }
 }
 
-fn for_each_link_mut(a: &mut Article, f: &mut impl FnMut(&mut u32)) {
-    fn inlines(list: &mut [Inline], f: &mut impl FnMut(&mut u32)) {
-        for i in list {
-            match i {
-                Inline::Link {
-                    section, content, ..
-                } => {
-                    f(section);
-                    inlines(content, f);
-                }
-                Inline::Styled(_, c) => inlines(c, f),
-                _ => {}
-            }
-        }
-    }
-    fn blocks(list: &mut [Block], f: &mut impl FnMut(&mut u32)) {
-        for b in list {
-            match b {
-                Block::Para(c)
-                | Block::Heading { content: c, .. }
-                | Block::Figure { caption: c, .. } => inlines(c, f),
-                Block::List { items, .. } => items.iter_mut().for_each(|i| blocks(i, f)),
-                Block::Quote(inner) => blocks(inner, f),
-                Block::Gallery(items) => items.iter_mut().for_each(|(_, c)| inlines(c, f)),
-                Block::Pre(_)
-                | Block::Rule
-                | Block::MathBlock(_)
-                | Block::TableRef(_)
-                | Block::InfoboxRef => {}
-            }
-        }
-    }
-    blocks(&mut a.body, f);
-    for t in &mut a.tables {
-        t.cells.iter_mut().for_each(|c| inlines(&mut c.content, f));
-    }
-    if let Some(ib) = &mut a.infobox {
-        for row in &mut ib.rows {
-            match row {
-                InfoboxRow::Header(c)
-                | InfoboxRow::Full(c)
-                | InfoboxRow::Image { caption: c, .. } => inlines(c, f),
-                InfoboxRow::Field { label, value } => {
-                    inlines(label, f);
-                    inlines(value, f);
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1618,6 +1665,15 @@ mod tests {
     impl Resolver for Map {
         fn article(&self, path: &str) -> Option<u32> {
             self.0.get(path).copied()
+        }
+
+        // "Frog_call" redirects to Geometry#Call, "Here" to Self#Proofs.
+        fn anchor(&self, path: &str) -> Option<u32> {
+            match path {
+                "Frog_call" => Some(anchor_hash("Call")),
+                "Here" => Some(anchor_hash("Proofs")),
+                _ => None,
+            }
         }
     }
 
@@ -1631,6 +1687,8 @@ mod tests {
             ("Euclid's_Elements", 4),
             ("Self", 0),
             ("Geometry", 5),
+            ("Frog_call", 5),
+            ("Here", 0),
         ]));
         extract(&html, "Self", "Self", 0, &map)
     }
@@ -1653,15 +1711,16 @@ mod tests {
                 text("In "),
                 Inline::Link {
                     article: 3,
-                    section: 0,
+                    place: Place::TOP,
                     content: vec![text("mathematics")]
                 },
                 text(", the "),
                 Inline::Styled(Style::Bold, vec![text("theorem")]),
                 text(" of "),
+                // A place in another article goes by its anchor.
                 Inline::Link {
                     article: 4,
-                    section: 0,
+                    place: Place::Anchor(anchor_hash("Book_I")),
                     content: vec![Inline::Styled(Style::Italic, vec![text("Euclid")])]
                 },
                 text(" is missing and out."),
@@ -1706,7 +1765,7 @@ mod tests {
             first[1],
             Inline::Link {
                 article: 0,
-                section: 2,
+                place: Place::Section(2),
                 content: vec![text("below")]
             }
         );
@@ -1714,9 +1773,75 @@ mod tests {
             first[3],
             Inline::Link {
                 article: 0,
-                section: 1,
+                place: Place::Section(1),
                 content: vec![text("history")]
             }
+        );
+    }
+
+    #[test]
+    fn named_places_and_links_to_them() {
+        let x = run(
+            r##"<section data-mw-section-id="0"><p><a rel="mw:WikiLink" href="Frog_call">call</a>,
+            <a rel="mw:WikiLink" href="Here">here</a>, <a rel="mw:WikiLink" href="#Euclid.27s_proof">old</a>,
+            <a rel="mw:WikiLink" href="#Decomposition">later</a>, <a rel="mw:WikiLink" href="#Childhood">early</a>.<span id="Lead_place"></span></p></section>
+            <section data-mw-section-id="1"><div class="mw-heading mw-heading2"><h2 id="Childhood">Early years</h2></div><p>Text.</p></section>
+            <section data-mw-section-id="2"><div class="mw-heading mw-heading2"><h2 id="Empty">Empty</h2></div></section>
+            <section data-mw-section-id="3"><div class="mw-heading mw-heading2"><h2 id="Euclid's_proof"><span id="Euclid.27s_proof" typeof="mw:FallbackId"></span>Euclid's proof</h2></div>
+              <p id="mwAB"><span class="anchor" id="Decomposition"></span>More <sup class="mw-ref reference" id="cite_ref-1"><a href="#cite_note-1">[1]</a></sup>text.</p></section>
+            <section data-mw-section-id="4"><div class="mw-heading mw-heading2"><h2 id="Proofs">Proofs</h2></div><p>Many.</p></section>"##,
+        );
+        let toc: Vec<String> = x
+            .article
+            .body
+            .iter()
+            .filter_map(|b| match b {
+                Block::Heading { content, .. } => Some(plain_text(content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(toc, ["Early years", "Euclid's proof", "Proofs"]);
+        // Listed: the heading whose anchor is not its text, and the named
+        // places that are not headings. "Euclid's_proof", "Proofs" and the
+        // place in the lead need nothing.
+        assert_eq!(
+            x.article.anchors,
+            vec![
+                Anchor {
+                    hash: anchor_hash("Childhood"),
+                    section: 1
+                },
+                Anchor {
+                    hash: anchor_hash("Euclid.27s_proof"),
+                    section: 2
+                },
+                Anchor {
+                    hash: anchor_hash("Decomposition"),
+                    section: 2
+                },
+            ]
+        );
+        let Block::Para(lead) = &x.article.body[0] else {
+            panic!()
+        };
+        let places: Vec<(u32, Place)> = lead
+            .iter()
+            .filter_map(|i| match i {
+                Inline::Link { article, place, .. } => Some((*article, *place)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            places,
+            [
+                // Through a redirect to a section of another article.
+                (5, Place::Anchor(anchor_hash("Call"))),
+                // Through a redirect to a section of this one.
+                (0, Place::Section(3)),
+                (0, Place::Section(2)),
+                (0, Place::Section(2)),
+                (0, Place::Section(1)),
+            ]
         );
     }
 
@@ -1845,7 +1970,7 @@ mod tests {
                         text("For the album, see "),
                         Inline::Link {
                             article: 5,
-                            section: 0,
+                            place: Place::TOP,
                             content: vec![text("Geometry")]
                         },
                         text(".")
@@ -2038,7 +2163,7 @@ mod image_tests {
                         text("The "),
                         Inline::Link {
                             article: 1,
-                            section: 0,
+                            place: Place::TOP,
                             content: vec![text("proof")]
                         }
                     ]

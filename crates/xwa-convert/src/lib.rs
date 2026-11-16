@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 use xwa_fetch::wikimedia::{Diagrams, FetchReport, Wanted};
 use xwa_format::Profile;
-use xwa_format::content::{Article, Formula, MathItem, Ref};
+use xwa_format::content::{Article, Formula, MathItem, Ref, anchor_hash};
 use xwa_format::writer::{ArchiveWriter, Summary, WriterOptions, image_flags};
 use xwa_zim::Target;
 
@@ -168,6 +168,9 @@ struct ImageEntry {
 /// Link and image lookups for the extractor.
 struct Tables {
     links: PathTable,
+    /// The anchor hash of the place each redirect to a section leads to, by
+    /// path.
+    link_anchors: PathTable,
     /// Image path to an index into the image entries; `None` when pictures
     /// are off.
     images: Option<PathTable>,
@@ -178,6 +181,10 @@ struct Tables {
 impl Resolver for Tables {
     fn article(&self, path: &str) -> Option<u32> {
         self.links.get(path)
+    }
+
+    fn anchor(&self, path: &str) -> Option<u32> {
+        self.link_anchors.get(path)
     }
 
     fn image(&self, path: &str) -> Option<u32> {
@@ -310,8 +317,10 @@ fn convert_inner(
     // redirects and the second are left out.
     let page_groups = cluster_groups(&candidates);
     let mut kinds: Vec<PageKind> = Vec::with_capacity(candidates.len());
+    // HTML redirects to a section: (entry, anchor hash of the section).
+    let mut section_redirects: Vec<(u32, u32)> = Vec::new();
     for (n, batch) in page_groups.chunks(threads * 8).enumerate() {
-        let part: Vec<Vec<PageKind>> = pool.install(|| {
+        let part: Vec<Vec<(PageKind, Option<u32>)>> = pool.install(|| {
             batch
                 .par_iter()
                 .map(|range| {
@@ -323,27 +332,34 @@ fn convert_inner(
                                 .as_ref()
                                 .and_then(|c| c.blob(candidates[i].blob as usize))
                             else {
-                                return PageKind::Article;
+                                return (PageKind::Article, None);
                             };
                             if let Some(url) = links::refresh_target(html) {
                                 // The target is relative to the page's own path.
-                                let to = zim
+                                let href = zim
                                     .entry(candidates[i].entry)
                                     .ok()
-                                    .and_then(|e| links::resolve_href(&e.path, &url))
-                                    .and_then(|h| by_path.get(&h.path));
-                                return PageKind::Redirect(to.unwrap_or(NONE));
+                                    .and_then(|e| links::resolve_href(&e.path, &url));
+                                let to = href.as_ref().and_then(|h| by_path.get(&h.path));
+                                let anchor = href.and_then(|h| h.fragment).map(|f| anchor_hash(&f));
+                                return (PageKind::Redirect(to.unwrap_or(NONE)), anchor);
                             }
-                            match links::page_namespace(html) {
+                            let kind = match links::page_namespace(html) {
                                 Some(ns) if ns != 0 => PageKind::OtherNamespace,
                                 _ => PageKind::Article,
-                            }
+                            };
+                            (kind, None)
                         })
                         .collect::<Vec<_>>()
                 })
                 .collect()
         });
-        kinds.extend(part.into_iter().flatten());
+        for (kind, anchor) in part.into_iter().flatten() {
+            if let Some(hash) = anchor {
+                section_redirects.push((candidates[kinds.len()].entry, hash));
+            }
+            kinds.push(kind);
+        }
         let done = ((n + 1) * threads * 8).min(page_groups.len());
         check(scanning(1, done as u64, page_groups.len() as u64))?;
     }
@@ -375,29 +391,45 @@ fn convert_inner(
     for (id, a) in articles.iter().enumerate() {
         leads_to[a.entry as usize] = id as u32;
     }
-    let follow = |mut entry: u32| -> Option<u32> {
+    section_redirects.sort_unstable();
+    // The article an entry leads to, and the place in it when a redirect on
+    // the way leads to a section (the one nearest the article counts).
+    let follow = |mut entry: u32| -> Option<(u32, Option<u32>)> {
+        let mut anchor = None;
         for _ in 0..16 {
+            if let Ok(i) = section_redirects.binary_search_by_key(&entry, |r| r.0) {
+                anchor = Some(section_redirects[i].1);
+            }
             match *leads_to.get(entry as usize)? {
                 NONE => return None,
                 v if v & REDIRECT != 0 => entry = v & !REDIRECT,
-                id => return Some(id),
+                id => return Some((id, anchor)),
             }
         }
         None
     };
     // Links resolve through every path that leads to an article.
+    let mut link_anchors = Vec::new();
+    let links = PathTable::from_hashed(
+        by_path
+            .into_entries()
+            .into_iter()
+            .filter_map(|(hash, entry)| {
+                let (id, anchor) = follow(entry)?;
+                if let Some(a) = anchor {
+                    link_anchors.push((hash, a));
+                }
+                Some((hash, id))
+            })
+            .collect(),
+    );
     let table = Tables {
-        links: PathTable::from_hashed(
-            by_path
-                .into_entries()
-                .into_iter()
-                .filter_map(|(hash, entry)| follow(entry).map(|id| (hash, id)))
-                .collect(),
-        ),
+        links,
+        link_anchors: PathTable::from_hashed(link_anchors),
         images: opts.images.then(|| PathTable::from_hashed(image_paths)),
         math: opts.math.then(math::MathEngine::new),
     };
-    let main_article = zim.header().main_page.and_then(follow);
+    let main_article = zim.header().main_page.and_then(follow).map(|(id, _)| id);
 
     let profile = opts.device.profile();
     // Temporary files go next to the archive: the system's temporary folder
@@ -468,8 +500,8 @@ fn convert_inner(
             return Ok(());
         }
         match follow(e.index) {
-            Some(id) => {
-                if let Err(err) = writer.add_redirect(e.display_title(), id) {
+            Some((id, anchor)) => {
+                if let Err(err) = writer.add_redirect(e.display_title(), id, anchor) {
                     failure = Some(err.into());
                     return Err(xwa_zim::Error::Corrupt("stopped".into()));
                 }
@@ -557,7 +589,7 @@ fn convert_inner(
                         }
                     });
                     xwa_format::content::walk_refs(&x.article, &mut |r| {
-                        if let Ref::Link(target) = r
+                        if let Ref::Link(target, _) = r
                             && target != id
                         {
                             incoming[target as usize] = incoming[target as usize].saturating_add(1);
@@ -592,7 +624,13 @@ fn convert_inner(
 
     // Only the formula engine is needed from here on.
     let math_engine = table.math;
-    drop((table.links, table.images, articles, image_ids));
+    drop((
+        table.links,
+        table.link_anchors,
+        table.images,
+        articles,
+        image_ids,
+    ));
 
     // Sharper diagrams, fetched before the pictures are converted: the
     // image ids of SVG diagrams, and their wiki file names and sizes.
