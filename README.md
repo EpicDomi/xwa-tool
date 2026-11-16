@@ -35,10 +35,25 @@ Early. What works today:
   e-reader looks for them, with FAT32's 4 GB limit checked first).
 - `xwa-tool`: command line with `catalog`, `download`, `convert`, `copy`,
   `info`, `verify`, `dump` and `title-index`.
-- `xwa-tool-gui`: a desktop app. "Get Wikipedia" lists the Kiwix library
-  by language and downloads a ZIM; "Convert" takes it (or any ZIM, also by
-  drag and drop), converts it for your e-reader, and copies the result to
-  an SD card.
+- `xwa-tool-gui`: a desktop app drawn as the e-reader itself. The window
+  is the device (an X4 Pro, X4 or X3, in a black or white case) and its
+  screen looks like e-ink and shows the firmware's own menus, fonts and
+  icons. "Get Wikipedia" lists the Kiwix library by language and downloads
+  a ZIM; "Convert" takes it (or any ZIM, also by drag and drop) and converts
+  it for your e-reader; "Copy to SD card" puts the archive on the card.
+
+  Everything can be clicked, and the device's keys work too: the page keys
+  turn pages, the X4's and X3's front keys do what the labels above them
+  say, the X4 Pro's Home key goes home, and the power key offers to sleep
+  (minimise) or turn off (quit). On the keyboard the arrows move, Enter
+  chooses, Esc goes back, Page Up and Page Down turn pages, and Ctrl (⌘ on
+  a Mac) with + and − changes the size; Ctrl 0 fits it to the screen again.
+  Drag the device by its case to move it. Settings has the device, the
+  case colour, the size, the e-ink refresh flash and the download folder.
+
+![The app as an X4 Pro, X4 and X3, each in black and in white](docs/images/app-devices.png)
+
+![The Kiwix library, a conversion under way, copying to a card, and a finished conversion](docs/images/app-screens.png)
 
 ## Building
 

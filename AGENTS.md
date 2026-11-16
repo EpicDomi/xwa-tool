@@ -16,7 +16,13 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   resume, SHA-256), removable drives and copying to them, and sharper
   diagrams from Wikimedia (`wikimedia.rs`).
 - `crates/xwa-cli`: the `xwa-tool` command line.
-- `crates/xwa-gui`: the `xwa-tool-gui` desktop app (iced).
+- `crates/xwa-gui`: the `xwa-tool-gui` desktop app (iced), drawn as the
+  e-reader: `device.rs` (the cases and keys of each model), `eink.rs` (the
+  screen: the firmware's Lyra theme sizes, fonts and widgets), `screens.rs`
+  (what each screen shows), `app.rs` (state and messages), `prefs.rs`
+  (remembered choices). `XWA_GUI_SCREENS=DIR cargo test -p xwa-gui --
+  --ignored screens` draws every screen of every model into `DIR`
+  (`XWA_GUI_ZIM` adds a real ZIM, `XWA_GUI_ONLY` picks screens by name).
 - `xtask`: repository chores; `cargo xtask licenses` writes the third-party
   notice that ships in every release zip.
 - `docs/format-spec-v0.md`: the format specification.
@@ -31,6 +37,9 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   and `cargo test --workspace` passing; CI runs all three on Windows, macOS
   and Linux.
 - The GUI targets non-technical users: plain wording, no jargon.
+- The app's screen copies the firmware's Lyra theme (CPR-vCodex
+  `src/components/themes/lyra/`): keep its sizes, fonts and icons in step
+  with the firmware rather than inventing new ones.
 - Do not test sharper diagrams against Wikimedia from CI or shared servers:
   point `XWA_TOOL_UPLOADS` at a local stand-in server instead.
 - Do not commit, tag, or push unless the user asks.
