@@ -13,6 +13,7 @@ use xwa_fetch::wikimedia::Diagrams;
 use xwa_fetch::{Book, Language, size_text};
 
 use crate::device::{Finish, Key, Model};
+use crate::downloads::{self, Download, Fetch, Queue, Rate};
 use crate::eink;
 use crate::graphics::{self, Graphics};
 use crate::library::{View, Wiki};
@@ -51,6 +52,7 @@ pub enum Screen {
     Settings,
     /// How the library's list is filtered and sorted.
     Filter,
+    Downloads,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +64,8 @@ pub enum Popup {
     StopConversion,
     /// Picking one of a setting's values.
     Choose(Choice),
+    /// What can be done with one of the downloads.
+    Download(usize),
 }
 
 /// A setting chosen from a list.
@@ -90,12 +94,16 @@ pub enum Job {
         step: usize,
         cancel: Arc<AtomicBool>,
         started: Instant,
+        /// Bytes a second, for downloads and copies.
+        rate: Option<f64>,
+        /// Time left, when the worker can tell from its speed.
+        left: Option<Duration>,
     },
     Finished(Result<String, String>),
 }
 
 impl Job {
-    fn start() -> (Job, Arc<AtomicBool>) {
+    pub(crate) fn start() -> (Job, Arc<AtomicBool>) {
         let cancel = Arc::new(AtomicBool::new(false));
         (
             Job::Running {
@@ -104,28 +112,39 @@ impl Job {
                 step: 0,
                 cancel: cancel.clone(),
                 started: Instant::now(),
+                rate: None,
+                left: None,
             },
             cancel,
         )
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Job::Running { label, .. } => label,
+            _ => "",
+        }
     }
 
     pub fn running(&self) -> bool {
         matches!(self, Job::Running { .. })
     }
 
-    fn cancel(&mut self) {
+    pub(crate) fn cancel(&mut self) {
         if let Job::Running { cancel, label, .. } = self {
             cancel.store(true, Ordering::Relaxed);
             *label = "Stopping…".into();
         }
     }
 
-    fn progress(&mut self, p: Progress) {
+    pub(crate) fn progress(&mut self, p: Progress) {
         if let Job::Running {
             label,
             fraction,
             step,
             cancel,
+            rate,
+            left,
             ..
         } = self
             && !cancel.load(Ordering::Relaxed)
@@ -133,6 +152,8 @@ impl Job {
             *label = p.label;
             *fraction = p.fraction;
             *step = p.step;
+            *rate = p.rate;
+            *left = p.left;
         }
     }
 
@@ -146,11 +167,17 @@ impl Job {
     /// Roughly how long is left, once there is enough to go on.
     pub fn time_left(&self) -> Option<Duration> {
         let Job::Running {
-            fraction, started, ..
+            fraction,
+            started,
+            left,
+            ..
         } = self
         else {
             return None;
         };
+        if left.is_some() {
+            return *left;
+        }
         let elapsed = started.elapsed().as_secs_f32();
         (*fraction >= 0.02 && elapsed >= 10.0)
             .then(|| Duration::from_secs_f32(elapsed * (1.0 - fraction) / fraction))
@@ -175,6 +202,27 @@ pub struct Progress {
     pub label: String,
     pub fraction: f32,
     pub step: usize,
+    pub rate: Option<f64>,
+    pub left: Option<Duration>,
+}
+
+impl Progress {
+    /// Bytes moved: how many of how many, how fast, and so how long is left.
+    fn bytes(done: u64, total: u64, rate: Option<f64>, step: usize) -> Progress {
+        let mut label = format!("{} of {}", size_text(done), size_text(total));
+        if let Some(r) = rate {
+            label += &format!(" · {}", downloads::speed_text(r));
+        }
+        Progress {
+            label,
+            fraction: done as f32 / total.max(1) as f32,
+            step,
+            rate,
+            left: rate
+                .filter(|r| *r > 0.0)
+                .map(|r| Duration::from_secs_f64(total.saturating_sub(done) as f64 / r)),
+        }
+    }
 }
 
 /// Messages from a worker thread.
@@ -264,9 +312,15 @@ pub enum Message {
     LanguageSearch(String),
     Submit,
     OpenBook(Book),
+    /// Adds the book on screen to the downloads.
     Download,
-    Downloading(Event<PathBuf>),
-    CancelDownload,
+    /// From the worker of a download's run.
+    Downloading(u64, Event<PathBuf>),
+    PauseDownload(String),
+    ResumeDownload(String),
+    RemoveDownload(String),
+    /// What can be done with a download, in a popup.
+    DownloadMenu(usize),
 }
 
 pub struct App {
@@ -328,8 +382,7 @@ pub struct App {
     pub search: String,
     pub language_search: String,
     pub book: Option<Book>,
-    pub download: Job,
-    pub downloading: Option<Book>,
+    pub downloads: Queue,
 }
 
 impl App {
@@ -383,8 +436,7 @@ impl App {
             search: String::new(),
             language_search: String::new(),
             book: None,
-            download: Job::Idle,
-            downloading: None,
+            downloads: Queue::default(),
         };
         let mut tasks = vec![window::oldest().map(Message::Window)];
         if let Some(path) = open {
@@ -406,7 +458,7 @@ impl App {
     }
 
     pub fn busy(&self) -> bool {
-        self.conversion.running() || self.copy.running() || self.download.running()
+        self.conversion.running() || self.copy.running() || self.downloads.is_running()
     }
 
     /// What is running, for the status line.
@@ -415,7 +467,7 @@ impl App {
         if let Some(f) = self.conversion.fraction() {
             parts.push(format!("Converting {:.0}%", f * 100.0));
         }
-        if let Some(f) = self.download.fraction() {
+        if let Some(f) = self.downloads.running().and_then(Download::fraction) {
             parts.push(format!("Downloading {:.0}%", f * 100.0));
         }
         if let Some(f) = self.copy.fraction() {
@@ -467,12 +519,15 @@ impl App {
         }
     }
 
-    fn back(&mut self) {
+    /// Goes back to the screen before, and does the work it needs, such as
+    /// putting the cursor back in its search field.
+    fn back(&mut self) -> Task<Message> {
         match self.history.pop() {
             Some((screen, focus)) => self.show(screen, focus),
             None if self.screen != Screen::Home => self.show(Screen::Home, 0),
-            None => {}
+            None => return Task::none(),
         }
+        self.entered()
     }
 
     fn first_focusable(&self) -> usize {
@@ -547,6 +602,10 @@ impl App {
         if let Some(popup) = self.popup {
             let rows = self.popup_rows(popup);
             let n = rows.len();
+            if n == 0 {
+                self.popup = None;
+                return Task::none();
+            }
             match key {
                 Key::Back | Key::Power | Key::Home => self.popup = None,
                 Key::Left | Key::Up => self.popup_focus = (self.popup_focus + n - 1) % n,
@@ -565,7 +624,7 @@ impl App {
                 self.popup_focus = 0;
             }
             Key::Home => self.go(Screen::Home),
-            Key::Back => self.back(),
+            Key::Back => return self.back(),
             Key::Confirm => {
                 let rows = self.page().rows;
                 if let Some(m) = rows.get(self.focus).and_then(|r| r.on_press.clone()) {
@@ -871,7 +930,11 @@ impl App {
             Message::TurnOff => {
                 self.conversion.cancel();
                 self.copy.cancel();
-                self.download.cancel();
+                for d in &mut self.downloads.items {
+                    if let Fetch::Running { job, .. } = &mut d.state {
+                        job.cancel();
+                    }
+                }
                 graphics::confirm(self.graphics);
                 return iced::exit();
             }
@@ -887,7 +950,7 @@ impl App {
                 self.go(screen);
                 return self.entered();
             }
-            Message::Back => self.back(),
+            Message::Back => return self.back(),
             Message::Focus(i) => self.focus = i,
             Message::PopupFocus(i) => self.popup_focus = i,
             Message::Scroll(delta) => {
@@ -975,14 +1038,9 @@ impl App {
                 );
             }
             Message::ZimChosen(Some(path)) if !self.conversion.running() => {
-                self.zim = Some(path.clone());
-                self.zim_info = None;
-                self.conversion = Job::Idle;
+                self.popup = None;
                 self.go(Screen::Convert);
-                let read = path.clone();
-                return Task::perform(background(move || describe(&read)), move |info| {
-                    Message::ZimRead(path.clone(), info)
-                });
+                return self.use_zim(path);
             }
             Message::ZimChosen(_) => {}
             Message::ZimRead(path, info) => {
@@ -1112,8 +1170,8 @@ impl App {
                 self.prefs.save();
                 self.language = Some(language);
                 self.language_search.clear();
-                self.back();
-                return self.load_books();
+                let back = self.back();
+                return Task::batch([back, self.load_books()]);
             }
             Message::BooksLoaded(Ok(books)) => {
                 self.library_status = books.is_empty().then(|| {
@@ -1163,25 +1221,91 @@ impl App {
                 self.book = Some(book);
                 self.go(Screen::Book);
             }
-            Message::Download => return self.start_download(),
-            Message::Downloading(Event::Progress(p)) => self.download.progress(p),
-            Message::Downloading(Event::Done(Ok(path))) => {
-                self.download = Job::Finished(Ok(format!("Downloaded {}.", path.display())));
-                self.downloading = None;
-                // On to converting it, unless something else is converting.
-                if !self.conversion.running() {
-                    return self.update(Message::ZimChosen(Some(path)));
+            Message::Download => {
+                if let Some(book) = self.book.clone() {
+                    self.downloads.add(book);
+                }
+                let start = self.next_download();
+                // The rows change: start again at the top, not on whatever
+                // took the place of the Download button (such as Remove).
+                self.focus = self.first_focusable();
+                return start;
+            }
+            Message::Downloading(run, Event::Progress(p)) => {
+                if let Some(Download {
+                    state: Fetch::Running { job, .. },
+                    ..
+                }) = self.downloads.by_run(run)
+                {
+                    job.progress(p);
                 }
             }
-            Message::Downloading(Event::Done(Err(e))) => {
-                self.download = Job::Finished(Err(if e == "cancelled" {
-                    "Download paused. Download again to carry on from where it stopped.".into()
-                } else {
-                    e
-                }));
-                self.downloading = None;
+            Message::Downloading(run, Event::Done(result)) => {
+                self.downloads.stopped(run);
+                let Some(d) = self.downloads.by_run(run) else {
+                    return self.next_download();
+                };
+                let watching = self.screen == Screen::Downloads
+                    || (self.screen == Screen::Book
+                        && self.book.as_ref().is_some_and(|b| b.id == d.book.id));
+                let mut finished = None;
+                d.state = match result {
+                    Ok(path) => {
+                        finished = Some(path.clone());
+                        Fetch::Done(path)
+                    }
+                    Err(e) if e == "cancelled" => Fetch::Paused {
+                        fraction: d.fraction().unwrap_or(0.0),
+                    },
+                    Err(e) => Fetch::Failed(e),
+                };
+                let next = self.next_download();
+                let Some(path) = finished else {
+                    return next;
+                };
+                if self.conversion.running() {
+                    return next;
+                }
+                if watching {
+                    // Someone watching it finish goes on to converting it.
+                    let convert = self.update(Message::ZimChosen(Some(path)));
+                    return Task::batch([next, convert]);
+                }
+                if self.zim.is_none() {
+                    // Otherwise it waits on the Convert screen, if that has
+                    // nothing else to convert.
+                    return Task::batch([next, self.use_zim(path)]);
+                }
+                return next;
             }
-            Message::CancelDownload => self.download.cancel(),
+            Message::PauseDownload(id) => {
+                self.popup = None;
+                if let Some(Download {
+                    state: Fetch::Running { job, .. },
+                    ..
+                }) = self.downloads.items.iter_mut().find(|d| d.id() == id)
+                {
+                    job.cancel();
+                }
+            }
+            Message::ResumeDownload(id) => {
+                self.popup = None;
+                if let Some(d) = self.downloads.get(&id) {
+                    self.downloads.add(d.book.clone());
+                }
+                return self.next_download();
+            }
+            Message::RemoveDownload(id) => {
+                self.popup = None;
+                self.downloads.remove(&id);
+                return self.next_download();
+            }
+            Message::DownloadMenu(i) => {
+                if i < self.downloads.items.len() {
+                    self.popup = Some(Popup::Download(i));
+                    self.popup_focus = 0;
+                }
+            }
         }
         Task::none()
     }
@@ -1190,7 +1314,7 @@ impl App {
     fn entered(&mut self) -> Task<Message> {
         match self.screen {
             Screen::Library if self.languages.is_empty() && !self.library_failed => {
-                self.load_library()
+                Task::batch([self.load_library(), operation::focus(SEARCH_ID)])
             }
             Screen::Library | Screen::Languages => operation::focus(SEARCH_ID),
             Screen::Card => {
@@ -1299,15 +1423,13 @@ impl App {
         std::thread::spawn(move || {
             let dir = xwa_fetch::drives::archive_dir(&drive.mount);
             let mut throttle = Throttle::default();
+            let mut rate = Rate::default();
             let result = xwa_fetch::drives::copy(&file, &dir, Some(&drive), &mut |p| {
+                let speed = rate.add(p.done);
                 if throttle.due(0) {
-                    let fraction = p.done as f32 / p.total.max(1) as f32;
-                    let label = format!("{} of {}", size_text(p.done), size_text(p.total));
-                    let _ = tx.unbounded_send(Event::Progress(Progress {
-                        label,
-                        fraction,
-                        step: 0,
-                    }));
+                    let _ = tx.unbounded_send(Event::Progress(Progress::bytes(
+                        p.done, p.total, speed, 0,
+                    )));
                 }
                 !cancel.load(Ordering::Relaxed)
             });
@@ -1316,42 +1438,55 @@ impl App {
         Task::run(rx, Message::Copying)
     }
 
-    fn start_download(&mut self) -> Task<Message> {
-        let Some(book) = self.book.clone() else {
+    /// Makes `path` the ZIM file to convert, and reads what it holds.
+    fn use_zim(&mut self, path: PathBuf) -> Task<Message> {
+        self.zim = Some(path.clone());
+        self.zim_info = None;
+        self.conversion = Job::Idle;
+        let read = path.clone();
+        Task::perform(background(move || describe(&read)), move |info| {
+            Message::ZimRead(path.clone(), info)
+        })
+    }
+
+    /// Starts the next waiting download, if nothing is downloading. Its
+    /// worker starts when the task runs.
+    fn next_download(&mut self) -> Task<Message> {
+        use iced::futures::StreamExt;
+        let (job, cancel) = Job::start();
+        let Some((run, url, dir)) = self.downloads.start_next(job, self.download_dir()) else {
             return Task::none();
         };
-        if self.download.running() {
-            return Task::none();
-        }
-        let (job, cancel) = Job::start();
-        self.download = job;
-        self.downloading = Some(book.clone());
-        let dir = self.download_dir();
-        let (tx, rx) = iced::futures::channel::mpsc::unbounded();
-        std::thread::spawn(move || {
-            let mut throttle = Throttle::default();
-            let result = xwa_fetch::Client::new().download(&book.url, &dir, &mut |p| {
-                if !throttle.due(p.stage as usize) {
-                    return !cancel.load(Ordering::Relaxed);
-                }
-                let fraction = p.done as f32 / p.total.max(1) as f32;
-                let (label, step) = match p.stage {
-                    xwa_fetch::Stage::Downloading => (
-                        format!("{} of {}", size_text(p.done), size_text(p.total)),
-                        0,
-                    ),
-                    xwa_fetch::Stage::Checking => ("Checking the download…".to_string(), 1),
-                };
-                let _ = tx.unbounded_send(Event::Progress(Progress {
-                    label,
-                    fraction,
-                    step,
-                }));
-                !cancel.load(Ordering::Relaxed)
+        let worker = async move {
+            let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+            std::thread::spawn(move || {
+                let mut throttle = Throttle::default();
+                let mut rate = Rate::default();
+                let result = xwa_fetch::Client::new().download(&url, &dir, &mut |p| {
+                    let speed = rate.add(p.done);
+                    if !throttle.due(p.stage as usize) {
+                        return !cancel.load(Ordering::Relaxed);
+                    }
+                    let progress = match p.stage {
+                        xwa_fetch::Stage::Downloading => Progress::bytes(p.done, p.total, speed, 0),
+                        xwa_fetch::Stage::Checking => Progress {
+                            label: "Checking the download…".into(),
+                            fraction: p.done as f32 / p.total.max(1) as f32,
+                            step: 1,
+                            rate: None,
+                            left: None,
+                        },
+                    };
+                    let _ = tx.unbounded_send(Event::Progress(progress));
+                    !cancel.load(Ordering::Relaxed)
+                });
+                let _ = tx.unbounded_send(Event::Done(result.map_err(|e| e.to_string())));
             });
-            let _ = tx.unbounded_send(Event::Done(result.map_err(|e| e.to_string())));
-        });
-        Task::run(rx, Message::Downloading)
+            rx
+        };
+        Task::run(iced::futures::stream::once(worker).flatten(), move |e| {
+            Message::Downloading(run, e)
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -1517,6 +1652,8 @@ fn conversion_progress(p: xwa_convert::Progress, images: bool, sharper: bool) ->
         label,
         fraction,
         step,
+        rate: None,
+        left: None,
     }
 }
 

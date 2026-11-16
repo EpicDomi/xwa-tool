@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use xwa_fetch::drives::Drive;
 use xwa_fetch::{Book, Language};
 
-use crate::app::{App, Choice, Job, Message, Popup, Screen};
+use crate::app::{App, Choice, Event, Job, Message, Popup, Screen};
 use crate::device::{Finish, Key, Model};
+use crate::downloads::Fetch;
 use crate::eink;
 use crate::prefs::Prefs;
 
@@ -122,7 +123,58 @@ fn running(fraction: f32, step: usize, label: &str) -> Job {
         step,
         cancel: Arc::new(AtomicBool::new(false)),
         started: Instant::now() - Duration::from_secs(1500),
+        rate: None,
+        left: None,
     }
+}
+
+/// A list of downloads in every state: the first book of the library
+/// downloading, two waiting, and one each paused, done and stopped.
+fn queue(app: &mut App) {
+    let books = library();
+    let states = [
+        (
+            0,
+            Fetch::Running {
+                job: Job::Running {
+                    label: "41.2 GB of 111.4 GB · 12 MB/s".into(),
+                    fraction: 0.37,
+                    step: 0,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    started: Instant::now() - Duration::from_secs(3400),
+                    rate: Some(12e6),
+                    left: Some(Duration::from_secs(5850)),
+                },
+                run: 1,
+            },
+        ),
+        (5, Fetch::Waiting),
+        (11, Fetch::Waiting),
+        (3, Fetch::Paused { fraction: 0.4 }),
+        (
+            27,
+            Fetch::Done(PathBuf::from(
+                "/home/reader/Downloads/wikipedia_en_ray-charles_maxi_2026-09.zim",
+            )),
+        ),
+        (14, Fetch::Failed("The mirrors stopped answering.".into())),
+    ];
+    for (i, state) in states {
+        app.downloads.add(books[i].clone());
+        app.downloads.items.last_mut().unwrap().state = state;
+    }
+}
+
+/// The run of the download at `i`, which must be running.
+fn run_of(app: &App, i: usize) -> u64 {
+    match app.downloads.items[i].state {
+        Fetch::Running { run, .. } => run,
+        ref other => panic!("not running: {other:?}"),
+    }
+}
+
+fn titles(app: &App) -> Vec<String> {
+    app.page().rows.iter().map(|r| r.title.clone()).collect()
 }
 
 fn card() -> Drive {
@@ -211,6 +263,8 @@ fn rows_fill_but_never_overflow_the_screen() {
             Screen::Convert,
             Screen::Card,
             Screen::Settings,
+            Screen::Filter,
+            Screen::Downloads,
         ] {
             let _ = app.update(Message::Open(screen));
             let page = app.page();
@@ -318,6 +372,116 @@ fn the_scroll_bar_turns_to_the_page_asked_for() {
     let pages = eink::paginate(&page.rows, app.list_room(&page));
     let _ = app.update(Message::ShowPage(2));
     assert_eq!(app.focus, pages[2].start);
+}
+
+#[test]
+fn downloads_wait_their_turn_and_can_be_paused_resumed_or_removed() {
+    let mut app = app(Model::X4Pro);
+    with_library(&mut app);
+    let books = library();
+    // The first starts at once.
+    let _ = app.update(Message::OpenBook(books[0].clone()));
+    assert_eq!(titles(&app).last().unwrap(), "Download");
+    let _ = app.update(Message::Download);
+    let first = run_of(&app, 0);
+    assert_eq!(titles(&app), ["Pause", "Remove", "Downloads"]);
+    // Another waits its turn.
+    let _ = app.update(Message::OpenBook(books[5].clone()));
+    let _ = app.update(Message::Download);
+    assert!(matches!(app.downloads.items[1].state, Fetch::Waiting));
+    assert!(titles(&app).ends_with(&["Downloads".into(), "Remove".into()]));
+    // The library shows how each is getting on.
+    let _ = app.update(Message::Open(Screen::Library));
+    let values: Vec<Option<String>> = app.page().rows.iter().map(|r| r.value.clone()).collect();
+    assert!(values.contains(&Some("0%".into())));
+    assert!(values.contains(&Some("Waiting".into())));
+    // Home has a way back to them.
+    let _ = app.update(Message::Open(Screen::Home));
+    let home = app.page().rows;
+    assert_eq!(home[1].title, "Downloads");
+    assert_eq!(
+        home[1].subtitle.as_deref(),
+        Some("Wikipedia 0% · 1 waiting")
+    );
+    let _ = app.update(Message::Focus(1));
+    press(&mut app, Key::Confirm);
+    assert_eq!(app.screen, Screen::Downloads);
+
+    // Choosing the running one asks what to do; pausing it lets the next start.
+    press(&mut app, Key::Confirm);
+    assert_eq!(app.popup, Some(Popup::Download(0)));
+    press(&mut app, Key::Confirm);
+    assert_eq!(app.popup, None);
+    assert!(
+        matches!(app.downloads.items[0].state, Fetch::Running { .. }),
+        "until its worker stops"
+    );
+    let _ = app.update(Message::Downloading(
+        first,
+        Event::Done(Err("cancelled".into())),
+    ));
+    assert!(matches!(app.downloads.items[0].state, Fetch::Paused { .. }));
+    let second = run_of(&app, 1);
+    // A late message from a stopped worker changes nothing.
+    let _ = app.update(Message::Downloading(first, Event::Done(Err("late".into()))));
+    assert_eq!(run_of(&app, 1), second);
+
+    // Resumed, the first waits for the second.
+    let _ = app.update(Message::ResumeDownload(books[0].id.clone()));
+    assert!(matches!(app.downloads.items[0].state, Fetch::Waiting));
+    // The second finishes with nobody watching: the first carries on, and
+    // the file waits on the Convert screen.
+    let _ = app.update(Message::Open(Screen::Home));
+    let zim = PathBuf::from("/nowhere/chemistry.zim");
+    let _ = app.update(Message::Downloading(second, Event::Done(Ok(zim.clone()))));
+    assert!(matches!(app.downloads.items[1].state, Fetch::Done(_)));
+    let third = run_of(&app, 0);
+    assert_eq!(app.zim.as_ref(), Some(&zim));
+    assert_eq!(app.screen, Screen::Home);
+
+    // Taken off the list, it stops and is gone.
+    let _ = app.update(Message::RemoveDownload(books[0].id.clone()));
+    assert_eq!(app.downloads.items.len(), 1);
+    assert!(!app.downloads.is_running());
+    let _ = app.update(Message::Downloading(
+        third,
+        Event::Done(Err("cancelled".into())),
+    ));
+    assert_eq!(app.downloads.items.len(), 1);
+}
+
+#[test]
+fn watching_a_download_finish_goes_on_to_converting_it() {
+    let mut app = app(Model::X4Pro);
+    with_library(&mut app);
+    let _ = app.update(Message::OpenBook(library()[5].clone()));
+    let _ = app.update(Message::Download);
+    let run = run_of(&app, 0);
+    let zim = PathBuf::from("/nowhere/chemistry.zim");
+    let _ = app.update(Message::Downloading(run, Event::Done(Ok(zim.clone()))));
+    assert_eq!(app.screen, Screen::Convert);
+    assert_eq!(app.zim, Some(zim));
+    // Back on the book, it offers converting what was downloaded.
+    press(&mut app, Key::Back);
+    assert_eq!(app.screen, Screen::Book);
+    assert!(titles(&app).contains(&"Convert".to_string()));
+}
+
+#[test]
+fn a_stopped_download_can_be_tried_again() {
+    let mut app = app(Model::X4Pro);
+    with_library(&mut app);
+    let _ = app.update(Message::OpenBook(library()[5].clone()));
+    let _ = app.update(Message::Download);
+    let run = run_of(&app, 0);
+    let _ = app.update(Message::Downloading(
+        run,
+        Event::Done(Err("No route to host".into())),
+    ));
+    assert!(matches!(app.downloads.items[0].state, Fetch::Failed(_)));
+    assert!(titles(&app).contains(&"Try again".to_string()));
+    let _ = app.update(Message::ResumeDownload(library()[5].id.clone()));
+    assert!(run_of(&app, 0) > run);
 }
 
 #[test]
@@ -521,9 +685,17 @@ fn screens() {
         let _ = a.update(Message::Back);
         let _ = a.update(Message::OpenBook(library()[0].clone()));
         snap(&a, &dir, &format!("{tag}-book"));
-        a.downloading = a.book.clone();
-        a.download = running(0.37, 0, "41.2 GB of 111.4 GB");
+        queue(&mut a);
         snap(&a, &dir, &format!("{tag}-downloading"));
+        let _ = a.update(Message::Back);
+        snap(&a, &dir, &format!("{tag}-library-downloading"));
+        let _ = a.update(Message::Open(Screen::Downloads));
+        snap(&a, &dir, &format!("{tag}-downloads"));
+        let _ = a.update(Message::DownloadMenu(3));
+        snap(&a, &dir, &format!("{tag}-download-menu"));
+        let _ = a.update(Message::ClosePopup);
+        let _ = a.update(Message::Open(Screen::Home));
+        snap(&a, &dir, &format!("{tag}-home-downloading"));
 
         let mut a = app(model);
         let _ = a.update(Message::Open(Screen::Convert));

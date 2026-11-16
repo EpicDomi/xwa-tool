@@ -15,6 +15,7 @@ use crate::app::{
     App, Choice, Job, Message, Popup, SEARCH_ID, Screen, ZOOMS, ZimInfo, conversion_steps, group,
 };
 use crate::device::{Body, Finish, Glass, Key, MARGIN, Model};
+use crate::downloads::{Download, Fetch};
 use crate::eink::{
     self, BODY, DARK, Face, INK, Kind, LIGHT, PAD, PAPER, RADIUS, Row, SIDE, SMALL, TITLE, fit,
     label, paragraph,
@@ -86,15 +87,12 @@ impl App {
             Screen::Card => self.card_page(),
             Screen::Settings => self.settings_page(),
             Screen::Filter => self.filter_page(),
+            Screen::Downloads => self.downloads_page(),
         }
     }
 
     fn home_page(&self) -> Page {
         let short = self.prefs.model.short_name();
-        let get = match (&self.downloading, self.download.fraction()) {
-            (Some(b), Some(f)) => format!("Downloading {}… {}", b.title, percent(f)),
-            _ => "From the Kiwix library".into(),
-        };
         let convert = match (self.conversion.fraction(), &self.zim) {
             (Some(f), _) => format!("Converting… {}", percent(f)),
             (None, Some(zim)) => file_name(zim),
@@ -116,24 +114,42 @@ impl App {
             back: false,
             top: HOME_TOP,
             bottom: 0.0,
-            rows: vec![
-                Row::new(Kind::Menu, "Get Wikis")
-                    .icon(&icons::DOWNLOAD)
-                    .subtitle(get)
-                    .on_press(Message::Open(Screen::Library)),
-                Row::new(Kind::Menu, "Convert")
-                    .icon(&icons::CONVERT)
-                    .subtitle(convert)
-                    .on_press(Message::Open(Screen::Convert)),
-                Row::new(Kind::Menu, "Copy to SD card")
-                    .icon(&icons::TRANSFER)
-                    .subtitle(copy)
-                    .on_press(Message::Open(Screen::Card)),
-                Row::new(Kind::Menu, "Settings")
-                    .icon(&icons::SETTINGS)
-                    .subtitle(settings)
-                    .on_press(Message::Open(Screen::Settings)),
-            ],
+            rows: [
+                Some(
+                    Row::new(Kind::Menu, "Get Wikis")
+                        .icon(&icons::LIBRARY)
+                        .subtitle("Wikipedia and more, from Kiwix")
+                        .on_press(Message::Open(Screen::Library)),
+                ),
+                // Only while there are downloads to see.
+                self.downloads.summary().map(|s| {
+                    Row::new(Kind::Menu, "Downloads")
+                        .icon(&icons::DOWNLOAD)
+                        .subtitle(s)
+                        .on_press(Message::Open(Screen::Downloads))
+                }),
+                Some(
+                    Row::new(Kind::Menu, "Convert")
+                        .icon(&icons::CONVERT)
+                        .subtitle(convert)
+                        .on_press(Message::Open(Screen::Convert)),
+                ),
+                Some(
+                    Row::new(Kind::Menu, "Copy to SD card")
+                        .icon(&icons::TRANSFER)
+                        .subtitle(copy)
+                        .on_press(Message::Open(Screen::Card)),
+                ),
+                Some(
+                    Row::new(Kind::Menu, "Settings")
+                        .icon(&icons::SETTINGS)
+                        .subtitle(settings)
+                        .on_press(Message::Open(Screen::Settings)),
+                ),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
             note: None,
             hints: ["", "Select", "Up", "Down"],
         }
@@ -163,20 +179,17 @@ impl App {
                 .on_press(Message::Open(Screen::Filter)),
         ];
         debug_assert_eq!(rows.len(), LIBRARY_ROWS);
-        let downloading = self.downloading.as_ref().map(|b| &b.id);
         let shown = view.arrange(&self.books, &self.search);
         for b in &shown {
-            let mut line = format!("{} · {}", b.flavour_description(), b.date);
-            if downloading == Some(&b.id) {
-                line = format!(
-                    "Downloading… {}",
-                    percent(self.download.fraction().unwrap_or(0.0))
-                );
-            }
+            // A book on the downloads list shows how it is getting on.
+            let value = match self.downloads.get(&b.id) {
+                Some(d) => d.badge(),
+                None => size_text(b.size),
+            };
             rows.push(
                 Row::new(Kind::Item, b.title.clone())
-                    .subtitle(line)
-                    .value(size_text(b.size))
+                    .subtitle(format!("{} · {}", b.flavour_description(), b.date))
+                    .value(value)
                     .on_press(Message::OpenBook((*b).clone())),
             );
         }
@@ -279,26 +292,44 @@ impl App {
         let Some(b) = &self.book else {
             return self.home_page();
         };
-        let this = self.downloading.as_ref().is_some_and(|d| d.id == b.id);
-        let other = self.download.running() && !this;
-        let page = |top: f32, bottom: f32, rows| Page {
+        let state = self.downloads.get(&b.id).map(|d| &d.state);
+        let id = || b.id.clone();
+        let remove = |what: &str| {
+            Row::new(Kind::Item, "Remove")
+                .subtitle(what.to_string())
+                .on_press(Message::RemoveDownload(id()))
+        };
+        let downloads = Row::new(Kind::Item, "Downloads")
+            .icon(&icons::DOWNLOAD)
+            .subtitle(self.downloads.summary().unwrap_or_default())
+            .opens()
+            .on_press(Message::Open(Screen::Downloads));
+        let mut page = Page {
             title: b.title.clone(),
             subtitle: (!b.flavour.is_empty()).then(|| b.flavour.clone()),
             back: true,
-            top,
-            bottom,
-            rows,
+            top: SUMMARY_TOP,
+            bottom: if self.book_note().is_some() {
+                96.0
+            } else {
+                0.0
+            },
+            rows: Vec::new(),
             note: None,
             hints: LIST_HINTS,
         };
-        if this && self.download.running() {
-            return page(
-                SUMMARY_TOP + progress_height(None),
-                0.0,
-                vec![Row::new(Kind::Item, "Pause").on_press(Message::CancelDownload)],
-            );
+        if let Some(Fetch::Running { .. }) = state {
+            page.top += progress_height(None);
+            page.rows = vec![
+                Row::new(Kind::Item, "Pause")
+                    .subtitle("Carry on later from where it stopped")
+                    .on_press(Message::PauseDownload(id())),
+                remove("Stop, and delete what was downloaded"),
+                downloads,
+            ];
+            return page;
         }
-        let mut rows = vec![
+        page.rows = vec![
             Row::new(Kind::Info, "Size").value(size_text(b.size)),
             Row::new(Kind::Info, "Articles").value(group(b.article_count)),
             Row::new(Kind::Info, "Pictures").value(if b.has_pictures() {
@@ -307,22 +338,88 @@ impl App {
                 "None".into()
             }),
             Row::new(Kind::Info, "Published").value(b.date.clone()),
-            Row::new(Kind::Item, "Save in")
-                .icon(&icons::FOLDER)
-                .subtitle(self.download_dir().display().to_string())
-                .opens()
-                .on_press(Message::ChooseDownloadDir),
         ];
-        rows.push(
-            Row::new(Kind::Action, "Download")
-                .on_press_maybe((!other).then_some(Message::Download)),
-        );
-        let bottom = if other || matches!(self.download, Job::Finished(Err(_))) {
-            96.0
-        } else {
-            0.0
+        let more = match state {
+            None => vec![
+                Row::new(Kind::Item, "Save in")
+                    .icon(&icons::FOLDER)
+                    .subtitle(self.download_dir().display().to_string())
+                    .opens()
+                    .on_press(Message::ChooseDownloadDir),
+                Row::new(Kind::Action, "Download").on_press(Message::Download),
+            ],
+            Some(Fetch::Waiting) => vec![downloads, remove("Take it off the list")],
+            Some(Fetch::Paused { .. }) => vec![
+                Row::new(Kind::Action, "Resume").on_press(Message::ResumeDownload(id())),
+                remove("Delete what was downloaded"),
+                downloads,
+            ],
+            Some(Fetch::Done(path)) => vec![
+                Row::new(Kind::Action, "Convert").on_press_maybe(
+                    (!self.conversion.running()).then(|| Message::ZimChosen(Some(path.clone()))),
+                ),
+                downloads,
+            ],
+            Some(Fetch::Failed(_)) => vec![
+                Row::new(Kind::Action, "Try again").on_press(Message::ResumeDownload(id())),
+                remove("Delete what was downloaded"),
+            ],
+            Some(Fetch::Running { .. }) => Vec::new(),
         };
-        page(SUMMARY_TOP, bottom, rows)
+        page.rows.extend(more);
+        page
+    }
+
+    /// What the book screen says under its list about the book's download.
+    fn book_note(&self) -> Option<String> {
+        let b = self.book.as_ref()?;
+        match self.downloads.get(&b.id).map(|d| &d.state) {
+            None if self.downloads.is_running() => {
+                Some("Another file is downloading. This one will wait its turn.".into())
+            }
+            None | Some(Fetch::Running { .. }) => None,
+            Some(Fetch::Waiting) => {
+                Some("Waiting its turn: it starts when the files before it are done.".into())
+            }
+            Some(Fetch::Paused { fraction }) => Some(format!(
+                "Paused at {}. Resuming carries on from there.",
+                percent(*fraction)
+            )),
+            Some(Fetch::Done(path)) => Some(format!("Downloaded to {}", path.display())),
+            Some(Fetch::Failed(e)) => Some(format!("The download stopped: {e}")),
+        }
+    }
+
+    fn downloads_page(&self) -> Page {
+        let rows = self
+            .downloads
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                Row::new(Kind::Item, d.book.title.clone())
+                    .subtitle(d.line())
+                    .value(d.badge())
+                    .on_press(Message::DownloadMenu(i))
+            })
+            .collect();
+        Page {
+            title: "Downloads".into(),
+            subtitle: None,
+            back: true,
+            top: if self.downloads.is_running() {
+                COPY_TOP + progress_height(None)
+            } else {
+                0.0
+            },
+            bottom: 0.0,
+            rows,
+            note: self.downloads.items.is_empty().then(|| {
+                "Nothing is downloading. Files chosen in Get Wikis wait here for their turn."
+                    .to_string()
+            }),
+            hints: ["« Back", "Choose", "Up", "Down"],
+        }
     }
 
     fn convert_page(&self) -> Page {
@@ -533,12 +630,24 @@ impl App {
                 let summary = container(paragraph(clip_words(summary, 180), Face::Ui, BODY))
                     .padding([10.0, SIDE + PAD])
                     .height(SUMMARY_TOP);
-                if self.download.running() && self.downloading.as_ref().map(|b| &b.id) == self.book.as_ref().map(|b| &b.id) {
-                    column![summary, progress_view(&self.download, None)].into()
-                } else {
-                    summary.into()
+                match self
+                    .book
+                    .as_ref()
+                    .and_then(|b| self.downloads.get(&b.id))
+                    .and_then(Download::job)
+                {
+                    Some(job) => column![summary, progress_view(job, None)].into(),
+                    None => summary.into(),
                 }
             }
+            Screen::Downloads => match self.downloads.running() {
+                Some(d) => column![
+                    heading(&d.book.title, d.book.flavour_description(), w),
+                    d.job().map_or_else(|| Space::new().into(), |j| progress_view(j, None)),
+                ]
+                .into(),
+                None => Space::new().into(),
+            },
             Screen::Convert => match &self.zim {
                 Some(zim) if self.conversion.running() => {
                     let steps = conversion_steps(self.converting_images, self.converting_sharper);
@@ -569,20 +678,7 @@ impl App {
                 let what = self.archive.as_deref().map(file_name).unwrap_or_default();
                 let to = self.drive.as_ref().map(drive_line).unwrap_or_default();
                 column![
-                    container(
-                        column![
-                            label(fit(&what, Face::UiBold, BODY, w - 2.0 * (SIDE + PAD)).into_owned(), Face::UiBold, BODY),
-                            label(format!("to {}", fit(&to, Face::Small, SMALL, w - 2.0 * (SIDE + PAD) - 20.0)), Face::Small, SMALL),
-                        ]
-                        .spacing(4),
-                    )
-                    .padding(Padding {
-                        top: 20.0,
-                        right: SIDE + PAD,
-                        bottom: 0.0,
-                        left: SIDE + PAD,
-                    })
-                    .height(COPY_TOP),
+                    heading(&what, &format!("to {to}"), w),
                     progress_view(&self.copy, None),
                 ]
                 .into()
@@ -606,12 +702,9 @@ impl App {
                 ),
                 _ => Space::new().into(),
             },
-            Screen::Book => match &self.download {
-                Job::Running { .. } => {
-                    note("Another file is downloading. It can be downloaded once that one is done.")
-                }
-                Job::Finished(Err(e)) => note(e),
-                _ => Space::new().into(),
+            Screen::Book => match self.book_note() {
+                Some(s) => note(&s),
+                None => Space::new().into(),
             },
             Screen::Settings => note(&format!(
                 "On the keyboard: the arrows move, Enter chooses, Esc goes back, Page Up and Page Down turn pages. {MODIFIER} with + and − changes the size, {MODIFIER} 0 fits it to the screen."
@@ -646,12 +739,12 @@ impl App {
                 ),
                 Screen::Convert,
             )
-        } else if let (Job::Running { .. }, Some(b)) = (&self.download, &self.downloading) {
+        } else if let Some((d, job)) = self.downloads.running().and_then(|d| Some((d, d.job()?))) {
             (
                 image_cover(eink::wikipedia_cover()),
-                b.title.clone(),
-                job_lines(&self.download, b.flavour_description()),
-                Screen::Library,
+                d.book.title.clone(),
+                job_lines(job, d.book.flavour_description()),
+                Screen::Downloads,
             )
         } else if self.copy.running() {
             (
@@ -905,7 +998,40 @@ impl App {
     }
 
     fn popup_view(&self, p: Popup, width: f32) -> Element<'_, Message> {
+        let inner = width - 2.0 * 16.0;
         let (title, words) = match p {
+            Popup::Download(i) => match self.downloads.items.get(i) {
+                Some(d) => (
+                    fit(&d.book.title, Face::UiBold, TITLE, inner).into_owned(),
+                    Some(d.line()),
+                ),
+                None => ("Download".into(), None),
+            },
+            p => {
+                let (title, words) = self.popup_words(p);
+                (title.to_string(), words)
+            }
+        };
+        let mut content = column![label(title, Face::UiBold, TITLE)].spacing(8);
+        if let Some(w) = words {
+            content = content.push(paragraph(w, Face::Ui, BODY));
+        }
+        let rows = self.popup_rows(p);
+        let mut list = column![];
+        for (i, r) in rows.iter().enumerate() {
+            list = list.push(eink::row_view(
+                r,
+                i == self.popup_focus,
+                inner,
+                Message::PopupFocus(i),
+            ));
+        }
+        eink::popup(content.push(list).into(), width)
+    }
+
+    /// A popup's title, and what it says above its choices.
+    fn popup_words(&self, p: Popup) -> (&'static str, Option<String>) {
+        match p {
             Popup::Power => ("Power", None),
             Popup::TurnOffBusy => (
                 "Still working",
@@ -933,23 +1059,8 @@ impl App {
                         .to_string(),
                 ),
             ),
-        };
-        let inner = width - 2.0 * 16.0;
-        let mut content = column![label(title.to_string(), Face::UiBold, TITLE)].spacing(8);
-        if let Some(w) = words {
-            content = content.push(paragraph(w, Face::Ui, BODY));
+            Popup::Download(_) => ("Download", None),
         }
-        let rows = self.popup_rows(p);
-        let mut list = column![];
-        for (i, r) in rows.iter().enumerate() {
-            list = list.push(eink::row_view(
-                r,
-                i == self.popup_focus,
-                inner,
-                Message::PopupFocus(i),
-            ));
-        }
-        eink::popup(content.push(list).into(), width)
     }
 }
 
@@ -1032,8 +1143,54 @@ impl App {
                 );
                 rows
             }
+            Popup::Download(i) => self.download_actions(i),
             _ => popup_actions(p),
         }
+    }
+
+    /// What can be done with one of the downloads.
+    fn download_actions(&self, i: usize) -> Vec<Row<Message>> {
+        let Some(d) = self.downloads.items.get(i) else {
+            return Vec::new();
+        };
+        let id = || d.id().to_string();
+        let remove = |what: &str| {
+            Row::new(Kind::Item, "Remove")
+                .subtitle(what.to_string())
+                .on_press(Message::RemoveDownload(id()))
+        };
+        let mut rows = match &d.state {
+            Fetch::Running { .. } => vec![
+                Row::new(Kind::Item, "Pause")
+                    .subtitle("Carry on later from where it stopped")
+                    .on_press(Message::PauseDownload(id())),
+                remove("Stop, and delete what was downloaded"),
+            ],
+            Fetch::Waiting => vec![remove("Take it off the list")],
+            Fetch::Paused { .. } => vec![
+                Row::new(Kind::Item, "Resume")
+                    .subtitle("Carry on from where it stopped")
+                    .on_press(Message::ResumeDownload(id())),
+                remove("Delete what was downloaded"),
+            ],
+            Fetch::Done(path) => vec![
+                Row::new(Kind::Item, "Convert")
+                    .subtitle(format!("for the {}", self.prefs.model.short_name()))
+                    .on_press_maybe(
+                        (!self.conversion.running())
+                            .then(|| Message::ZimChosen(Some(path.clone()))),
+                    ),
+                Row::new(Kind::Item, "Remove from the list")
+                    .subtitle("The file stays in its folder")
+                    .on_press(Message::RemoveDownload(id())),
+            ],
+            Fetch::Failed(_) => vec![
+                Row::new(Kind::Item, "Try again").on_press(Message::ResumeDownload(id())),
+                remove("Delete what was downloaded"),
+            ],
+        };
+        rows.push(Row::new(Kind::Item, "Cancel").on_press(Message::ClosePopup));
+        rows
     }
 }
 
@@ -1110,7 +1267,7 @@ fn popup_actions(p: Popup) -> Vec<Row<Message>> {
             Row::new(Kind::Item, "Keep converting").on_press(Message::ClosePopup),
             Row::new(Kind::Item, "Stop").on_press(Message::CancelConversion),
         ],
-        Popup::Choose(_) => Vec::new(),
+        Popup::Choose(_) | Popup::Download(_) => Vec::new(),
     }
 }
 
@@ -1136,6 +1293,34 @@ fn clip_words(s: &str, max: usize) -> String {
 
 fn search<'a>(field: Element<'a, Message>) -> Element<'a, Message> {
     container(field).padding([9.0, SIDE]).into()
+}
+
+/// What is being copied or downloaded, above its progress.
+fn heading<'a>(what: &str, under: &str, w: f32) -> Element<'a, Message> {
+    let room = w - 2.0 * (SIDE + PAD);
+    container(
+        column![
+            label(
+                fit(what, Face::UiBold, BODY, room).into_owned(),
+                Face::UiBold,
+                BODY
+            ),
+            label(
+                fit(under, Face::Small, SMALL, room).into_owned(),
+                Face::Small,
+                SMALL
+            ),
+        ]
+        .spacing(4),
+    )
+    .padding(Padding {
+        top: 20.0,
+        right: SIDE + PAD,
+        bottom: 0.0,
+        left: SIDE + PAD,
+    })
+    .height(COPY_TOP)
+    .into()
 }
 
 fn note<'a>(s: &str) -> Element<'a, Message> {

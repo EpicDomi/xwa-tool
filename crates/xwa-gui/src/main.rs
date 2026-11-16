@@ -10,6 +10,7 @@
 mod app;
 mod crash;
 mod device;
+mod downloads;
 mod eink;
 mod graphics;
 mod icons;
