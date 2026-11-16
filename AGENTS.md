@@ -17,6 +17,8 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   diagrams from Wikimedia (`wikimedia.rs`).
 - `crates/xwa-cli`: the `xwa-tool` command line.
 - `crates/xwa-gui`: the `xwa-tool-gui` desktop app (iced).
+- `xtask`: repository chores; `cargo xtask licenses` writes the third-party
+  notice that ships in every release zip.
 - `docs/format-spec-v0.md`: the format specification.
 
 ## Rules

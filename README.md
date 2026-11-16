@@ -105,10 +105,13 @@ xwa-tool dump wiki.xwa --image 12 --out diagram.pgm
 ```
 
 Pushing a `v*` tag builds Windows, macOS and Linux binaries and attaches them
-to a GitHub release.
+to a GitHub release, each zip with a `THIRD-PARTY-LICENSES.txt` that lists
+every crate in the programs with its licence text. `cargo xtask licenses`
+writes the same file locally.
 
 ## License
 
 Public domain, via the [Unlicense](LICENSE). Third-party dependencies keep
-their own licenses; xwa-tool embeds KaTeX's fonts, which are under the SIL
-Open Font License (see [`licenses/`](licenses/)).
+their own licenses (see `THIRD-PARTY-LICENSES.txt` in each release); xwa-tool
+embeds KaTeX's fonts, which are under the SIL Open Font License (see
+[`licenses/`](licenses/)).
