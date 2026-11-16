@@ -11,8 +11,8 @@ use std::sync::{Mutex, OnceLock};
 
 use iced::border::{self, Border};
 use iced::widget::{
-    Space, button, column, container, image, mouse_area, progress_bar, row, space, stack, text,
-    text_input,
+    Space, button, canvas, column, container, image, mouse_area, progress_bar, row, space, stack,
+    text, text_input,
 };
 use iced::{Alignment, Background, Color, Element, Font, Length, Padding, Shadow, font};
 
@@ -735,27 +735,117 @@ pub fn hints<'a, M: Clone + 'a>(
     line.into()
 }
 
-/// The scroll mark beside a list of several pages: a line, and a block
-/// showing which part of it is on screen.
-pub fn scroll_mark<'a, M: 'a>(pages: usize, page: usize, height: f32) -> Element<'a, M> {
-    let pages = pages.max(1);
-    let thumb = (height / pages as f32).max(12.0);
-    let top = if pages > 1 {
-        (height - thumb) * page as f32 / (pages - 1) as f32
-    } else {
-        0.0
-    };
-    let bar = |w: f32, h: f32| {
-        container(Space::new())
-            .width(w)
-            .height(h)
-            .style(|_| container::Style::default().background(INK))
-    };
-    row![
-        column![space().height(top), bar(4.0, thumb)],
-        bar(1.0, height)
-    ]
-    .into()
+/// The scroll bar beside a list of several pages, as the firmware draws it:
+/// a line, and a block showing which page is on screen. Dragging the block,
+/// or clicking the line, turns to that page.
+pub struct ScrollBar<M> {
+    pub pages: usize,
+    pub page: usize,
+    pub on_page: fn(usize) -> M,
+}
+
+#[derive(Default)]
+pub struct ScrollState {
+    dragging: bool,
+    last: Option<usize>,
+}
+
+impl<M> ScrollBar<M> {
+    fn thumb(&self, height: f32) -> f32 {
+        (height / self.pages.max(1) as f32).max(12.0)
+    }
+
+    /// The page whose block would be centred at `y`.
+    fn page_at(&self, y: f32, height: f32) -> usize {
+        let thumb = self.thumb(height);
+        let travel = height - thumb;
+        if self.pages < 2 || travel <= 0.0 {
+            return 0;
+        }
+        let t = ((y - thumb / 2.0) / travel).clamp(0.0, 1.0);
+        (t * (self.pages - 1) as f32).round() as usize
+    }
+}
+
+impl<M> canvas::Program<M> for ScrollBar<M> {
+    type State = ScrollState;
+
+    fn update(
+        &self,
+        state: &mut ScrollState,
+        event: &iced::Event,
+        bounds: iced::Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> Option<canvas::Action<M>> {
+        use iced::mouse::{Button, Event as Mouse};
+        let to = |state: &mut ScrollState, page: usize| {
+            if state.last == Some(page) {
+                canvas::Action::capture()
+            } else {
+                state.last = Some(page);
+                canvas::Action::publish((self.on_page)(page)).and_capture()
+            }
+        };
+        match event {
+            iced::Event::Mouse(Mouse::ButtonPressed(Button::Left)) => {
+                let at = cursor.position_in(bounds)?;
+                state.dragging = true;
+                state.last = None;
+                Some(to(state, self.page_at(at.y, bounds.height)))
+            }
+            iced::Event::Mouse(Mouse::CursorMoved { .. }) if state.dragging => {
+                // Followed anywhere while held, as scroll bars are.
+                let at = cursor.position()?;
+                Some(to(state, self.page_at(at.y - bounds.y, bounds.height)))
+            }
+            iced::Event::Mouse(Mouse::ButtonReleased(Button::Left)) if state.dragging => {
+                state.dragging = false;
+                state.last = None;
+                Some(canvas::Action::capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        _state: &ScrollState,
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width, bounds.height);
+        frame.fill_rectangle(iced::Point::new(w - 1.0, 0.0), iced::Size::new(1.0, h), INK);
+        let thumb = self.thumb(h);
+        let top = if self.pages > 1 {
+            (h - thumb) * self.page as f32 / (self.pages - 1) as f32
+        } else {
+            0.0
+        };
+        frame.fill_rectangle(
+            iced::Point::new(w - 5.0, top),
+            iced::Size::new(4.0, thumb),
+            INK,
+        );
+        vec![frame.into_geometry()]
+    }
+
+    fn mouse_interaction(
+        &self,
+        state: &ScrollState,
+        bounds: iced::Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> iced::mouse::Interaction {
+        if state.dragging {
+            iced::mouse::Interaction::Grabbing
+        } else if cursor.is_over(bounds) {
+            iced::mouse::Interaction::Pointer
+        } else {
+            iced::mouse::Interaction::None
+        }
+    }
 }
 
 /// A dialog in a black frame, as the firmware draws popups.

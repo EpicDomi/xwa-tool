@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::device::{Finish, Model};
 use crate::graphics::Graphics;
+use crate::library::{Articles, Choice as _, Pictures, Selection, Sort, View, Wiki};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prefs {
@@ -25,6 +26,9 @@ pub struct Prefs {
     pub refresh_flash: bool,
     /// How to draw the window; automatic unless chosen in Settings.
     pub graphics: Graphics,
+    /// The wiki the library browser lists, and how.
+    pub wiki: Wiki,
+    pub view: View,
 }
 
 impl Default for Prefs {
@@ -37,6 +41,8 @@ impl Default for Prefs {
             language: None,
             refresh_flash: true,
             graphics: Graphics::Auto,
+            wiki: Wiki::default(),
+            view: View::default(),
         }
     }
 }
@@ -95,6 +101,13 @@ impl Prefs {
                         prefs.graphics = g;
                     }
                 }
+                "wiki" => prefs.wiki = Wiki::from_key(value).unwrap_or_default(),
+                "pictures" => prefs.view.pictures = Pictures::from_key(value).unwrap_or_default(),
+                "selection" => {
+                    prefs.view.selection = Selection::from_key(value).unwrap_or_default();
+                }
+                "articles" => prefs.view.articles = Articles::from_key(value).unwrap_or_default(),
+                "sort" => prefs.view.sort = Sort::from_key(value).unwrap_or_default(),
                 _ => {}
             }
         }
@@ -122,6 +135,15 @@ impl Prefs {
         if self.graphics != Graphics::Auto {
             out += &format!("graphics={}\n", self.graphics.key());
         }
+        out += &format!("wiki={}\n", self.wiki.category());
+        let v = &self.view;
+        out += &format!(
+            "pictures={}\nselection={}\narticles={}\nsort={}\n",
+            v.pictures.key(),
+            v.selection.key(),
+            v.articles.key(),
+            v.sort.key()
+        );
         out
     }
 }
@@ -151,6 +173,13 @@ mod tests {
             language: Some("fra".into()),
             refresh_flash: false,
             graphics: Graphics::Software,
+            wiki: Wiki::Wikivoyage,
+            view: View {
+                pictures: Pictures::Without,
+                selection: Selection::Topics,
+                articles: Articles::Complete,
+                sort: Sort::Largest,
+            },
         };
         assert_eq!(Prefs::parse(&prefs.to_text()), prefs);
         assert_eq!(Prefs::parse(&Prefs::default().to_text()), Prefs::default());

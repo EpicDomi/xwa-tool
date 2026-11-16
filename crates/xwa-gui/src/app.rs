@@ -15,6 +15,7 @@ use xwa_fetch::{Book, Language, size_text};
 use crate::device::{Finish, Key, Model};
 use crate::eink;
 use crate::graphics::{self, Graphics};
+use crate::library::{View, Wiki};
 use crate::prefs::{self, Prefs};
 
 /// Zoom steps, in desktop pixels per screen pixel.
@@ -48,6 +49,8 @@ pub enum Screen {
     Convert,
     Card,
     Settings,
+    /// How the library's list is filtered and sorted.
+    Filter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +71,11 @@ pub enum Choice {
     Case,
     Size,
     Graphics,
+    Wiki,
+    Pictures,
+    Selection,
+    Articles,
+    Sort,
 }
 
 /// A long task on a worker thread: converting, downloading or copying.
@@ -249,6 +257,10 @@ pub enum Message {
     LanguageChosen(Language),
     BooksLoaded(Result<Vec<Book>, String>),
     Search(String),
+    SetWiki(Wiki),
+    SetView(View),
+    /// A page of the list, from its scroll bar.
+    ShowPage(usize),
     LanguageSearch(String),
     Submit,
     OpenBook(Book),
@@ -1104,11 +1116,34 @@ impl App {
                 return self.load_books();
             }
             Message::BooksLoaded(Ok(books)) => {
-                self.library_status = books
-                    .is_empty()
-                    .then(|| "The library has no Wikipedia in this language.".into());
-                self.books = sort_books(books);
+                self.library_status = books.is_empty().then(|| {
+                    format!(
+                        "The library has no {} in this language.",
+                        self.prefs.wiki.name()
+                    )
+                });
+                self.books = books;
                 self.library_failed = false;
+            }
+            Message::SetWiki(wiki) => {
+                self.popup = None;
+                if wiki != self.prefs.wiki {
+                    self.prefs.wiki = wiki;
+                    self.prefs.save();
+                    return self.load_books();
+                }
+            }
+            Message::SetView(view) => {
+                self.popup = None;
+                self.prefs.view = view;
+                self.prefs.save();
+            }
+            Message::ShowPage(i) => {
+                let page = self.page();
+                let pages = eink::paginate(&page.rows, self.list_room(&page));
+                if let Some(p) = pages.get(i) {
+                    self.focus = p.start;
+                }
             }
             Message::BooksLoaded(Err(e)) => {
                 self.library_status = Some(format!("Could not load the list: {e}"));
@@ -1117,7 +1152,7 @@ impl App {
             Message::Search(s) => {
                 self.search = s;
                 // The first match is where Enter goes.
-                self.focus = 1;
+                self.focus = crate::screens::LIBRARY_ROWS;
             }
             Message::LanguageSearch(s) => {
                 self.language_search = s;
@@ -1188,13 +1223,14 @@ impl App {
 
     fn load_books(&mut self) -> Task<Message> {
         let lang = self.language.as_ref().map(|l| l.code.clone());
+        let category = self.prefs.wiki.category();
         self.books.clear();
         self.library_status = Some("Loading the list…".into());
         Task::perform(
             background(move || {
                 let filter = xwa_fetch::Filter {
                     lang: lang.as_deref(),
-                    category: Some("wikipedia"),
+                    category: Some(category),
                     name: None,
                 };
                 xwa_fetch::Client::new()
@@ -1430,28 +1466,6 @@ fn background<T: Send + 'static>(
         let _ = tx.send(f());
     });
     async move { rx.await.expect("the worker thread stopped") }
-}
-
-/// The whole Wikipedia (names ending in "_all") first, then selections by
-/// title; within a title the most complete first, then the newest.
-fn sort_books(mut books: Vec<Book>) -> Vec<Book> {
-    let flavour_rank = |f: &str| match f {
-        "maxi" => 0,
-        "nopic" => 1,
-        "mini" => 2,
-        _ => 3,
-    };
-    books.sort_by(|a, b| {
-        let key = |x: &Book| {
-            (
-                !x.name.ends_with("_all"),
-                x.title.to_lowercase(),
-                flavour_rank(&x.flavour),
-            )
-        };
-        key(a).cmp(&key(b)).then_with(|| b.date.cmp(&a.date))
-    });
-    books
 }
 
 /// The steps of a conversion with these options, as shown while it runs.

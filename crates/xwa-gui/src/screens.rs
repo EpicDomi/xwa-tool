@@ -21,6 +21,7 @@ use crate::eink::{
 };
 use crate::graphics::Graphics;
 use crate::icons;
+use crate::library::{self, Choice as _, View, Wiki};
 
 /// The key held for shortcuts.
 const MODIFIER: &str = if cfg!(target_os = "macos") {
@@ -84,6 +85,7 @@ impl App {
             Screen::Convert => self.convert_page(),
             Screen::Card => self.card_page(),
             Screen::Settings => self.settings_page(),
+            Screen::Filter => self.filter_page(),
         }
     }
 
@@ -115,7 +117,7 @@ impl App {
             top: HOME_TOP,
             bottom: 0.0,
             rows: vec![
-                Row::new(Kind::Menu, "Get Wikipedia")
+                Row::new(Kind::Menu, "Get Wikis")
                     .icon(&icons::DOWNLOAD)
                     .subtitle(get)
                     .on_press(Message::Open(Screen::Library)),
@@ -138,23 +140,32 @@ impl App {
     }
 
     fn library_page(&self) -> Page {
-        let mut rows = Vec::new();
-        if let Some(lang) = &self.language {
-            rows.push(
-                Row::new(Kind::Setting, "Language")
-                    .value(lang.name.clone())
-                    .opens()
-                    .on_press(Message::Open(Screen::Languages)),
-            );
-        }
-        let needle = self.search.to_lowercase();
+        let wiki = self.prefs.wiki;
+        let view = self.prefs.view;
+        let mut rows = vec![
+            Row::new(Kind::Setting, "Wiki")
+                .value(wiki.name())
+                .on_press(Message::Choose(Choice::Wiki)),
+            Row::new(Kind::Setting, "Language")
+                .value(
+                    self.language
+                        .as_ref()
+                        .map(|l| l.name.clone())
+                        .unwrap_or_else(|| "…".into()),
+                )
+                .opens()
+                .on_press_maybe(
+                    (!self.languages.is_empty()).then_some(Message::Open(Screen::Languages)),
+                ),
+            Row::new(Kind::Item, "Filter and sort")
+                .subtitle(view.summary())
+                .opens()
+                .on_press(Message::Open(Screen::Filter)),
+        ];
+        debug_assert_eq!(rows.len(), LIBRARY_ROWS);
         let downloading = self.downloading.as_ref().map(|b| &b.id);
-        for b in self.books.iter().filter(|b| {
-            needle.is_empty()
-                || b.title.to_lowercase().contains(&needle)
-                || b.name.to_lowercase().contains(&needle)
-                || b.flavour.to_lowercase().contains(&needle)
-        }) {
+        let shown = view.arrange(&self.books, &self.search);
+        for b in &shown {
             let mut line = format!("{} · {}", b.flavour_description(), b.date);
             if downloading == Some(&b.id) {
                 line = format!(
@@ -166,18 +177,22 @@ impl App {
                 Row::new(Kind::Item, b.title.clone())
                     .subtitle(line)
                     .value(size_text(b.size))
-                    .on_press(Message::OpenBook(b.clone())),
+                    .on_press(Message::OpenBook((*b).clone())),
             );
         }
         let mut note = self.library_status.clone();
-        if note.is_none() && !self.books.is_empty() && rows.len() == 1 {
-            note = Some("Nothing matches the search.".into());
+        if note.is_none() && !self.books.is_empty() && shown.is_empty() {
+            note = Some(if self.search.is_empty() {
+                "Nothing here matches the filters.".into()
+            } else {
+                "Nothing matches the search.".into()
+            });
         }
         if self.library_failed {
             rows.push(Row::new(Kind::Action, "Try again").on_press(Message::LoadLibrary));
         }
         Page {
-            title: "Get Wikipedia".into(),
+            title: "Get Wikis".into(),
             subtitle: self.language.as_ref().map(|l| l.name.clone()),
             back: true,
             top: FIELD_TOP,
@@ -185,6 +200,43 @@ impl App {
             rows,
             note,
             hints: ["« Back", "Open", "Up", "Down"],
+        }
+    }
+
+    fn filter_page(&self) -> Page {
+        let view = self.prefs.view;
+        let shown = view.arrange(&self.books, "").len();
+        Page {
+            title: "Filter and sort".into(),
+            subtitle: Some(self.prefs.wiki.name().into()),
+            back: true,
+            top: 0.0,
+            bottom: 0.0,
+            rows: vec![
+                Row::new(Kind::Setting, "Pictures")
+                    .value(view.pictures.name())
+                    .on_press(Message::Choose(Choice::Pictures)),
+                Row::new(Kind::Setting, "Selection")
+                    .value(view.selection.name())
+                    .on_press(Message::Choose(Choice::Selection)),
+                Row::new(Kind::Setting, "Articles")
+                    .value(view.articles.name())
+                    .on_press(Message::Choose(Choice::Articles)),
+                Row::new(Kind::Setting, "Sort by")
+                    .value(view.sort.name())
+                    .on_press(Message::Choose(Choice::Sort)),
+                Row::new(Kind::Item, "Show everything").on_press_maybe(view.is_filtered().then(
+                    || {
+                        Message::SetView(View {
+                            sort: view.sort,
+                            ..View::default()
+                        })
+                    },
+                )),
+            ],
+            note: (!self.books.is_empty())
+                .then(|| format!("{shown} of the {} files are shown.", self.books.len())),
+            hints: ["« Back", "Change", "Up", "Down"],
         }
     }
 
@@ -289,7 +341,7 @@ impl App {
             page.top = 190.0;
             page.rows = vec![
                 Row::new(Kind::Action, "Choose a ZIM file").on_press(Message::ChooseZim),
-                Row::new(Kind::Item, "Get Wikipedia")
+                Row::new(Kind::Item, "Get Wikis")
                     .subtitle("Download one from the Kiwix library")
                     .opens()
                     .on_press(Message::Open(Screen::Library)),
@@ -628,10 +680,10 @@ impl App {
         } else {
             (
                     image_cover(eink::wikipedia_cover()),
-                    "Wikipedia, offline".into(),
+                    "Wikis, offline".into(),
                     vec![
                         paragraph(
-                            "Download a ZIM file from Kiwix, convert it here, then copy it to your e-reader's card.",
+                            "Download Wikipedia or another wiki from Kiwix, convert it here, then copy it to your e-reader's card.",
                             Face::Small,
                             SMALL,
                         )
@@ -784,9 +836,15 @@ impl App {
         if multi {
             list_area = stack![
                 list_area,
-                pin(eink::scroll_mark(pages.len(), current, room - 8.0))
-                    .x(w - 9.0)
-                    .y(4.0),
+                pin(canvas(eink::ScrollBar {
+                    pages: pages.len(),
+                    page: current,
+                    on_page: Message::ShowPage,
+                })
+                .width(16)
+                .height(room - 8.0))
+                .x(w - 20.0)
+                .y(4.0),
             ]
             .into();
         }
@@ -863,6 +921,11 @@ impl App {
             Popup::Choose(Choice::Device) => ("Device", None),
             Popup::Choose(Choice::Case) => ("Case", None),
             Popup::Choose(Choice::Size) => ("Display size", None),
+            Popup::Choose(Choice::Wiki) => ("Wiki", None),
+            Popup::Choose(Choice::Pictures) => ("Pictures", None),
+            Popup::Choose(Choice::Selection) => ("Selection", None),
+            Popup::Choose(Choice::Articles) => ("Articles", None),
+            Popup::Choose(Choice::Sort) => ("Sort by", None),
             Popup::Choose(Choice::Graphics) => (
                 "Graphics",
                 Some(
@@ -912,6 +975,29 @@ impl App {
                     )
                 })
                 .collect(),
+            Popup::Choose(Choice::Wiki) => Wiki::ALL
+                .into_iter()
+                .map(|w| {
+                    pick(w.name().into(), w == self.prefs.wiki, Message::SetWiki(w))
+                        .subtitle(w.about())
+                })
+                .collect(),
+            Popup::Choose(Choice::Pictures) => {
+                let v = self.prefs.view;
+                choices(v.pictures, |pictures| View { pictures, ..v })
+            }
+            Popup::Choose(Choice::Selection) => {
+                let v = self.prefs.view;
+                choices(v.selection, |selection| View { selection, ..v })
+            }
+            Popup::Choose(Choice::Articles) => {
+                let v = self.prefs.view;
+                choices(v.articles, |articles| View { articles, ..v })
+            }
+            Popup::Choose(Choice::Sort) => {
+                let v = self.prefs.view;
+                choices(v.sort, |sort| View { sort, ..v })
+            }
             Popup::Choose(Choice::Graphics) => Graphics::choices()
                 .into_iter()
                 .map(|g| {
@@ -950,6 +1036,24 @@ impl App {
         }
     }
 }
+
+/// Rows for a filter's or the sort's choices, the one in use marked.
+fn choices<C: library::Choice>(current: C, view: impl Fn(C) -> View) -> Vec<Row<Message>> {
+    C::ALL
+        .iter()
+        .map(|&c| {
+            let row = Row::new(Kind::Item, c.name()).on_press(Message::SetView(view(c)));
+            if c == current {
+                row.value(SELECTED)
+            } else {
+                row
+            }
+        })
+        .collect()
+}
+
+/// The rows above the books on the library screen.
+pub const LIBRARY_ROWS: usize = 3;
 
 /// The value shown beside the choice in use, as the firmware marks it.
 pub const SELECTED: &str = "Selected";

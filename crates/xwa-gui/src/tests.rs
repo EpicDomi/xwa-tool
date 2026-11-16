@@ -231,7 +231,16 @@ fn searching_narrows_the_list_and_enter_opens_the_first_match() {
     let _ = app.update(Message::Open(Screen::Library));
     let _ = app.update(Message::Search("chem".into()));
     let titles: Vec<String> = app.page().rows.iter().map(|r| r.title.clone()).collect();
-    assert_eq!(titles, ["Language", "Chemistry", "Chemistry"]);
+    assert_eq!(
+        titles,
+        [
+            "Wiki",
+            "Language",
+            "Filter and sort",
+            "Chemistry",
+            "Chemistry"
+        ]
+    );
     let _ = app.update(Message::Submit);
     assert_eq!(app.screen, Screen::Book);
     assert_eq!(app.book.as_ref().unwrap().title, "Chemistry");
@@ -242,11 +251,73 @@ fn choosing_a_language_goes_back_to_the_list() {
     let mut app = app(Model::X4Pro);
     with_library(&mut app);
     let _ = app.update(Message::Open(Screen::Library));
+    let _ = app.update(Message::Focus(1));
     press(&mut app, Key::Confirm);
     assert_eq!(app.screen, Screen::Languages);
     let _ = app.update(Message::LanguageChosen(languages()[4].clone()));
     assert_eq!(app.screen, Screen::Library);
     assert_eq!(app.prefs.language.as_deref(), Some("swe"));
+}
+
+#[test]
+fn the_library_lists_any_wiki_filtered_and_sorted() {
+    use crate::library::{Pictures, Sort, Wiki};
+    let mut app = app(Model::X4Pro);
+    with_library(&mut app);
+    let _ = app.update(Message::Open(Screen::Library));
+    // Wiki is the first row; choosing another reloads the list.
+    press(&mut app, Key::Confirm);
+    assert_eq!(app.popup, Some(Popup::Choose(Choice::Wiki)));
+    let _ = app.update(Message::SetWiki(Wiki::Wikivoyage));
+    assert_eq!(app.prefs.wiki, Wiki::Wikivoyage);
+    assert!(app.books.is_empty(), "the old wiki's files are gone");
+    let _ = app.update(Message::BooksLoaded(Ok(library())));
+    // Filter and sort: without pictures, smallest first.
+    let _ = app.update(Message::Open(Screen::Filter));
+    press(&mut app, Key::Confirm);
+    assert_eq!(app.popup, Some(Popup::Choose(Choice::Pictures)));
+    press(&mut app, Key::Right);
+    press(&mut app, Key::Right);
+    press(&mut app, Key::Confirm);
+    assert_eq!(app.prefs.view.pictures, Pictures::Without);
+    let _ = app.update(Message::Choose(Choice::Sort));
+    let rows = app.popup_rows(Popup::Choose(Choice::Sort));
+    let smallest = rows
+        .iter()
+        .position(|r| r.title == "Smallest first")
+        .unwrap();
+    let _ = app.update(Message::PopupFocus(smallest));
+    press(&mut app, Key::Confirm);
+    assert_eq!(app.prefs.view.sort, Sort::Smallest);
+    press(&mut app, Key::Back);
+    let page = app.page();
+    let books: Vec<&str> = page.rows[crate::screens::LIBRARY_ROWS..]
+        .iter()
+        .map(|r| r.value.as_deref().unwrap())
+        .collect();
+    assert_eq!(
+        books.first(),
+        Some(&"2 MB"),
+        "the smallest without pictures first"
+    );
+    assert!(
+        page.rows[2]
+            .subtitle
+            .as_deref()
+            .unwrap()
+            .contains("Without pictures")
+    );
+}
+
+#[test]
+fn the_scroll_bar_turns_to_the_page_asked_for() {
+    let mut app = app(Model::X4Pro);
+    with_library(&mut app);
+    let _ = app.update(Message::Open(Screen::Library));
+    let page = app.page();
+    let pages = eink::paginate(&page.rows, app.list_room(&page));
+    let _ = app.update(Message::ShowPage(2));
+    assert_eq!(app.focus, pages[2].start);
 }
 
 #[test]
@@ -442,6 +513,12 @@ fn screens() {
         let _ = a.update(Message::Open(Screen::Library));
         let _ = a.update(Message::Focus(2));
         snap(&a, &dir, &format!("{tag}-library"));
+        let _ = a.update(Message::Choose(Choice::Wiki));
+        snap(&a, &dir, &format!("{tag}-wikis"));
+        let _ = a.update(Message::ClosePopup);
+        let _ = a.update(Message::Open(Screen::Filter));
+        snap(&a, &dir, &format!("{tag}-filter"));
+        let _ = a.update(Message::Back);
         let _ = a.update(Message::OpenBook(library()[0].clone()));
         snap(&a, &dir, &format!("{tag}-book"));
         a.downloading = a.book.clone();

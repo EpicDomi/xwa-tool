@@ -13,6 +13,7 @@ mod device;
 mod eink;
 mod graphics;
 mod icons;
+mod library;
 mod prefs;
 mod screens;
 #[cfg(test)]
