@@ -459,7 +459,7 @@ fn snap(app: &App, dir: &Path, name: &str) {
         default_font: eink::UI,
         ..iced::Settings::default()
     };
-    let mut sim = iced_test::Simulator::with_size(settings, app.spec().body, app.view());
+    let mut sim = iced_test::Simulator::with_size(settings, app.spec().window(), app.view());
     let snapshot = sim.snapshot(&crate::eink_theme()).expect("drawn");
     // The snapshot is written only where none is; clear the old one first.
     for renderer in ["tiny-skia", "wgpu"] {
