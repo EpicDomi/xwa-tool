@@ -5329,6 +5329,7 @@ dependencies = [
  "ttf-parser",
  "xwa-convert",
  "xwa-fetch",
+ "xwa-format",
  "xwa-zim",
 ]
 

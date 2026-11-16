@@ -8,8 +8,10 @@
 //! file can also be opened with the app, or dropped onto it.
 
 mod app;
+mod crash;
 mod device;
 mod eink;
+mod graphics;
 mod icons;
 mod prefs;
 mod screens;
@@ -26,12 +28,16 @@ use prefs::Prefs;
 fn main() -> iced::Result {
     let open = std::env::args_os().nth(1).map(PathBuf::from);
     let prefs = Prefs::load();
+    // Before anything else runs: the renderer is picked through the
+    // environment, and failures from here on are reported.
+    let graphics = graphics::choose(prefs.graphics);
+    crash::install(graphics);
     // The real size is set once the monitor's is known; until then the
     // window stays hidden.
     let zoom = prefs.zoom.unwrap_or(app::FIRST_ZOOM);
     let window = prefs.model.spec().window();
     iced::application(
-        move || App::new(prefs.clone(), zoom, open.clone()),
+        move || App::new(prefs.clone(), zoom, open.clone(), graphics),
         App::update,
         App::view,
     )
@@ -52,7 +58,9 @@ fn main() -> iced::Result {
         size: window,
         position: window::Position::Centered,
         visible: false,
-        resizable: false,
+        // Resizable, so the system takes size changes (Wayland pins the size
+        // of a window that is not), and the device can be dragged bigger.
+        resizable: true,
         decorations: false,
         transparent: device::TRANSPARENT,
         icon: device::window_icon(),

@@ -9,11 +9,12 @@
 //! - X4 Pro: a 480 × 800 display at 219 ppi in a 69 × 111 mm case, a page
 //!   key on each side, the power key above the right one, and a round touch
 //!   Home key under the screen.
-//! - X4: the same display in a taller case, the power key and a page rocker
-//!   on the right, and two rockers (Back and Confirm, Left and Right) low on
-//!   the face, under the labels the firmware draws for them.
-//! - X3: a 528 × 792 display at about 250 ppi, a page key on each side, the
-//!   power key on top, and two rockers in a tray under the screen.
+//! - X4: the same display in a 69 × 114 mm case, the power key and a page
+//!   rocker on the right, and two rockers (Back and Confirm, Left and Right)
+//!   low on the face, under the labels the firmware draws for them.
+//! - X3: a 528 × 792 display at 257 ppi in a 64 × 98 mm case, a page key on
+//!   each side, the power key on top, and two rockers in a tray at the
+//!   bottom of the face.
 
 use iced::widget::canvas::{self, Fill, Frame, Geometry, Path, Stroke, fill, gradient, path};
 use iced::widget::tooltip;
@@ -25,10 +26,7 @@ use iced::{Color, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
 pub const TRANSPARENT: bool = !cfg!(target_os = "windows");
 
 /// Room round the case for keys that stick out of it.
-pub const MARGIN: f32 = if TRANSPARENT { 6.0 } else { 0.0 };
-
-/// How far a key on an edge stands out of the case.
-const STANDOUT: f32 = 4.0;
+pub const MARGIN: f32 = if TRANSPARENT { 8.0 } else { 0.0 };
 
 /// How far into the case a key on an edge can be clicked: its edge alone is
 /// too thin to aim at.
@@ -244,6 +242,8 @@ pub struct Spec {
     /// screen (screen coordinates), as the firmware draws them, on models
     /// with front keys.
     pub hints: Option<[f32; 4]>,
+    /// How far keys on its edges stand out of the case.
+    pub standout: f32,
 }
 
 impl Spec {
@@ -293,48 +293,53 @@ static X4_PRO: Spec = Spec {
         key(Key::Home, Place::Round(Point::new(298.0, 902.0), 68.0), 0),
     ],
     hints: None,
+    standout: 4.5,
 };
 
+// 114 × 69 mm.
 static X4: Spec = Spec {
-    body: Size::new(598.0, 1012.0),
+    body: Size::new(596.0, 983.0),
     radius: 22.0,
-    screen: rect(59.0, 53.0, 480.0, 800.0),
+    screen: rect(58.0, 53.0, 480.0, 800.0),
     opening_radius: 0.0,
     panel_border: 3.0,
     face: [7.0, 7.0, 20.0, 7.0],
     face_radius: 15.0,
-    tray: Some(rect(91.0, 961.0, 414.0, 40.0)),
+    tray: Some(rect(91.0, 930.0, 414.0, 53.0)),
     keys: &[
-        key(Key::Back, Place::Face(rect(103.0, 972.0, 94.0, 22.0)), 1),
-        key(Key::Confirm, Place::Face(rect(197.0, 972.0, 94.0, 22.0)), 1),
-        key(Key::Left, Place::Face(rect(306.0, 972.0, 94.0, 22.0)), 2),
-        key(Key::Right, Place::Face(rect(400.0, 972.0, 93.0, 22.0)), 2),
-        key(Key::Power, Place::Edge(Side::Right, 166.0, 250.0), 0),
-        key(Key::Up, Place::Edge(Side::Right, 387.0, 475.0), 3),
-        key(Key::Down, Place::Edge(Side::Right, 475.0, 563.0), 3),
+        key(Key::Back, Place::Face(rect(103.0, 941.0, 94.0, 22.0)), 1),
+        key(Key::Confirm, Place::Face(rect(197.0, 941.0, 94.0, 22.0)), 1),
+        key(Key::Left, Place::Face(rect(306.0, 941.0, 94.0, 22.0)), 2),
+        key(Key::Right, Place::Face(rect(400.0, 941.0, 93.0, 22.0)), 2),
+        key(Key::Power, Place::Edge(Side::Right, 162.0, 244.0), 0),
+        key(Key::Up, Place::Edge(Side::Right, 376.0, 461.0), 3),
+        key(Key::Down, Place::Edge(Side::Right, 461.0, 547.0), 3),
     ],
     hints: Some([58.0, 146.0, 254.0, 342.0]),
+    standout: 6.5,
 };
 
+// 98 × 64 mm, the display at 257 ppi.
 static X3: Spec = Spec {
-    body: Size::new(642.0, 984.0),
+    body: Size::new(648.0, 992.0),
     radius: 25.0,
-    screen: rect(55.0, 51.0, 528.0, 792.0),
+    screen: rect(60.0, 52.0, 528.0, 792.0),
     opening_radius: 0.0,
     panel_border: 2.0,
-    face: [9.0, 9.0, 9.0, 9.0],
+    face: [12.0, 16.0, 10.0, 16.0],
     face_radius: 16.0,
-    tray: Some(rect(96.0, 891.0, 443.0, 90.0)),
+    tray: Some(rect(106.0, 943.0, 432.0, 49.0)),
     keys: &[
-        key(Key::Back, Place::Face(rect(110.0, 904.0, 96.0, 18.0)), 1),
-        key(Key::Confirm, Place::Face(rect(206.0, 904.0, 97.0, 18.0)), 1),
-        key(Key::Left, Place::Face(rect(331.0, 904.0, 97.0, 18.0)), 2),
-        key(Key::Right, Place::Face(rect(428.0, 904.0, 97.0, 18.0)), 2),
+        key(Key::Back, Place::Face(rect(119.0, 951.0, 94.0, 20.0)), 1),
+        key(Key::Confirm, Place::Face(rect(213.0, 951.0, 95.0, 20.0)), 1),
+        key(Key::Left, Place::Face(rect(339.0, 951.0, 95.0, 20.0)), 2),
+        key(Key::Right, Place::Face(rect(434.0, 951.0, 96.0, 20.0)), 2),
         key(Key::Up, Place::Edge(Side::Left, 166.0, 324.0), 0),
         key(Key::Down, Place::Edge(Side::Right, 166.0, 324.0), 0),
-        key(Key::Power, Place::Edge(Side::Top, 478.0, 555.0), 0),
+        key(Key::Power, Place::Edge(Side::Top, 482.0, 559.0), 0),
     ],
     hints: Some([65.0, 157.0, 291.0, 383.0]),
+    standout: 6.5,
 };
 
 /// The colours of a case.
@@ -658,8 +663,8 @@ impl Body {
     fn draw_edge_key(&self, frame: &mut Frame, side: Side, from: f32, to: f32, state: KeyLook) {
         let look = self.look;
         let out = match state {
-            KeyLook::Pressed => STANDOUT - 2.0,
-            _ => STANDOUT,
+            KeyLook::Pressed => self.spec.standout - 2.0,
+            _ => self.spec.standout,
         };
         let size = self.spec.body;
         // The key reaches a little under the case so no gap shows.

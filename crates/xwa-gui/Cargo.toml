@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 xwa-zim.workspace = true
+xwa-format.workspace = true
 xwa-convert.workspace = true
 xwa-fetch.workspace = true
 dirs.workspace = true

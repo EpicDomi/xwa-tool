@@ -19,7 +19,7 @@ fn app(model: Model) -> App {
         model,
         ..Prefs::default()
     };
-    let (mut app, _) = App::new(prefs, 1.0, None);
+    let (mut app, _) = App::new(prefs, 1.0, None, crate::graphics::Graphics::Auto);
     app.prefs.refresh_flash = false;
     app.clock = "09:41".into();
     app
@@ -369,6 +369,50 @@ fn display_sizes_offered_fit_the_monitor() {
     assert_eq!(app.prefs.zoom, Some(0.8));
     let _ = app.update(Message::Zoom(0));
     assert_eq!(app.prefs.zoom, None);
+}
+
+#[test]
+fn resizing_the_window_scales_the_device_then_fits_round_it() {
+    use iced::Size;
+    use iced::window::Direction;
+    let mut app = app(Model::X4Pro);
+    app.shown = true;
+    let window = app.spec().window();
+    // The right edge dragged out half as far again: the device follows it.
+    let _ = app.update(Message::ResizeFrom(Direction::East));
+    let _ = app.update(Message::Resized(Size::new(
+        window.width * 1.5,
+        window.height,
+    )));
+    assert!((app.zoom - 1.5).abs() < 1e-3, "{}", app.zoom);
+    assert!(app.settle_at.is_some());
+    // Once it settles, the size is remembered.
+    app.settle_at = Some(std::time::Instant::now());
+    let _ = app.update(Message::Settle);
+    assert_eq!(app.prefs.zoom, Some(app.zoom));
+    assert!(app.settle_at.is_none());
+    // The window's own size at this zoom is not taken for a drag.
+    let zoom = app.zoom;
+    let _ = app.update(Message::Resized(window));
+    assert_eq!(app.zoom, zoom);
+    // A late report of an older size, just after the app resized the
+    // window itself, is not taken for the user's.
+    app.own_resize_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    let _ = app.update(Message::Resized(Size::new(
+        window.width * 0.2,
+        window.height * 0.2,
+    )));
+    assert_eq!(app.zoom, zoom);
+    app.own_resize_until = None;
+    // A resize from elsewhere (the system's) fits the device in it, and
+    // never below the smallest size.
+    let _ = app.update(Message::Resized(Size::new(
+        window.width * 0.5,
+        window.height,
+    )));
+    assert!((app.zoom - zoom * 0.5).abs() < 1e-3);
+    let _ = app.update(Message::Resized(Size::new(10.0, 10.0)));
+    assert_eq!(app.zoom, crate::app::MIN_ZOOM);
 }
 
 // ---------------------------------------------------------------------------

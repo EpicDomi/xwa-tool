@@ -564,23 +564,32 @@ pub fn header<'a, M: Clone + 'a>(
     back: Option<M>,
     status: Option<&str>,
     clock: &str,
+    window: [M; 2],
     width: f32,
 ) -> Element<'a, M> {
+    // The time on the left, what is running beside it, and the window's
+    // minimise and close on the right.
+    let [minimise, close] = window;
+    let room = width - 2.0 * SIDE - width_of(clock, Face::Small, SMALL) - 12.0 - 2.0 * 34.0;
     let status_line = row![
+        label(clock.to_string(), Face::Small, SMALL),
+        space().width(12),
         label(
             status
-                .map(|s| fit(s, Face::Small, SMALL, width - 2.0 * SIDE - 60.0).into_owned())
+                .map(|s| fit(s, Face::Small, SMALL, room).into_owned())
                 .unwrap_or_default(),
             Face::Small,
             SMALL
         ),
         space().width(Length::Fill),
-        label(clock.to_string(), Face::Small, SMALL),
+        glyph_button("–", minimise),
+        glyph_button("×", close),
     ]
+    .align_y(Alignment::Center)
     .padding(Padding {
-        top: 3.0,
-        right: 12.0,
-        bottom: 0.0,
+        top: 0.0,
+        right: 6.0,
+        bottom: 4.0,
         left: SIDE,
     })
     .height(STATUS);
@@ -638,6 +647,38 @@ pub fn header<'a, M: Clone + 'a>(
         .width(width)
         .height(HEADER)
         .into()
+}
+
+/// A small button showing a glyph, which inverts when pressed like a tapped
+/// row.
+fn glyph_button<'a, M: Clone + 'a>(glyph: &str, on_press: M) -> Element<'a, M> {
+    button(
+        container(label(glyph.to_string(), Face::Ui, TITLE))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .width(34)
+    .height(30)
+    .padding(0)
+    .on_press(on_press)
+    .style(|_, status| button::Style {
+        background: match status {
+            button::Status::Pressed => Some(Background::Color(INK)),
+            button::Status::Hovered => Some(Background::Color(LIGHT)),
+            _ => None,
+        },
+        text_color: if status == button::Status::Pressed {
+            PAPER
+        } else {
+            INK
+        },
+        border: Border {
+            radius: RADIUS.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    })
+    .into()
 }
 
 /// A full-width black line.

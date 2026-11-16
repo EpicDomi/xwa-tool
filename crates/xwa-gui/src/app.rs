@@ -14,6 +14,7 @@ use xwa_fetch::{Book, Language, size_text};
 
 use crate::device::{Finish, Key, Model};
 use crate::eink;
+use crate::graphics::{self, Graphics};
 use crate::prefs::{self, Prefs};
 
 /// Zoom steps, in desktop pixels per screen pixel.
@@ -23,6 +24,12 @@ pub const ZOOMS: [f32; 10] = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.4, 1.6]
 pub const FIRST_ZOOM: f32 = 0.7;
 /// How much of the monitor's height the device may take when fitted.
 const FIT: f32 = 0.92;
+/// The smallest the device can be drawn.
+pub const MIN_ZOOM: f32 = 0.4;
+/// How long after the last resize the window settles round the device.
+const SETTLE: Duration = Duration::from_millis(300);
+/// How long size reports may lag behind the app's own resizing.
+const OWN_RESIZE: Duration = Duration::from_millis(700);
 
 /// A full refresh: black, then white, then the new screen.
 const FLASH_BLACK: Duration = Duration::from_millis(45);
@@ -60,6 +67,7 @@ pub enum Choice {
     Device,
     Case,
     Size,
+    Graphics,
 }
 
 /// A long task on a worker thread: converting, downloading or copying.
@@ -174,6 +182,14 @@ pub enum Message {
     Window(Option<window::Id>),
     Monitor(Option<Size>),
     Placed(Option<Point>),
+    /// The window's new size, in this window's units.
+    Resized(Size),
+    /// A resize handle was pressed: the system takes over the drag.
+    ResizeFrom(window::Direction),
+    Settle,
+    SettleUnlessMaximized(bool),
+    /// Sizes the window for the device at the current zoom.
+    ApplySize,
     Drag,
     SystemMenu,
     KeyHover(Option<Key>),
@@ -200,6 +216,7 @@ pub enum Message {
     SetFinish(Finish),
     /// A zoom, or `None` to fit the monitor.
     SetZoom(Option<f32>),
+    SetGraphics(Graphics),
     ToggleFlash,
     ChooseDownloadDir,
     DownloadDirChosen(Option<PathBuf>),
@@ -247,8 +264,15 @@ pub struct App {
     /// The monitor's size in desktop pixels, once known.
     monitor: Option<Size>,
     retried_monitor: bool,
+    /// The edge being dragged to resize the window, when one of ours.
+    resizing: Option<window::Direction>,
+    /// When the window, resized, is to be fitted round the device again.
+    pub(crate) settle_at: Option<Instant>,
+    /// Until when size reports are taken as the echo of the app's own
+    /// resizing (they can lag behind it), rather than the user's.
+    pub(crate) own_resize_until: Option<Instant>,
     /// Whether the window has been shown.
-    shown: bool,
+    pub(crate) shown: bool,
     pub screen: Screen,
     history: Vec<(Screen, usize)>,
     pub focus: usize,
@@ -261,6 +285,10 @@ pub struct App {
     /// A key pressed from the keyboard, shown pressed for a moment.
     pub tapped_key: Option<(Key, Instant)>,
     pub clock: String,
+    /// How this launch draws, and whether that has been seen to work.
+    pub graphics: Graphics,
+    shown_at: Option<Instant>,
+    graphics_confirmed: bool,
 
     // Converting.
     pub zim: Option<PathBuf>,
@@ -293,13 +321,24 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(prefs: Prefs, zoom: f32, open: Option<PathBuf>) -> (Self, Task<Message>) {
+    pub fn new(
+        prefs: Prefs,
+        zoom: f32,
+        open: Option<PathBuf>,
+        graphics: Graphics,
+    ) -> (Self, Task<Message>) {
         let mut app = App {
             prefs,
+            graphics,
+            shown_at: None,
+            graphics_confirmed: false,
             window: None,
             zoom,
             monitor: None,
             retried_monitor: false,
+            resizing: None,
+            settle_at: None,
+            own_resize_until: None,
             shown: false,
             screen: Screen::Home,
             history: Vec::new(),
@@ -532,20 +571,31 @@ impl App {
     // -----------------------------------------------------------------------
     // The window
 
-    fn resize(&self) -> Task<Message> {
+    fn resize(&mut self) -> Task<Message> {
         match self.window {
-            Some(id) => window::resize(id, self.spec().window()),
+            Some(id) => {
+                self.own_resize_until = Some(Instant::now() + OWN_RESIZE);
+                window::resize(id, self.spec().window())
+            }
             None => Task::none(),
         }
     }
 
     /// The largest zoom step at which the device fits the monitor.
-    pub fn max_zoom(&self) -> f32 {
+    /// The zoom at which the device fills as much of the monitor as it may.
+    pub fn fit_zoom(&self) -> f32 {
         let Some(monitor) = self.monitor else {
             return ZOOMS[ZOOMS.len() - 1];
         };
-        let body = self.spec().window();
-        let fit = (FIT * monitor.height / body.height).min(FIT * monitor.width / body.width);
+        let window = self.spec().window();
+        (FIT * monitor.height / window.height)
+            .min(FIT * monitor.width / window.width)
+            .max(MIN_ZOOM)
+    }
+
+    /// The largest zoom step at which the device fits the monitor.
+    pub fn max_zoom(&self) -> f32 {
+        let fit = self.fit_zoom();
         ZOOMS
             .iter()
             .copied()
@@ -553,11 +603,14 @@ impl App {
             .unwrap_or(ZOOMS[0])
     }
 
-    /// The zoom to use: the one chosen, or the biggest up to life size that
-    /// fits; never more than fits.
+    /// The zoom to use: the one chosen, or the biggest step up to life size
+    /// that fits; never more than fits.
     fn wanted_zoom(&self) -> f32 {
-        let max = self.max_zoom();
-        self.prefs.zoom.unwrap_or(max.min(1.0)).clamp(ZOOMS[0], max)
+        let fit = self.fit_zoom();
+        self.prefs
+            .zoom
+            .unwrap_or(self.max_zoom().min(1.0))
+            .clamp(MIN_ZOOM, fit)
     }
 
     /// Changes the zoom and resizes the window to match.
@@ -566,12 +619,12 @@ impl App {
             return Task::none();
         }
         self.zoom = zoom;
-        self.resize()
+        Task::done(Message::ApplySize)
     }
 
     /// Changes the zoom by choice, and remembers it.
     fn choose_zoom(&mut self, zoom: f32) -> Task<Message> {
-        self.prefs.zoom = Some(zoom.clamp(ZOOMS[0], self.max_zoom()));
+        self.prefs.zoom = Some(zoom.clamp(MIN_ZOOM, self.fit_zoom()));
         self.prefs.save();
         let zoom = self.wanted_zoom();
         self.zoom_to(zoom)
@@ -585,6 +638,7 @@ impl App {
             return Task::none();
         }
         self.shown = true;
+        self.shown_at = Some(Instant::now());
         if self.prefs.refresh_flash {
             self.flash = Some(Instant::now());
         }
@@ -592,6 +646,8 @@ impl App {
             window::set_mode(id, window::Mode::Windowed),
             window::gain_focus(id),
         ])
+        // A message after showing makes sure the first frame is drawn now.
+        .chain(Task::done(Message::Clock))
     }
 
     // -----------------------------------------------------------------------
@@ -650,9 +706,22 @@ impl App {
                         ),
                     ));
                 }
-                tasks.push(self.zoom_to(wanted));
-                let show = self.show_window();
-                return Task::batch(tasks).chain(show);
+                self.zoom = wanted;
+                // The window is shown once it has its size.
+                tasks.push(Task::done(Message::ApplySize));
+                return Task::batch(tasks);
+            }
+            Message::ApplySize => {
+                // A message of its own, so that iced has taken up the new
+                // zoom before the size, given in the window's units, is
+                // turned into pixels.
+                let resize = self.resize();
+                return if self.shown {
+                    resize
+                } else {
+                    let show = self.show_window();
+                    resize.chain(show)
+                };
             }
             Message::Zoom(0) => {
                 // Back to fitting the monitor.
@@ -675,6 +744,56 @@ impl App {
                     Some(z) => self.choose_zoom(z),
                     None => self.update(Message::Zoom(0)),
                 };
+            }
+            Message::ResizeFrom(direction) => {
+                self.resizing = Some(direction);
+                if let Some(id) = self.window {
+                    return window::drag_resize(id, direction);
+                }
+            }
+            Message::Resized(size) => {
+                let echo = self.resizing.is_none()
+                    && self.own_resize_until.is_some_and(|t| Instant::now() < t);
+                if !self.shown || echo {
+                    return Task::none();
+                }
+                // In desktop pixels, against the device at this zoom.
+                let window = self.spec().window();
+                let (w, h) = (size.width * self.zoom, size.height * self.zoom);
+                if (w - window.width * self.zoom).abs() <= 2.0
+                    && (h - window.height * self.zoom).abs() <= 2.0
+                {
+                    return Task::none();
+                }
+                let (across, down) = (w / window.width, h / window.height);
+                use window::Direction::{East, North, South, West};
+                // The device follows the edge being dragged; anything else
+                // scales it to fit.
+                let zoom = match self.resizing {
+                    Some(East | West) => across,
+                    Some(North | South) => down,
+                    Some(_) => across.max(down),
+                    None => across.min(down),
+                };
+                self.zoom = zoom.clamp(MIN_ZOOM, self.fit_zoom());
+                self.settle_at = Some(Instant::now() + SETTLE);
+            }
+            Message::Settle => {
+                if self.settle_at.is_some_and(|t| Instant::now() >= t) {
+                    self.settle_at = None;
+                    self.resizing = None;
+                    self.prefs.zoom = Some(self.zoom);
+                    self.prefs.save();
+                    if let Some(id) = self.window {
+                        return window::is_maximized(id).map(Message::SettleUnlessMaximized);
+                    }
+                }
+            }
+            Message::SettleUnlessMaximized(maximized) => {
+                // A maximised window keeps its size, the device in its middle.
+                if !maximized {
+                    return self.resize();
+                }
             }
             Message::Drag => {
                 if let Some(id) = self.window {
@@ -716,12 +835,24 @@ impl App {
                     self.tapped_key = None;
                 }
             }
-            Message::Clock => self.clock = clock(),
+            Message::Clock => {
+                self.clock = clock();
+                // Drawing has worked for a few seconds: keep this way.
+                if !self.graphics_confirmed
+                    && self
+                        .shown_at
+                        .is_some_and(|t| t.elapsed() >= Duration::from_secs(4))
+                {
+                    self.graphics_confirmed = true;
+                    graphics::confirm(self.graphics);
+                }
+            }
             Message::CloseRequested => {
                 if self.busy() {
                     self.popup = Some(Popup::TurnOffBusy);
                     self.popup_focus = 0;
                 } else {
+                    graphics::confirm(self.graphics);
                     return iced::exit();
                 }
             }
@@ -729,6 +860,7 @@ impl App {
                 self.conversion.cancel();
                 self.copy.cancel();
                 self.download.cancel();
+                graphics::confirm(self.graphics);
                 return iced::exit();
             }
             Message::Sleep => {
@@ -781,8 +913,13 @@ impl App {
                     self.prefs.save();
                     // A bigger case may no longer fit at this zoom.
                     self.zoom = self.wanted_zoom();
-                    return self.resize();
+                    return Task::done(Message::ApplySize);
                 }
+            }
+            Message::SetGraphics(g) => {
+                self.popup = None;
+                self.prefs.graphics = g;
+                self.prefs.save();
             }
             Message::SetFinish(finish) => {
                 self.popup = None;
@@ -1198,6 +1335,10 @@ impl App {
             window::close_requests().map(|_| Message::CloseRequested),
             iced::time::every(Duration::from_secs(5)).map(|_| Message::Clock),
         ];
+        subs.push(window::resize_events().map(|(_, size)| Message::Resized(size)));
+        if self.settle_at.is_some() {
+            subs.push(iced::time::every(Duration::from_millis(100)).map(|_| Message::Settle));
+        }
         if self.flash.is_some() || self.tapped_key.is_some() {
             subs.push(window::frames().map(Message::Frame));
         }

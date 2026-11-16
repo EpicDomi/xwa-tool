@@ -19,6 +19,7 @@ use crate::eink::{
     self, BODY, DARK, Face, INK, Kind, LIGHT, PAD, PAPER, RADIUS, Row, SIDE, SMALL, TITLE, fit,
     label, paragraph,
 };
+use crate::graphics::Graphics;
 use crate::icons;
 
 /// The key held for shortcuts.
@@ -420,6 +421,20 @@ impl App {
                 Row::new(Kind::Setting, "Display size")
                     .value(format!("{:.0}%", self.zoom * 100.0))
                     .on_press(Message::Choose(Choice::Size)),
+                {
+                    let row = Row::new(Kind::Setting, "Graphics")
+                        .value(match self.prefs.graphics {
+                            Graphics::Auto => self.graphics.name().to_string(),
+                            g => g.name().to_string(),
+                        })
+                        .on_press(Message::Choose(Choice::Graphics));
+                    if self.prefs.graphics != Graphics::Auto && self.prefs.graphics != self.graphics
+                    {
+                        row.subtitle("From the next start")
+                    } else {
+                        row
+                    }
+                },
                 Row::new(Kind::Setting, "Refresh flash")
                     .value(on_off(self.prefs.refresh_flash))
                     .on_press(Message::ToggleFlash),
@@ -429,6 +444,11 @@ impl App {
                     .opens()
                     .on_press(Message::ChooseDownloadDir),
                 Row::new(Kind::Info, "Version").value(env!("CARGO_PKG_VERSION")),
+                Row::new(Kind::Info, "Archive format").value(format!(
+                    "XWA {}.{}",
+                    xwa_format::VERSION_MAJOR,
+                    xwa_format::VERSION_MINOR
+                )),
             ],
             note: None,
             hints: ["« Back", "Change", "Up", "Down"],
@@ -681,6 +701,20 @@ impl App {
                 .y(screen.y)
                 .into(),
         ];
+        // Handles on the edges and corners resize the window; macOS does
+        // that itself at the edges of a borderless window.
+        if !cfg!(target_os = "macos") {
+            for (r, direction, cursor) in resize_handles(window) {
+                layers.push(
+                    pin(mouse_area(Space::new().width(r.width).height(r.height))
+                        .on_press(Message::ResizeFrom(direction))
+                        .interaction(cursor))
+                    .x(r.x)
+                    .y(r.y)
+                    .into(),
+                );
+            }
+        }
         for k in spec.keys {
             let hit = k.hit(spec);
             let area = mouse_area(Space::new().width(hit.width).height(hit.height))
@@ -765,6 +799,7 @@ impl App {
             page.back.then_some(Message::Back),
             status.as_deref(),
             &self.clock,
+            [Message::Sleep, Message::CloseRequested],
             w,
         )];
         if page.top > 0.0 {
@@ -828,6 +863,13 @@ impl App {
             Popup::Choose(Choice::Device) => ("Device", None),
             Popup::Choose(Choice::Case) => ("Case", None),
             Popup::Choose(Choice::Size) => ("Display size", None),
+            Popup::Choose(Choice::Graphics) => (
+                "Graphics",
+                Some(
+                    "How the window is drawn. A change takes effect when xwa-tool next starts."
+                        .to_string(),
+                ),
+            ),
         };
         let inner = width - 2.0 * 16.0;
         let mut content = column![label(title.to_string(), Face::UiBold, TITLE)].spacing(8);
@@ -870,6 +912,16 @@ impl App {
                     )
                 })
                 .collect(),
+            Popup::Choose(Choice::Graphics) => Graphics::choices()
+                .into_iter()
+                .map(|g| {
+                    pick(
+                        g.name().into(),
+                        g == self.prefs.graphics,
+                        Message::SetGraphics(g),
+                    )
+                })
+                .collect(),
             Popup::Choose(Choice::Size) => {
                 let max = self.max_zoom();
                 let mut rows: Vec<_> = ZOOMS
@@ -901,6 +953,38 @@ impl App {
 
 /// The value shown beside the choice in use, as the firmware marks it.
 pub const SELECTED: &str = "Selected";
+
+/// Where the window can be grabbed to resize it: its edges and corners,
+/// in the room round the case where there is some, else the case's rim.
+fn resize_handles(
+    window: iced::Size,
+) -> [(iced::Rectangle, iced::window::Direction, mouse::Interaction); 8] {
+    use iced::window::Direction::*;
+    use mouse::Interaction::*;
+    let t = if crate::device::TRANSPARENT {
+        MARGIN + 4.0
+    } else {
+        6.0
+    };
+    let c = 22.0;
+    let (w, h) = (window.width, window.height);
+    let r = |x: f32, y: f32, width: f32, height: f32| iced::Rectangle {
+        x,
+        y,
+        width,
+        height,
+    };
+    [
+        (r(c, 0.0, w - 2.0 * c, t), North, ResizingVertically),
+        (r(c, h - t, w - 2.0 * c, t), South, ResizingVertically),
+        (r(0.0, c, t, h - 2.0 * c), West, ResizingHorizontally),
+        (r(w - t, c, t, h - 2.0 * c), East, ResizingHorizontally),
+        (r(0.0, 0.0, c, c), NorthWest, ResizingDiagonallyDown),
+        (r(w - c, h - c, c, c), SouthEast, ResizingDiagonallyDown),
+        (r(w - c, 0.0, c, c), NorthEast, ResizingDiagonallyUp),
+        (r(0.0, h - c, c, c), SouthWest, ResizingDiagonallyUp),
+    ]
+}
 
 /// The choices in a popup that asks what to do.
 fn popup_actions(p: Popup) -> Vec<Row<Message>> {

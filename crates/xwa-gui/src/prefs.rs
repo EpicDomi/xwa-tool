@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::device::{Finish, Model};
+use crate::graphics::Graphics;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prefs {
@@ -22,6 +23,8 @@ pub struct Prefs {
     /// Flash the screen black and white when it changes, as e-ink does on a
     /// full refresh.
     pub refresh_flash: bool,
+    /// How to draw the window; automatic unless chosen in Settings.
+    pub graphics: Graphics,
 }
 
 impl Default for Prefs {
@@ -33,6 +36,7 @@ impl Default for Prefs {
             download_dir: None,
             language: None,
             refresh_flash: true,
+            graphics: Graphics::Auto,
         }
     }
 }
@@ -86,6 +90,11 @@ impl Prefs {
                 }
                 "language" if !value.is_empty() => prefs.language = Some(value.to_string()),
                 "refresh_flash" => prefs.refresh_flash = value != "off",
+                "graphics" => {
+                    if let Some(g) = Graphics::from_key(value) {
+                        prefs.graphics = g;
+                    }
+                }
                 _ => {}
             }
         }
@@ -110,6 +119,9 @@ impl Prefs {
             "refresh_flash={}\n",
             if self.refresh_flash { "on" } else { "off" }
         );
+        if self.graphics != Graphics::Auto {
+            out += &format!("graphics={}\n", self.graphics.key());
+        }
         out
     }
 }
@@ -138,6 +150,7 @@ mod tests {
             download_dir: Some(PathBuf::from("/data/zim files")),
             language: Some("fra".into()),
             refresh_flash: false,
+            graphics: Graphics::Software,
         };
         assert_eq!(Prefs::parse(&prefs.to_text()), prefs);
         assert_eq!(Prefs::parse(&Prefs::default().to_text()), Prefs::default());
