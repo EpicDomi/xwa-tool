@@ -82,7 +82,9 @@ enum Command {
     Copy {
         /// The XWA file.
         file: PathBuf,
-        /// Folder to copy into (default: the one removable drive, if there is exactly one).
+        /// The SD card, or a folder standing for it (default: the one removable
+        /// drive, if there is exactly one). The archive goes in its `wiki` folder,
+        /// where the e-reader looks for archives.
         #[arg(long)]
         to: Option<PathBuf>,
     },
@@ -358,7 +360,7 @@ fn download(name: &str, flavour: &str, dir: &Path) -> CliResult {
 
 fn copy(file: &Path, to: Option<&Path>) -> CliResult {
     let drives = xwa_fetch::drives::removable();
-    let (dir, drive) = match to {
+    let (card, drive) = match to {
         Some(dir) => (
             dir.to_path_buf(),
             drives.iter().find(|d| dir.starts_with(&d.mount)),
@@ -374,6 +376,7 @@ fn copy(file: &Path, to: Option<&Path>) -> CliResult {
             }
         },
     };
+    let dir = xwa_fetch::drives::archive_dir(&card);
     let mut progress = Progress::new();
     let result = xwa_fetch::drives::copy(file, &dir, drive, &mut |p| {
         transfer_progress(&mut progress, p);

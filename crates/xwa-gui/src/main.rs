@@ -410,7 +410,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             };
             let (tx, rx) = iced::futures::channel::mpsc::unbounded();
             std::thread::spawn(move || {
-                let result = xwa_fetch::drives::copy(&file, &drive.mount, Some(&drive), &mut |p| {
+                let dir = xwa_fetch::drives::archive_dir(&drive.mount);
+                let result = xwa_fetch::drives::copy(&file, &dir, Some(&drive), &mut |p| {
                     let fraction = p.done as f32 / p.total.max(1) as f32;
                     let label = format!(
                         "Copying to the card… {} of {}",
