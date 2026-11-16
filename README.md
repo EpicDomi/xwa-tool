@@ -17,7 +17,9 @@ Early. What works today:
   title index (case- and accent-insensitive prefix search), and an archive
   writer, reader and verifier. The writer compresses on every CPU core and
   produces the same bytes for the same input.
-- `xwa-convert`: ZIM to XWA conversion of Wikipedia: paragraphs,
+- `xwa-convert`: ZIM to XWA conversion of Wikipedia, and of the other
+  wikis Kiwix makes the same way (Wiktionary, Wikivoyage, Vikidia and the
+  rest): paragraphs,
   headings, lists, tables, infoboxes, links resolved to articles,
   pictures (photos as greyscale JPEG; diagrams, line-art bitmaps and icons
   as lossless 4-grey line art, each picture stored once), and formulas
@@ -38,22 +40,41 @@ Early. What works today:
 - `xwa-tool-gui`: a desktop app drawn as the e-reader itself. The window
   is the device (an X4 Pro, X4 or X3, in a black or white case) and its
   screen looks like e-ink and shows the firmware's own menus, fonts and
-  icons. "Get Wikipedia" lists the Kiwix library by language and downloads
-  a ZIM; "Convert" takes it (or any ZIM, also by drag and drop) and converts
-  it for your e-reader; "Copy to SD card" puts the archive on the card.
+  icons. "Get Wikis" lists the Kiwix library's wikis (Wikipedia,
+  Wiktionary, Wikivoyage, Wikibooks, Wikiquote, Wikisource, Wikiversity and
+  Vikidia) by language, filtered (with or without pictures, the whole wiki
+  or selections on a topic, complete articles or introductions) and sorted
+  (by title, size, date or number of articles). Downloads wait their turn,
+  show their speed and the time left, and can be paused, resumed or taken
+  off the list; "Downloads" on the home screen shows them. "Convert" takes
+  a ZIM (downloaded, chosen, or dropped onto the device) and converts it
+  for your e-reader; "Copy to SD card" puts the archive on the card.
 
   Everything can be clicked, and the device's keys work too: the page keys
   turn pages, the X4's and X3's front keys do what the labels above them
   say, the X4 Pro's Home key goes home, and the power key offers to sleep
-  (minimise) or turn off (quit). On the keyboard the arrows move, Enter
-  chooses, Esc goes back, Page Up and Page Down turn pages, and Ctrl (⌘ on
-  a Mac) with + and − changes the size; Ctrl 0 fits it to the screen again.
-  Drag the device by its case to move it. Settings has the device, the
-  case colour, the size, the e-ink refresh flash and the download folder.
+  (minimise) or turn off (quit), as do the – and × at the top right of the
+  screen. On the keyboard the arrows move, Enter chooses, Esc goes back,
+  Page Up and Page Down turn pages, and Ctrl (⌘ on a Mac) with + and −
+  changes the size; Ctrl 0 fits it to the screen again. Drag the device by
+  its case to move it, or by its edges and corners to resize it. Settings
+  has the device, the case colour, the size, how the window is drawn, the
+  e-ink refresh flash and the download folder.
+
+  Should the window fail to draw as the app starts, the app starts again
+  drawing it another way (on Windows DirectX 12, then Vulkan, OpenGL and
+  software; on Linux Vulkan, OpenGL and software; on a Mac Metal, then
+  software) and keeps the way that works; Settings can also pick one. On
+  Windows the window is the device's own shape when DirectX 12 draws it
+  (through DirectComposition, for which iced is patched, see
+  [`vendor/README.md`](vendor/README.md)), and a rounded rectangle
+  otherwise. A failure leaves a report in `xwa-tool/crash.txt` in the
+  configuration folder (`%APPDATA%` on Windows, `~/.config` on Linux,
+  `~/Library/Application Support` on a Mac).
 
 ![The app as an X4 Pro, X4 and X3, each in black and in white](docs/images/app-devices.png)
 
-![The Kiwix library, a conversion under way, copying to a card, and a finished conversion](docs/images/app-screens.png)
+![The Kiwix library, the downloads, a conversion under way, a finished conversion, and copying to a card](docs/images/app-screens.png)
 
 ## Building
 

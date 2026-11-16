@@ -17,12 +17,21 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   diagrams from Wikimedia (`wikimedia.rs`).
 - `crates/xwa-cli`: the `xwa-tool` command line.
 - `crates/xwa-gui`: the `xwa-tool-gui` desktop app (iced), drawn as the
-  e-reader: `device.rs` (the cases and keys of each model), `eink.rs` (the
-  screen: the firmware's Lyra theme sizes, fonts and widgets), `screens.rs`
-  (what each screen shows), `app.rs` (state and messages), `prefs.rs`
-  (remembered choices). `XWA_GUI_SCREENS=DIR cargo test -p xwa-gui --
-  --ignored screens` draws every screen of every model into `DIR`
-  (`XWA_GUI_ZIM` adds a real ZIM, `XWA_GUI_ONLY` picks screens by name).
+  e-reader: `device.rs` (the cases and keys of each model, and whether the
+  window is the device's shape), `eink.rs` (the screen: the firmware's
+  Lyra theme sizes, fonts and widgets), `screens.rs` (what each screen
+  shows), `app.rs` (state and messages), `library.rs` (the wikis, filters
+  and sorts of the library browser), `downloads.rs` (the download queue),
+  `graphics.rs` (which renderer draws the window, and starting again
+  another way when one fails), `crash.rs` (the crash report and dialog),
+  `prefs.rs` (remembered choices). `XWA_GUI_SCREENS=DIR cargo test -p
+  xwa-gui -- --ignored screens` draws every screen of every model into
+  `DIR` (`XWA_GUI_ZIM` adds a real ZIM, `XWA_GUI_ONLY` picks screens by
+  name).
+- `vendor/iced_wgpu`: iced's wgpu renderer with two small patches, used
+  through `[patch.crates-io]` so Windows can show a transparent window.
+  `vendor/README.md` says what they are; re-apply them when iced is
+  upgraded, and change nothing else there.
 - `xtask`: repository chores; `cargo xtask licenses` writes the third-party
   notice that ships in every release zip.
 - `docs/format-spec-v0.md`: the format specification.

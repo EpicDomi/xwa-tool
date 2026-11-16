@@ -3,9 +3,10 @@
 //! Desktop front end, drawn as the e-reader it makes archives for: the
 //! window is the device (an X4 Pro, X4 or X3, black or white), its screen
 //! looks like e-ink and shows the firmware's own menus, and its keys work.
-//! From the home screen: get Wikipedia from the Kiwix library, convert a
-//! ZIM file, copy the archive to the SD card, and settings. A ZIM or XWA
-//! file can also be opened with the app, or dropped onto it.
+//! From the home screen: get Wikipedia or another wiki from the Kiwix
+//! library (downloads queue up on their own screen), convert a ZIM file,
+//! copy the archive to the SD card, and settings. A ZIM or XWA file can also
+//! be opened with the app, or dropped onto it.
 
 mod app;
 mod crash;
