@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/xwa-zim", "crates/xwa-format", "crates/xwa-convert", "crates/xwa-fetch", "crates/xwa-cli", "crates/xwa-gui", "xtask"]
+# Patched copies of published crates (see vendor/README.md), not ours to lint
+# or format.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -45,3 +48,8 @@ serde_json = "1.0"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# See vendor/README.md.
+[patch.crates-io]
+iced_wgpu = { path = "vendor/iced_wgpu" }
+iced_winit = { path = "vendor/iced_winit" }

@@ -12,8 +12,15 @@ path = "src/main.rs"
 
 [dependencies]
 xwa-zim.workspace = true
+xwa-format.workspace = true
 xwa-convert.workspace = true
 xwa-fetch.workspace = true
 dirs.workspace = true
-iced = { workspace = true, features = ["tokio"] }
+iced = { workspace = true, features = ["tokio", "canvas", "image-without-codecs"] }
+image.workspace = true
+ttf-parser.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd.workspace = true
+
+[dev-dependencies]
+iced_test = "0.14.0"
