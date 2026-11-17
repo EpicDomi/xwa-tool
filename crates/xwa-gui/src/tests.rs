@@ -700,9 +700,9 @@ fn the_window_opens_at_the_size_that_fits_the_monitor_it_was_on() {
         FIRST_ZOOM,
         "small until the monitor is known"
     );
-    // A 1563 × 1048 desktop (2736 × 1834 at 175%): the X4 Pro's 979 high
-    // window fits at 90%.
-    prefs.monitor = Some((1563.0, 1048.0));
+    // On a 1500 × 1000 desktop the X4 Pro fits at 90%, with or without the
+    // room round its case for keys (none on Windows, drawn rectangular).
+    prefs.monitor = Some((1500.0, 1000.0));
     assert_eq!(start_zoom(&prefs), 0.9);
     prefs.zoom = Some(1.6);
     assert!(start_zoom(&prefs) < 1.0, "never more than fits");
