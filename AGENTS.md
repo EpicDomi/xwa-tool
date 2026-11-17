@@ -28,10 +28,11 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   xwa-gui -- --ignored screens` draws every screen of every model into
   `DIR` (`XWA_GUI_ZIM` adds a real ZIM, `XWA_GUI_ONLY` picks screens by
   name).
-- `vendor/iced_wgpu`: iced's wgpu renderer with two small patches, used
-  through `[patch.crates-io]` so Windows can show a transparent window.
-  `vendor/README.md` says what they are; re-apply them when iced is
-  upgraded, and change nothing else there.
+- `vendor/iced_wgpu`, `vendor/iced_winit`: iced's wgpu renderer and window
+  shell with small patches, used through `[patch.crates-io]`: a transparent
+  window on Windows, resizing that works on Wayland (KDE), and windows that
+  open centred. `vendor/README.md` says what each is; re-apply them when
+  iced is upgraded, and change nothing else there.
 - `xtask`: repository chores; `cargo xtask licenses` writes the third-party
   notice that ships in every release zip.
 - `docs/format-spec-v0.md`: the format specification.

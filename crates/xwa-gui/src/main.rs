@@ -76,7 +76,7 @@ fn main() -> iced::Result {
 fn run(prefs: Prefs, open: Option<PathBuf>, launch: Launch) -> iced::Result {
     // The real size is set once the monitor's is known; until then the
     // window stays hidden.
-    let zoom = prefs.zoom.unwrap_or(app::FIRST_ZOOM);
+    let zoom = app::start_zoom(&prefs);
     let window = prefs.model.spec().window();
     let graphics = launch.graphics;
     iced::application(

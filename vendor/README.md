@@ -21,3 +21,23 @@ two changes in `src/window/compositor.rs`:
   premultiplied alpha. Metal offers post-multiplied only and OpenGL opaque
   only, so neither changes; on Vulkan, premultiplied is what iced chose
   already wherever post-multiplied was not offered as well.
+
+## iced_winit 0.14.1
+
+From <https://crates.io/crates/iced_winit/0.14.1> (iced, MIT licence),
+with three changes:
+
+- `src/lib.rs`, resizing a window: winit applies a requested size at once on
+  Wayland and returns it, sending no `Resized` event, as its documentation
+  allows; iced dropped the returned size, so the drawing surface kept its
+  old size after the app resized the window. KDE then stretched the old
+  picture over the new window, cropped at the right and bottom, and clicks
+  landed off target by more the further they were from the top left. The
+  returned size is now handled as the event would be.
+- `src/conversion.rs`, opening a window centred: iced opens the window at its
+  size times the app's scale factor, but centred it as if it were unscaled,
+  so a window opened below its natural size sat too high on the screen,
+  and one opened above it too low.
+- `Cargo.toml`: the crate is published with two deprecation warnings, which
+  a crates.io dependency never shows; as a path dependency they would show
+  on every build, so they are allowed.

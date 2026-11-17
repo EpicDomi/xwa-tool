@@ -26,6 +26,8 @@ pub const ZOOMS: [f32; 10] = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.25, 1.4, 1.6]
 pub const FIRST_ZOOM: f32 = 0.7;
 /// How much of the monitor's height the device may take when fitted.
 const FIT: f32 = 0.92;
+/// How many times to ask for the monitor's size once the window is up.
+const MONITOR_TRIES: u8 = 10;
 /// The smallest the device can be drawn.
 pub const MIN_ZOOM: f32 = 0.4;
 /// How long after the last resize the window settles round the device.
@@ -225,6 +227,49 @@ impl Progress {
     }
 }
 
+/// The zoom at which a device with this `window` fills as much of `monitor`
+/// as it may; with no monitor known, the largest step.
+pub fn fit_zoom_for(monitor: Option<Size>, window: Size) -> f32 {
+    let Some(monitor) = monitor else {
+        return ZOOMS[ZOOMS.len() - 1];
+    };
+    (FIT * monitor.height / window.height)
+        .min(FIT * monitor.width / window.width)
+        .max(MIN_ZOOM)
+}
+
+/// The largest zoom step no bigger than `fit`.
+fn step_below(fit: f32) -> f32 {
+    ZOOMS
+        .iter()
+        .copied()
+        .rfind(|&z| z <= fit + 1e-3)
+        .unwrap_or(ZOOMS[0])
+}
+
+/// The zoom to use: the one `chosen`, or the biggest step up to life size
+/// that fits; never more than fits.
+pub fn wanted_zoom_for(chosen: Option<f32>, monitor: Option<Size>, window: Size) -> f32 {
+    let fit = fit_zoom_for(monitor, window);
+    chosen
+        .unwrap_or(step_below(fit).min(1.0))
+        .clamp(MIN_ZOOM, fit)
+}
+
+/// The zoom the window opens at: the one wanted on the monitor it was on
+/// last time, or, the very first time, a small one until the monitor's size
+/// is known.
+pub fn start_zoom(prefs: &Prefs) -> f32 {
+    match prefs.monitor {
+        Some((w, h)) => wanted_zoom_for(
+            prefs.zoom,
+            Some(Size::new(w, h)),
+            prefs.model.spec().window(),
+        ),
+        None => prefs.zoom.unwrap_or(FIRST_ZOOM),
+    }
+}
+
 /// Messages from a worker thread.
 #[derive(Debug, Clone)]
 pub enum Event<T> {
@@ -276,6 +321,10 @@ pub enum Message {
     ToggleFlash,
     ChooseDownloadDir,
     DownloadDirChosen(Option<PathBuf>),
+    /// A file dialog has closed, with what it gives on to.
+    DialogClosed(Box<Message>),
+    /// Asks again which monitor the window is on.
+    FindMonitor,
     /// A file opened with the app or dropped on it.
     Opened(PathBuf),
     // Converting.
@@ -337,6 +386,15 @@ pub struct App {
     /// Until when size reports are taken as the echo of the app's own
     /// resizing (they can lag behind it), rather than the user's.
     pub(crate) own_resize_until: Option<Instant>,
+    /// How many times the device's size was asked for again, after the
+    /// system answered the app's resize with another size.
+    insisted: u8,
+    /// How many times the monitor's size has been asked for, on systems
+    /// (Wayland) that only know it some time after the window is up.
+    monitor_tries: u8,
+    /// A file dialog is open, or opening: Windows can take a while to show
+    /// one, and a second click would open another.
+    dialog_open: bool,
     /// Whether the window has been shown.
     pub(crate) shown: bool,
     pub screen: Screen,
@@ -404,6 +462,9 @@ impl App {
             resizing: None,
             settle_at: None,
             own_resize_until: None,
+            insisted: 0,
+            monitor_tries: 0,
+            dialog_open: false,
             shown: false,
             screen: Screen::Home,
             history: Vec::new(),
@@ -642,7 +703,13 @@ impl App {
     // -----------------------------------------------------------------------
     // The window
 
+    /// Sizes the window round the device at this zoom.
     fn resize(&mut self) -> Task<Message> {
+        self.insisted = 0;
+        self.size_window()
+    }
+
+    fn size_window(&mut self) -> Task<Message> {
         match self.window {
             Some(id) => {
                 self.own_resize_until = Some(Instant::now() + OWN_RESIZE);
@@ -652,36 +719,37 @@ impl App {
         }
     }
 
+    /// Opens a file dialog, unless one is open already, and passes on what
+    /// it gives.
+    fn dialog(
+        &mut self,
+        dialog: impl std::future::Future<Output = Option<PathBuf>> + Send + 'static,
+        then: fn(Option<PathBuf>) -> Message,
+    ) -> Task<Message> {
+        if self.dialog_open {
+            return Task::none();
+        }
+        self.dialog_open = true;
+        Task::perform(dialog, move |path| {
+            Message::DialogClosed(Box::new(then(path)))
+        })
+    }
+
     /// The largest zoom step at which the device fits the monitor.
     /// The zoom at which the device fills as much of the monitor as it may.
     pub fn fit_zoom(&self) -> f32 {
-        let Some(monitor) = self.monitor else {
-            return ZOOMS[ZOOMS.len() - 1];
-        };
-        let window = self.spec().window();
-        (FIT * monitor.height / window.height)
-            .min(FIT * monitor.width / window.width)
-            .max(MIN_ZOOM)
+        fit_zoom_for(self.monitor, self.spec().window())
     }
 
     /// The largest zoom step at which the device fits the monitor.
     pub fn max_zoom(&self) -> f32 {
-        let fit = self.fit_zoom();
-        ZOOMS
-            .iter()
-            .copied()
-            .rfind(|&z| z <= fit + 1e-3)
-            .unwrap_or(ZOOMS[0])
+        step_below(self.fit_zoom())
     }
 
     /// The zoom to use: the one chosen, or the biggest step up to life size
     /// that fits; never more than fits.
     fn wanted_zoom(&self) -> f32 {
-        let fit = self.fit_zoom();
-        self.prefs
-            .zoom
-            .unwrap_or(self.max_zoom().min(1.0))
-            .clamp(MIN_ZOOM, fit)
+        wanted_zoom_for(self.prefs.zoom, self.monitor, self.spec().window())
     }
 
     /// Changes the zoom and resizes the window to match.
@@ -752,8 +820,19 @@ impl App {
                     };
                 };
                 // The size comes in this window's units: undo the zoom.
-                self.monitor = Some(Size::new(size.width * self.zoom, size.height * self.zoom));
-                if (self.wanted_zoom() - self.zoom).abs() < 1e-3 {
+                let monitor = Size::new(size.width * self.zoom, size.height * self.zoom);
+                self.monitor = Some(monitor);
+                // Remembered, so the window opens at its size next time.
+                let remembered = Some((monitor.width.round(), monitor.height.round()));
+                if self.prefs.monitor != remembered {
+                    self.prefs.monitor = remembered;
+                    self.prefs.save();
+                }
+                // A size being dragged to is the user's: the window is not
+                // fitted to the monitor under them when it comes to be known
+                // late (Wayland).
+                let dragging = self.resizing.is_some() || self.settle_at.is_some();
+                if dragging || (self.wanted_zoom() - self.zoom).abs() < 1e-3 {
                     return self.show_window();
                 }
                 return window::position(id).map(Message::Placed);
@@ -823,9 +902,9 @@ impl App {
                 }
             }
             Message::Resized(size) => {
-                let echo = self.resizing.is_none()
-                    && self.own_resize_until.is_some_and(|t| Instant::now() < t);
-                if !self.shown || echo {
+                // A minimised window has no size (Windows says 0 × 0):
+                // nothing is being resized.
+                if !self.shown || size.width < 1.0 || size.height < 1.0 {
                     return Task::none();
                 }
                 // In desktop pixels, against the device at this zoom.
@@ -834,6 +913,20 @@ impl App {
                 if (w - window.width * self.zoom).abs() <= 2.0
                     && (h - window.height * self.zoom).abs() <= 2.0
                 {
+                    return Task::none();
+                }
+                if self.resizing.is_none()
+                    && self.own_resize_until.is_some_and(|t| Instant::now() < t)
+                {
+                    // Just after the app sized the window, another size is
+                    // the system catching up with something earlier: KWin
+                    // sends the size a drag ended at after the app has fitted
+                    // the window round the device. The device's size is
+                    // asked for again, twice at most.
+                    if self.insisted < 2 {
+                        self.insisted += 1;
+                        return self.size_window();
+                    }
                     return Task::none();
                 }
                 let (across, down) = (w / window.width, h / window.height);
@@ -916,6 +1009,14 @@ impl App {
                 {
                     self.graphics_confirmed = true;
                     graphics::confirm(self.graphics);
+                }
+            }
+            Message::FindMonitor => {
+                if self.monitor.is_none() && self.monitor_tries < MONITOR_TRIES {
+                    self.monitor_tries += 1;
+                    if let Some(id) = self.window {
+                        return window::monitor_size(id).map(Message::Monitor);
+                    }
                 }
             }
             Message::CloseRequested => {
@@ -1007,7 +1108,7 @@ impl App {
             }
             Message::ChooseDownloadDir => {
                 let dir = self.download_dir();
-                return Task::perform(
+                return self.dialog(
                     async move {
                         rfd::AsyncFileDialog::new()
                             .set_directory(dir)
@@ -1018,6 +1119,10 @@ impl App {
                     Message::DownloadDirChosen,
                 );
             }
+            Message::DialogClosed(then) => {
+                self.dialog_open = false;
+                return self.update(*then);
+            }
             Message::DownloadDirChosen(Some(dir)) => {
                 self.prefs.download_dir = Some(dir);
                 self.prefs.save();
@@ -1026,7 +1131,7 @@ impl App {
 
             // Converting.
             Message::ChooseZim => {
-                return Task::perform(
+                return self.dialog(
                     async {
                         rfd::AsyncFileDialog::new()
                             .add_filter("Kiwix ZIM file", &["zim"])
@@ -1068,7 +1173,7 @@ impl App {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let dir = zim.parent().map(Path::to_path_buf);
-                return Task::perform(
+                return self.dialog(
                     async move {
                         let mut dialog = rfd::AsyncFileDialog::new()
                             .add_filter("XWA archive", &["xwa"])
@@ -1115,7 +1220,7 @@ impl App {
 
             // Copying.
             Message::ChooseArchive => {
-                return Task::perform(
+                return self.dialog(
                     async {
                         rfd::AsyncFileDialog::new()
                             .add_filter("XWA archive", &["xwa"])
@@ -1509,6 +1614,11 @@ impl App {
         subs.push(window::resize_events().map(|(_, size)| Message::Resized(size)));
         if self.settle_at.is_some() {
             subs.push(iced::time::every(Duration::from_millis(100)).map(|_| Message::Settle));
+        }
+        // Wayland says which monitor the window is on only once it shows on
+        // one: until then the app cannot fit the window to it.
+        if self.shown && self.monitor.is_none() && self.monitor_tries < MONITOR_TRIES {
+            subs.push(iced::time::every(Duration::from_millis(250)).map(|_| Message::FindMonitor));
         }
         if self.flash.is_some() || self.tapped_key.is_some() {
             subs.push(window::frames().map(Message::Frame));

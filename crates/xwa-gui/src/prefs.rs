@@ -17,6 +17,10 @@ pub struct Prefs {
     /// How big the device is drawn, in desktop pixels per screen pixel;
     /// `None` fits it to the monitor.
     pub zoom: Option<f32>,
+    /// The size of the monitor the window was last on, in desktop pixels,
+    /// so the window can open at the right size. Wayland says only once a
+    /// window is up, and does not let it move itself after.
+    pub monitor: Option<(f32, f32)>,
     /// Where downloads go; `None` is the Downloads folder.
     pub download_dir: Option<PathBuf>,
     /// The Kiwix library language last shown (ISO 639-3).
@@ -37,6 +41,7 @@ impl Default for Prefs {
             model: Model::default(),
             finish: None,
             zoom: None,
+            monitor: None,
             download_dir: None,
             language: None,
             refresh_flash: true,
@@ -91,6 +96,12 @@ impl Prefs {
                 }
                 "case" => prefs.finish = Finish::ALL.into_iter().find(|f| f.key() == value),
                 "zoom" => prefs.zoom = value.parse().ok().filter(|z: &f32| z.is_finite()),
+                "monitor" => {
+                    prefs.monitor = value.split_once('x').and_then(|(w, h)| {
+                        let (w, h): (f32, f32) = (w.parse().ok()?, h.parse().ok()?);
+                        (w.is_finite() && h.is_finite() && w >= 1.0 && h >= 1.0).then_some((w, h))
+                    });
+                }
                 "downloads" if !value.is_empty() => {
                     prefs.download_dir = Some(PathBuf::from(value));
                 }
@@ -121,6 +132,9 @@ impl Prefs {
         }
         if let Some(z) = self.zoom {
             out += &format!("zoom={z}\n");
+        }
+        if let Some((w, h)) = self.monitor {
+            out += &format!("monitor={w}x{h}\n");
         }
         if let Some(d) = &self.download_dir {
             out += &format!("downloads={}\n", d.display());
@@ -169,6 +183,7 @@ mod tests {
             model: Model::X3,
             finish: Some(Finish::Black),
             zoom: Some(0.85),
+            monitor: Some((1563.0, 1048.0)),
             download_dir: Some(PathBuf::from("/data/zim files")),
             language: Some("fra".into()),
             refresh_flash: false,
@@ -187,7 +202,8 @@ mod tests {
 
     #[test]
     fn ignores_what_it_does_not_know() {
-        let prefs = Prefs::parse("device=x9\nzoom=big\nnonsense\ncolour=red\nlanguage=\n");
+        let prefs =
+            Prefs::parse("device=x9\nzoom=big\nmonitor=wide\nnonsense\ncolour=red\nlanguage=\n");
         assert_eq!(prefs, Prefs::default());
     }
 }

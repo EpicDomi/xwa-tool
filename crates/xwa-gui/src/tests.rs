@@ -650,6 +650,66 @@ fn resizing_the_window_scales_the_device_then_fits_round_it() {
     assert_eq!(app.zoom, crate::app::MIN_ZOOM);
 }
 
+#[test]
+fn a_minimised_window_keeps_the_device_size() {
+    let mut app = app(Model::X4Pro);
+    app.shown = true;
+    let zoom = app.zoom;
+    // Windows reports a minimised window as 0 × 0.
+    let _ = app.update(Message::Resized(iced::Size::new(0.0, 0.0)));
+    assert_eq!(app.zoom, zoom);
+    assert!(app.settle_at.is_none(), "nothing to settle");
+}
+
+#[test]
+fn a_size_the_system_gives_just_after_the_apps_own_is_asked_again() {
+    let mut app = app(Model::X4Pro);
+    app.shown = true;
+    app.window = Some(iced::window::Id::unique());
+    let zoom = app.zoom;
+    let window = app.spec().window();
+    // KWin, after a drag, answers the app's fitted size with the drag's.
+    app.own_resize_until = Some(Instant::now() + Duration::from_secs(5));
+    let stale = iced::Size::new(window.width, window.height * 0.75);
+    for asked in [true, true, false] {
+        let task = app.update(Message::Resized(stale));
+        assert_eq!(task.units() > 0, asked, "asked again twice at most");
+        assert_eq!(app.zoom, zoom, "the device keeps its size");
+    }
+}
+
+#[test]
+fn a_second_file_dialog_waits_for_the_first() {
+    let mut app = app(Model::X4Pro);
+    assert!(app.update(Message::ChooseZim).units() > 0);
+    assert_eq!(
+        app.update(Message::ChooseArchive).units(),
+        0,
+        "one dialog at a time"
+    );
+    let _ = app.update(Message::DialogClosed(Box::new(Message::ZimChosen(None))));
+    assert!(app.update(Message::ChooseArchive).units() > 0);
+}
+
+#[test]
+fn the_window_opens_at_the_size_that_fits_the_monitor_it_was_on() {
+    use crate::app::{FIRST_ZOOM, start_zoom};
+    let mut prefs = Prefs::default();
+    assert_eq!(
+        start_zoom(&prefs),
+        FIRST_ZOOM,
+        "small until the monitor is known"
+    );
+    // A 1563 × 1048 desktop (2736 × 1834 at 175%): the X4 Pro's 979 high
+    // window fits at 90%.
+    prefs.monitor = Some((1563.0, 1048.0));
+    assert_eq!(start_zoom(&prefs), 0.9);
+    prefs.zoom = Some(1.6);
+    assert!(start_zoom(&prefs) < 1.0, "never more than fits");
+    prefs.zoom = Some(0.6);
+    assert_eq!(start_zoom(&prefs), 0.6);
+}
+
 // ---------------------------------------------------------------------------
 // Pictures
 
