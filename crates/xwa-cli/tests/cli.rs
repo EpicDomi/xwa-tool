@@ -101,7 +101,7 @@ fn info_verify_and_dump() {
     let (ok, out) = tool(&["info", file]);
     assert!(ok, "{out}");
     assert!(
-        out.contains("XWA 0.2") && out.contains("2 articles") && out.contains("title: CLI test"),
+        out.contains("XWA 0.3") && out.contains("2 articles") && out.contains("title: CLI test"),
         "{out}"
     );
 
@@ -122,6 +122,15 @@ fn info_verify_and_dump() {
     assert!(ok, "{out}");
     assert!(
         out.contains("Pythagoras' theorem -> Pythagorean theorem"),
+        "{out}"
+    );
+
+    // Each article once, by its first title in index order.
+    let (ok, out) = tool(&["dump", file, "--search", "PYTH", "--popular"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("Pythagoras' theorem -> Pythagorean theorem")
+            && !out.contains("  Pythagorean theorem"),
         "{out}"
     );
 

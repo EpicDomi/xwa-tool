@@ -24,8 +24,8 @@ use crate::records::{
 use crate::superblock::{SectionEntry, Superblock};
 use crate::title_index::{self, LeafWriter, Leaves, TitleSorter};
 use crate::{
-    BLOCK_SIZE, Error, Profile, Result, TextCodec, VERSION_MAJOR, VERSION_MINOR, meta, optional,
-    required, section, varint,
+    BLOCK_SIZE, DAYS_IN_YEAR, Error, NO_ARTICLE, Profile, Result, TextCodec, VERSION_MAJOR,
+    VERSION_MINOR, meta, normalize, optional, required, section, varint,
 };
 
 /// BLOBS always starts right after the superblock.
@@ -40,7 +40,7 @@ pub mod image_flags {
 #[derive(Debug, Clone)]
 pub struct WriterOptions {
     pub profile: Profile,
-    /// Uncompressed chunk size, at most [`MAX_CHUNK`].
+    /// Uncompressed chunk size: a power of two, at most [`MAX_CHUNK`].
     pub chunk_size: usize,
     /// libdeflate level for the compact profile (1-12).
     pub deflate_level: i32,
@@ -196,9 +196,11 @@ impl ArchiveWriter<BufWriter<File>> {
 
 impl<W: Write + Seek> ArchiveWriter<W> {
     pub fn new(mut out: W, opts: WriterOptions) -> Result<Self> {
-        if opts.chunk_size == 0 || opts.chunk_size > MAX_CHUNK {
+        // Every chunk but the last is full, so a reader finds the chunk
+        // for a stream position by arithmetic (spec 7.1).
+        if !opts.chunk_size.is_power_of_two() || !(512..=MAX_CHUNK).contains(&opts.chunk_size) {
             return Err(Error::Invalid(format!(
-                "chunk size {} (1-{MAX_CHUNK})",
+                "chunk size {} (a power of two, 512-{MAX_CHUNK})",
                 opts.chunk_size
             )));
         }
@@ -284,6 +286,17 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         self.set_extra(section::FONT, data);
     }
 
+    /// Supplies the DAYS section (spec 5.3): the article for each day of
+    /// the year, January 1 to December 31 with February 29, `None` where
+    /// there is none.
+    pub fn set_days(&mut self, days: &[Option<u32>; DAYS_IN_YEAR]) {
+        let data = days
+            .iter()
+            .flat_map(|d| d.unwrap_or(NO_ARTICLE).to_le_bytes())
+            .collect();
+        self.set_extra(section::DAYS, data);
+    }
+
     fn set_extra(&mut self, kind: u32, data: Vec<u8>) {
         self.extra_sections.retain(|(k, _)| *k != kind);
         self.extra_sections.push((kind, data));
@@ -310,6 +323,18 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                 self.article_count()
             )));
         }
+        // Titles are tidy lines (spec 7.3) wherever they are stored.
+        let tidied;
+        let article = match content::tidy_line(&article.title) {
+            std::borrow::Cow::Borrowed(_) => article,
+            std::borrow::Cow::Owned(title) => {
+                tidied = Article {
+                    title,
+                    ..article.clone()
+                };
+                &tidied
+            }
+        };
         let mut flags = flags;
         if article.infobox.is_some() {
             flags |= article_flags::INFOBOX;
@@ -380,6 +405,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// a section leads to (spec 6.2). Redirects that normalise to their
     /// target's own key are dropped by the index.
     pub fn add_redirect(&mut self, title: &str, target: u32, anchor: Option<u32>) -> Result<()> {
+        let title = content::tidy_line(title);
+        let title = title.as_ref();
         if title.is_empty() {
             return Ok(());
         }
@@ -551,7 +578,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             }
             match blob {
                 Blob::Chunk { data, raw_len } => {
-                    let crc = crc32c::crc32c(&data);
+                    let crc = crate::crc::crc32(&data);
                     let stored = data.len() + 4;
                     if stored > U24_MAX as usize {
                         return Err(Error::Invalid(format!(
@@ -582,7 +609,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     fn write_blob(&mut self, data: &[u8]) -> Result<()> {
         self.out.write_all(data)?;
         self.pos += data.len() as u64;
-        self.blobs_crc = crc32c::crc32c_append(self.blobs_crc, data);
+        self.blobs_crc = crate::crc::crc32_append(self.blobs_crc, data);
         Ok(())
     }
 
@@ -608,7 +635,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             flags: 0,
             offset,
             length: data.len() as u64,
-            crc32c: crc32c::crc32c(data),
+            crc32: crate::crc::crc32(data),
         });
         Ok(())
     }
@@ -665,7 +692,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             flags: 0,
             offset: BLOBS_START,
             length: self.pos - BLOBS_START,
-            crc32c: self.blobs_crc,
+            crc32: self.blobs_crc,
         }];
 
         if let Some(dict) = self.codec.dict.clone() {
@@ -674,7 +701,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         // The titles list, copied from its temporary file.
         let offset = self.start_section()?;
         let titles = std::mem::replace(&mut self.titles, Spool::new(None));
-        let (length, crc32c) = (titles.len, titles.crc32c);
+        let (length, crc32) = (titles.len, titles.crc32);
         titles.copy_to(&mut self.out)?;
         self.pos += length;
         sections.push(SectionEntry {
@@ -682,21 +709,25 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             flags: 0,
             offset,
             length,
-            crc32c,
+            crc32,
         });
         // The title index: leaf blocks straight from the sorter into the
         // file, then the inner blocks above them.
         let offset = self.start_section()?;
         let sorter = std::mem::replace(&mut self.title_sorter, TitleSorter::new(0, None));
+        let popularity = &self.popularity;
         let mut leaves = LeafWriter::new(&mut self.out);
         sorter.finish(|key, display, article, flags, anchor| {
-            leaves.push(key, display, article, flags, anchor)
+            let score = popularity.get(article as usize).copied().unwrap_or(0);
+            leaves.push(key, display, article, flags, anchor, score)
         })?;
         let Leaves {
-            first_keys,
+            separators,
+            leaf_popularity,
+            key_chars,
             redirect_count,
             bytes: leaf_bytes,
-            crc32c,
+            crc32,
             ..
         } = leaves.finish()?;
         self.pos += leaf_bytes;
@@ -705,10 +736,13 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             flags: 0,
             offset,
             length: leaf_bytes,
-            crc32c,
+            crc32,
         });
-        let (inner, _) = title_index::build_inner(first_keys);
+        let (inner, _) = title_index::build_inner(separators, leaf_popularity);
         self.write_section(&mut sections, section::TINDEX_INNER, &inner)?;
+        // How to fold what is typed as the keys were folded (spec 6.1).
+        let fold = normalize::encode_fold_section(&key_chars);
+        self.write_section(&mut sections, section::FOLD, &fold)?;
         let redirects = redirect_count as u64;
 
         let profile = match self.opts.profile {
@@ -732,7 +766,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         let articles = std::mem::replace(&mut self.articles, Spool::new(None));
         let length = articles.len;
         let popularity = std::mem::take(&mut self.popularity);
-        let crc32c = articles.copy_records_to(&mut self.out, ArticleRecord::SIZE, |i, rec| {
+        let crc32 = articles.copy_records_to(&mut self.out, ArticleRecord::SIZE, |i, rec| {
             rec[ArticleRecord::POPULARITY] = popularity[i];
         })?;
         self.pos += length;
@@ -741,7 +775,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             flags: 0,
             offset,
             length,
-            crc32c,
+            crc32,
         });
         let chunks: Vec<u8> = self.chunks.iter().flat_map(|c| c.encode()).collect();
         self.write_section(&mut sections, section::CHUNK_TABLE, &chunks)?;
@@ -750,6 +784,17 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             self.write_section(&mut sections, section::IMAGE_TABLE, &images)?;
         }
         for (kind, data) in std::mem::take(&mut self.extra_sections) {
+            if kind == section::DAYS {
+                let missing = data
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| u32::from_le_bytes(*b))
+                    .find(|&id| id != NO_ARTICLE && id >= article_count);
+                if let Some(id) = missing {
+                    return Err(Error::Invalid(format!("DAYS names missing article {id}")));
+                }
+            }
             self.write_section(&mut sections, kind, &data)?;
         }
 
@@ -762,6 +807,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             profile: self.opts.profile,
             text_codec: self.codec.codec,
             deflate_window_bits: 15,
+            chunk_bits: self.opts.chunk_size.trailing_zeros() as u8,
             sections,
         };
         self.out.seek(SeekFrom::Start(0))?;
@@ -786,7 +832,7 @@ struct Spool {
     dir: Option<PathBuf>,
     file: Option<BufWriter<File>>,
     len: u64,
-    crc32c: u32,
+    crc32: u32,
 }
 
 impl Spool {
@@ -795,7 +841,7 @@ impl Spool {
             dir,
             file: None,
             len: 0,
-            crc32c: 0,
+            crc32: 0,
         }
     }
 
@@ -812,12 +858,12 @@ impl Spool {
         };
         file.write_all(data)?;
         self.len += data.len() as u64;
-        self.crc32c = crc32c::crc32c_append(self.crc32c, data);
+        self.crc32 = crate::crc::crc32_append(self.crc32, data);
         Ok(())
     }
 
     /// Copies fixed-size records to `out`, letting `patch` change each
-    /// one (by index) on the way, and returns the CRC32C of what it wrote.
+    /// one (by index) on the way, and returns the CRC-32 of what it wrote.
     fn copy_records_to(
         self,
         out: &mut impl Write,
@@ -837,7 +883,7 @@ impl Spool {
                     patch(index, rec);
                     index += 1;
                 }
-                crc = crc32c::crc32c_append(crc, &buf[..n]);
+                crc = crate::crc::crc32_append(crc, &buf[..n]);
                 out.write_all(&buf[..n])?;
                 left -= n as u64;
             }

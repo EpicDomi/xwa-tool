@@ -9,16 +9,16 @@ use std::io;
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::codec::{ChunkCodec, Decoder, MAX_CHUNK};
+use crate::codec::{ChunkCodec, Decoder};
 use crate::content::{self, Article, Place, Ref};
 use crate::error::corrupt;
-use crate::normalize::search_key;
+use crate::normalize::{self, search_key_with};
 use crate::records::{ArticleRecord, ChunkEntry, ImageRecord, article_flags, image_encoding};
 use crate::superblock::{SectionEntry, Superblock};
 use crate::title_index::{self, BlockSource, Hit, IndexReader, ReadError};
 use crate::{
-    BLOCK_SIZE, Error, Result, TextCodec, VERSION_MAJOR, VERSION_MINOR, la2, math_glyphs, meta,
-    required, section, varint,
+    BLOCK_SIZE, DAYS_IN_YEAR, Error, NO_ARTICLE, Result, TextCodec, VERSION_MAJOR, VERSION_MINOR,
+    la2, math_glyphs, meta, required, section, varint,
 };
 
 /// Random-access bytes: a file or a buffer.
@@ -73,7 +73,7 @@ impl Source for Vec<u8> {
 }
 
 /// Sections every archive must have.
-const REQUIRED_SECTIONS: [(u32, &str); 7] = [
+const REQUIRED_SECTIONS: [(u32, &str); 8] = [
     (section::META, "META"),
     (section::ARTICLES, "ARTICLES"),
     (section::TITLES, "TITLES"),
@@ -81,6 +81,7 @@ const REQUIRED_SECTIONS: [(u32, &str); 7] = [
     (section::TINDEX_INNER, "TINDEX_INNER"),
     (section::CHUNK_TABLE, "CHUNK_TABLE"),
     (section::BLOBS, "BLOBS"),
+    (section::FOLD, "FOLD"),
 ];
 
 pub fn section_name(kind: u32) -> &'static str {
@@ -97,6 +98,8 @@ pub fn section_name(kind: u32) -> &'static str {
         section::ZSTD_DICT => "ZSTD_DICT",
         section::FONT => "FONT",
         section::WORD_INDEX => "WORD_INDEX",
+        section::FOLD => "FOLD",
+        section::DAYS => "DAYS",
         _ => "unknown",
     }
 }
@@ -116,6 +119,10 @@ pub struct Archive<S: Source = File> {
     blobs: SectionEntry,
     image_table: Option<SectionEntry>,
     glyph_count: Option<u32>,
+    /// The FOLD table (spec 6.1), for folding what is searched for.
+    fold: Vec<(char, Box<str>)>,
+    /// Title index blocks read so far.
+    index_reads: std::sync::atomic::AtomicU64,
 }
 
 impl Archive<File> {
@@ -158,6 +165,12 @@ impl<S: Source> Archive<S> {
                 sb.file_size
             )));
         }
+        if !(9..=15).contains(&sb.chunk_bits) {
+            return Err(corrupt(format!(
+                "chunk size 2^{} is not 2^9 to 2^15",
+                sb.chunk_bits
+            )));
+        }
         if (sb.required_features & required::ZSTD_TEXT != 0) != (sb.text_codec == TextCodec::Zstd) {
             return Err(corrupt("zstd feature flag does not match the text codec"));
         }
@@ -192,6 +205,11 @@ impl<S: Source> Archive<S> {
             get(section::TINDEX_INNER),
         );
         let image_table = sb.section(section::IMAGE_TABLE).copied();
+        if let Some(days) = sb.section(section::DAYS)
+            && days.length != DAYS_IN_YEAR as u64 * 4
+        {
+            return Err(corrupt(format!("DAYS section is {} bytes", days.length)));
+        }
         let sized = [
             (articles, ArticleRecord::SIZE),
             (chunk_table, ChunkEntry::SIZE),
@@ -217,12 +235,14 @@ impl<S: Source> Archive<S> {
             }
             let mut b = vec![0u8; s.length as usize];
             src.read_exact_at(&mut b, s.offset)?;
-            if s.crc32c != 0 && crc32c::crc32c(&b) != s.crc32c {
+            if s.crc32 != 0 && crate::crc::crc32(&b) != s.crc32 {
                 return Err(corrupt(format!("{what} section checksum mismatch")));
             }
             Ok(b)
         };
         let meta = meta::decode(&small(&get(section::META), "META")?)?;
+        let fold = normalize::decode_fold_section(&small(&get(section::FOLD), "FOLD")?)
+            .ok_or_else(|| corrupt("FOLD section is malformed"))?;
         let dict = sb
             .section(section::ZSTD_DICT)
             .map(|s| small(s, "ZSTD_DICT"))
@@ -258,6 +278,8 @@ impl<S: Source> Archive<S> {
             blobs: get(section::BLOBS),
             image_table,
             glyph_count,
+            fold,
+            index_reads: Default::default(),
             superblock: sb,
         })
     }
@@ -297,6 +319,45 @@ impl<S: Source> Archive<S> {
 
     pub fn has_dictionary(&self) -> bool {
         self.codec.dict.is_some()
+    }
+
+    /// Uncompressed size of every chunk but the last (spec 7.1).
+    pub fn chunk_size(&self) -> u32 {
+        1 << self.superblock.chunk_bits
+    }
+
+    /// The article for each day of the year (spec 5.3), January 1 to
+    /// December 31 with February 29, if the archive says.
+    pub fn days(&self) -> Result<Option<Vec<Option<u32>>>> {
+        let Some(s) = self.superblock.section(section::DAYS) else {
+            return Ok(None);
+        };
+        let b = self.read_at(s.offset, DAYS_IN_YEAR * 4)?;
+        Ok(Some(
+            b.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|d| u32::from_le_bytes(*d))
+                .map(|id| (id != NO_ARTICLE).then_some(id))
+                .collect(),
+        ))
+    }
+
+    /// Title index blocks read since the archive was opened, as a measure
+    /// of what searching costs a device.
+    pub fn index_block_reads(&self) -> u64 {
+        self.index_reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Entries in the FOLD table.
+    pub fn fold_entries(&self) -> usize {
+        self.fold.len()
+    }
+
+    /// The search key of `text`, folded through this archive's FOLD table
+    /// as a reader on the device folds it (spec 6.1).
+    pub fn search_key(&self, text: &str) -> String {
+        search_key_with(text, &self.fold)
     }
 
     fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>> {
@@ -356,7 +417,7 @@ impl<S: Source> Archive<S> {
         String::from_utf8(bytes).map_err(|_| corrupt(format!("article {id}: title is not UTF-8")))
     }
 
-    /// The stored bytes of a chunk, checked against its CRC32C.
+    /// The stored bytes of a chunk, checked against its CRC-32.
     fn chunk_stored(&self, index: u32, entry: &ChunkEntry) -> Result<Vec<u8>> {
         let size = entry.stored_size as u64;
         if size < 4
@@ -367,16 +428,23 @@ impl<S: Source> Archive<S> {
         {
             return Err(corrupt(format!("chunk {index} out of bounds")));
         }
-        if entry.uncompressed_size == 0 || entry.uncompressed_size as usize > MAX_CHUNK {
+        // Every chunk but the last is full (spec 7.1).
+        let full = self.chunk_size();
+        let fits = if index + 1 < self.chunk_count() {
+            entry.uncompressed_size == full
+        } else {
+            (1..=full).contains(&entry.uncompressed_size)
+        };
+        if !fits {
             return Err(corrupt(format!(
-                "chunk {index} claims {} bytes",
+                "chunk {index} holds {} bytes; chunks are {full}",
                 entry.uncompressed_size
             )));
         }
         let mut b = self.read_at(self.blobs.offset + entry.offset, size as usize)?;
         let crc = u32::from_le_bytes(b[b.len() - 4..].try_into().unwrap());
         b.truncate(b.len() - 4);
-        if crc32c::crc32c(&b) != crc {
+        if crate::crc::crc32(&b) != crc {
             return Err(corrupt(format!("chunk {index} checksum mismatch")));
         }
         Ok(b)
@@ -430,7 +498,7 @@ impl<S: Source> Archive<S> {
             }
         };
         let remaining_chunks = (chunk_count - rec.first_chunk) as u64;
-        if size > remaining_chunks * MAX_CHUNK as u64 {
+        if size > remaining_chunks * self.chunk_size() as u64 {
             return Err(bad("stream size larger than the remaining chunks"));
         }
         let total = prefix + size as usize;
@@ -485,9 +553,20 @@ impl<S: Source> Archive<S> {
         IndexReader::new(FileBlocks { archive: self })
     }
 
-    /// Up to `limit` titles starting with `prefix`, after normalisation.
+    /// Up to `limit` titles starting with `prefix`, after folding, in index
+    /// order.
     pub fn search(&self, prefix: &str, limit: usize) -> Result<Vec<Hit>> {
-        self.index().prefix(prefix, limit).map_err(index_error)
+        self.index()
+            .prefix_key(self.search_key(prefix).as_bytes(), limit)
+            .map_err(index_error)
+    }
+
+    /// The `limit` most popular titles starting with `prefix`, after
+    /// folding: most popular first, ties in index order (spec 6.5).
+    pub fn search_popular(&self, prefix: &str, limit: usize) -> Result<Vec<Hit>> {
+        self.index()
+            .most_popular(self.search_key(prefix).as_bytes(), limit)
+            .map_err(index_error)
     }
 
     /// Checks everything: checksums, every chunk, article, link, image and
@@ -495,9 +574,10 @@ impl<S: Source> Archive<S> {
     pub fn verify(&self, progress: &mut dyn FnMut(&str, u64, u64)) -> Result<VerifyReport> {
         let mut r = VerifyReport::default();
         self.verify_sections(&mut r, progress)?;
-        self.verify_articles(&mut r, progress)?;
+        let popularity = self.verify_articles(&mut r, progress)?;
         self.verify_images(&mut r, progress)?;
-        self.verify_index(&mut r, progress)?;
+        self.verify_index(&mut r, &popularity, progress)?;
+        self.verify_days(&mut r)?;
         self.verify_counts(&mut r);
         Ok(r)
     }
@@ -538,13 +618,13 @@ impl<S: Source> Archive<S> {
         }
         let total: u64 = sections
             .iter()
-            .filter(|s| s.crc32c != 0)
+            .filter(|s| s.crc32 != 0)
             .map(|s| s.length)
             .sum();
         let mut done = 0;
         let mut buf = vec![0u8; 1 << 20];
         for s in sections {
-            if s.crc32c == 0 {
+            if s.crc32 == 0 {
                 continue;
             }
             let mut crc = 0u32;
@@ -552,12 +632,12 @@ impl<S: Source> Archive<S> {
             while pos < s.length {
                 let n = (s.length - pos).min(buf.len() as u64) as usize;
                 self.src.read_exact_at(&mut buf[..n], s.offset + pos)?;
-                crc = crc32c::crc32c_append(crc, &buf[..n]);
+                crc = crate::crc::crc32_append(crc, &buf[..n]);
                 pos += n as u64;
                 done += n as u64;
                 progress("checksums", done, total);
             }
-            if crc != s.crc32c {
+            if crc != s.crc32 {
                 r.problem(format!(
                     "{} section checksum mismatch",
                     section_name(s.kind)
@@ -567,11 +647,13 @@ impl<S: Source> Archive<S> {
         Ok(())
     }
 
+    /// Checks every article; returns each one's popularity, `None` where
+    /// its record could not be read.
     fn verify_articles(
         &self,
         r: &mut VerifyReport,
         progress: &mut dyn FnMut(&str, u64, u64),
-    ) -> Result<()> {
+    ) -> Result<Vec<Option<u8>>> {
         let (count, images, chunks) =
             (self.article_count(), self.image_count(), self.chunk_count());
         let mut touched = vec![false; chunks as usize];
@@ -581,6 +663,7 @@ impl<S: Source> Archive<S> {
         let mut places: Vec<u32> = Vec::new();
         let mut places_at: Vec<u64> = Vec::with_capacity(count as usize + 1);
         let mut anchor_links: Vec<(u32, u32)> = Vec::new();
+        let mut popularity = vec![None; count as usize];
         for id in 0..count {
             places_at.push(places.len() as u64);
             if id % 256 == 0 {
@@ -593,6 +676,7 @@ impl<S: Source> Archive<S> {
                     continue;
                 }
             };
+            popularity[id as usize] = Some(rec.popularity);
             // The record claims these chunks even if they turn out to be damaged.
             let end = (rec.first_chunk as usize + rec.chunk_count as usize).min(touched.len());
             if let Some(span) = touched.get_mut(rec.first_chunk as usize..end) {
@@ -614,6 +698,9 @@ impl<S: Source> Archive<S> {
                     continue;
                 }
             };
+            for p in content::text_problems(&article).into_iter().take(3) {
+                r.problem(format!("article {id}: {p}"));
+            }
             let (header, body_start) = content::decode_header(&stream)?;
             for e in &header.toc {
                 if stream.get(body_start + e.pos as usize) != Some(&0x02) {
@@ -633,10 +720,18 @@ impl<S: Source> Archive<S> {
                 }
             }
             places.extend(header.anchors.iter().map(|a| a.hash));
+            r.listed_places += header.anchors.len() as u64;
+            let mut seen = std::collections::HashSet::new();
+            for e in &header.toc {
+                if !seen.insert(content::heading_anchor_hash(&e.text)) {
+                    r.repeated_headings += 1;
+                }
+            }
             places.extend(
-                content::heading_anchors(header.toc.iter().map(|e| e.text.as_str()))
+                header
+                    .toc
                     .iter()
-                    .map(|name| content::anchor_hash(name)),
+                    .map(|e| content::heading_anchor_hash(&e.text)),
             );
             match self.title(id) {
                 Ok(t) if t == article.title => {}
@@ -743,7 +838,7 @@ impl<S: Source> Archive<S> {
         if r.formulas > 0 && self.superblock.required_features & required::MATH == 0 {
             r.problem("archive has formulas but does not declare the math feature");
         }
-        Ok(())
+        Ok(popularity)
     }
 
     fn verify_images(
@@ -789,6 +884,7 @@ impl<S: Source> Archive<S> {
     fn verify_index(
         &self,
         r: &mut VerifyReport,
+        popularity: &[Option<u8>],
         progress: &mut dyn FnMut(&str, u64, u64),
     ) -> Result<()> {
         let count = self.article_count();
@@ -797,16 +893,24 @@ impl<S: Source> Archive<S> {
         let mut sample = Vec::new();
         let mut problems = Vec::new();
         let leaf_blocks = self.leaves.length / BLOCK_SIZE as u64;
+        let mut leaves = vec![title_index::LeafSummary::default(); leaf_blocks as usize];
         let index = self.index();
         let mut n = 0u64;
-        let scan = index.for_each(|key, hit| {
+        let scan = index.for_each_in_leaf(|leaf, key, hit| {
             n += 1;
             if n.is_multiple_of(4096) {
                 progress("title index", n, n.max(leaf_blocks * 100));
             }
-            if search_key(&hit.display).as_bytes() != key {
+            let folded = self.search_key(&hit.display);
+            if folded.as_bytes() != key {
                 problems.push(format!(
-                    "title index: key of {:?} is not its normalised title",
+                    "title index: key of {:?} is not its folded title",
+                    hit.display
+                ));
+            } else if self.search_key(&folded) != folded {
+                // Typing a key must find it.
+                problems.push(format!(
+                    "title index: key of {:?} does not fold to itself",
                     hit.display
                 ));
             }
@@ -815,13 +919,24 @@ impl<S: Source> Archive<S> {
             {
                 problems.push(format!("title index: {:?} is out of order", hit.display));
             }
+            leaves[leaf].add(key, hit.popularity);
             if hit.article >= count {
                 problems.push(format!(
                     "title index: {:?} points to missing article {}",
                     hit.display, hit.article
                 ));
-            } else if hit.flags & title_index::FLAG_REDIRECT == 0 {
-                titled[hit.article as usize] = true;
+            } else {
+                if hit.flags & title_index::FLAG_REDIRECT == 0 {
+                    titled[hit.article as usize] = true;
+                }
+                if let Some(p) = popularity[hit.article as usize]
+                    && p != hit.popularity
+                {
+                    problems.push(format!(
+                        "title index: {:?} has popularity {}, its article {p}",
+                        hit.display, hit.popularity
+                    ));
+                }
             }
             if hit.flags & !(title_index::FLAG_REDIRECT | title_index::FLAG_ANCHOR) != 0 {
                 problems.push(format!(
@@ -848,6 +963,10 @@ impl<S: Source> Archive<S> {
         for p in problems {
             r.problem(p);
         }
+        match index.check_inner(&leaves) {
+            Ok(found) => found.into_iter().for_each(|p| r.problem(p)),
+            Err(e) => r.problem(describe(&index_error(e))),
+        }
         for id in 0..count {
             if !titled[id as usize] {
                 match self.title(id) {
@@ -859,17 +978,47 @@ impl<S: Source> Archive<S> {
                 }
             }
         }
-        // Exercise the inner levels with lookups spread over the index.
+        // Exercise the inner levels with lookups spread over the index, and
+        // the popularity search where every match is known.
+        const LIMIT: usize = 1000;
         for (display, article) in sample {
-            match index.prefix(&display, 1000) {
-                Ok(hits) if hits.len() == 1000 || hits.iter().any(|h| h.article == article) => {}
-                Ok(_) => r.problem(format!(
-                    "title index: searching {display:?} does not find it"
-                )),
+            let key = self.search_key(&display);
+            match index.prefix_key(key.as_bytes(), LIMIT) {
+                Ok(hits) if hits.len() < LIMIT && !hits.iter().any(|h| h.article == article) => r
+                    .problem(format!(
+                        "title index: searching {display:?} does not find it"
+                    )),
+                Ok(mut hits) if hits.len() < LIMIT => {
+                    // Every match is known: the most popular are these, each
+                    // article once.
+                    hits.sort_by_key(|h| std::cmp::Reverse(h.popularity));
+                    let mut seen = std::collections::HashSet::new();
+                    hits.retain(|h| seen.insert(h.article));
+                    match index.most_popular(key.as_bytes(), hits.len()) {
+                        Ok(top) if top == hits => {}
+                        Ok(_) => r.problem(format!(
+                            "title index: the most popular titles starting with {display:?} are wrong"
+                        )),
+                        Err(e) => r.problem(describe(&index_error(e))),
+                    }
+                }
+                Ok(_) => {}
                 Err(e) => r.problem(describe(&index_error(e))),
             }
         }
         progress("title index", n, n);
+        Ok(())
+    }
+
+    fn verify_days(&self, r: &mut VerifyReport) -> Result<()> {
+        let count = self.article_count();
+        for (day, id) in self.days()?.unwrap_or_default().into_iter().enumerate() {
+            if let Some(id) = id
+                && id >= count
+            {
+                r.problem(format!("DAYS: day {} names missing article {id}", day + 1));
+            }
+        }
         Ok(())
     }
 
@@ -935,6 +1084,9 @@ impl<S: Source> BlockSource for FileBlocks<'_, S> {
             .src
             .read_exact_at(&mut b, s.offset + (index * BLOCK_SIZE) as u64)
             .map_err(|e| ReadError::Io(e.to_string()))?;
+        self.archive
+            .index_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Cow::Owned(b))
     }
 }
@@ -992,6 +1144,10 @@ pub struct VerifyReport {
     /// places exist; the others open their article at the top.
     pub anchor_links: u64,
     pub anchor_links_found: u64,
+    /// Named places the articles list (spec 7.2), and of those, the ones
+    /// for headings whose text an earlier heading has.
+    pub listed_places: u64,
+    pub repeated_headings: u64,
     pub text_bytes: u64,
     pub image_bytes: u64,
     /// The first [`VerifyReport::MAX_LISTED`] problems.

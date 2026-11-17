@@ -118,7 +118,10 @@ fn article(id: u32) -> Article {
             run.push(Inline::Math(formula(&mut rng, false)));
         }
         if p % 4 == 2 {
-            run.push(Inline::Icon(rng.below(IMAGES)));
+            run.push(Inline::Icon {
+                image: rng.below(IMAGES),
+                height: 1 + rng.below(255) as u8,
+            });
         }
         body.push(Block::Para(run));
         match p % 17 {
@@ -393,6 +396,32 @@ fn small_full_archive_has_no_dictionary() {
 }
 
 #[test]
+fn days_name_an_article_for_each_day() {
+    let mut w = ArchiveWriter::new(Cursor::new(Vec::new()), options(Profile::Compact)).unwrap();
+    for (id, title) in ["January 1", "February 29"].into_iter().enumerate() {
+        let article = Article {
+            title: title.into(),
+            body: vec![Block::Para(vec![Inline::Text("A day.".into())])],
+            ..Default::default()
+        };
+        w.add_article(id as u32, &article, 0).unwrap();
+    }
+    let mut days = [None; crate::DAYS_IN_YEAR];
+    (days[0], days[59]) = (Some(0), Some(1));
+    w.set_days(&days);
+    let (bytes, _) = finish(w);
+    let a = Archive::from_source(bytes).unwrap();
+    assert_eq!(a.days().unwrap().unwrap(), days);
+    assert!(a.verify(&mut |_, _, _| {}).unwrap().ok());
+
+    // A day may not name an article the archive lacks.
+    let mut w = ArchiveWriter::new(Cursor::new(Vec::new()), options(Profile::Compact)).unwrap();
+    days[0] = Some(5);
+    w.set_days(&days);
+    assert!(w.finish().is_err());
+}
+
+#[test]
 fn empty_archive_is_valid() {
     let w = ArchiveWriter::new(Cursor::new(Vec::new()), options(Profile::Compact)).unwrap();
     let (bytes, _) = finish(w);
@@ -504,16 +533,19 @@ fn writer_rejects_bad_input() {
     w.add_article(0, &with_math, 0).unwrap();
     assert!(matches!(w.finish(), Err(Error::Invalid(m)) if m.contains("MATH_GLYPHS")));
 
-    assert!(
-        ArchiveWriter::new(
-            Cursor::new(Vec::new()),
-            WriterOptions {
-                chunk_size: 40_000,
-                ..options(Profile::Compact)
-            }
-        )
-        .is_err()
-    );
+    for chunk_size in [40_000, 65_536, 20_000, 256] {
+        assert!(
+            ArchiveWriter::new(
+                Cursor::new(Vec::new()),
+                WriterOptions {
+                    chunk_size,
+                    ..options(Profile::Compact)
+                }
+            )
+            .is_err(),
+            "{chunk_size}"
+        );
+    }
     assert!(
         ArchiveWriter::new(
             Cursor::new(Vec::new()),

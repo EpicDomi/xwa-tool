@@ -34,7 +34,9 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   open centred. `vendor/README.md` says what each is; re-apply them when
   iced is upgraded, and change nothing else there.
 - `xtask`: repository chores; `cargo xtask licenses` writes the third-party
-  notice that ships in every release zip.
+  notice that ships in every release zip, and `cargo xtask days` writes
+  `crates/xwa-convert/data/days.tsv.zst`, each Wikipedia's day articles
+  from Wikidata, for the DAYS section.
 - `docs/format-spec-v0.md`: the format specification.
 
 ## Rules

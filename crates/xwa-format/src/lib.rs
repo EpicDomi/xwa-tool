@@ -6,6 +6,7 @@
 
 pub mod codec;
 pub mod content;
+pub mod crc;
 mod error;
 pub mod la2;
 pub mod math_glyphs;
@@ -35,7 +36,7 @@ pub const MAGIC: [u8; 8] = *b"XWA\0\r\n\x1a\n";
 /// 0, each minor version may change the layout, so readers take only their
 /// own (spec 3.1).
 pub const VERSION_MAJOR: u16 = 0;
-pub const VERSION_MINOR: u16 = 2;
+pub const VERSION_MINOR: u16 = 3;
 
 /// Section type codes (spec 3.2).
 pub mod section {
@@ -51,7 +52,17 @@ pub mod section {
     pub const ZSTD_DICT: u32 = 10;
     pub const FONT: u32 = 11;
     pub const WORD_INDEX: u32 = 12;
+    /// How to fold search input as the title index's keys were folded.
+    pub const FOLD: u32 = 13;
+    /// The article for each day of the year ("On this day").
+    pub const DAYS: u32 = 14;
 }
+
+/// Days in a DAYS section: January 1 to December 31, February 29 included.
+pub const DAYS_IN_YEAR: usize = 366;
+
+/// A day without an article in a DAYS section.
+pub const NO_ARTICLE: u32 = u32::MAX;
 
 /// Required feature bits (spec 3.3): a reader lacking one must refuse the archive.
 pub mod required {

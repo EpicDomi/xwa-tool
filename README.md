@@ -13,9 +13,10 @@ Early. What works today:
 
 - `xwa-zim`: a ZIM reader (header, metadata, directory scans and path lookups,
   zstd and XZ clusters, the title listing).
-- `xwa-format`: the XWA format, draft v0: the article content encoding, the
-  title index (case- and accent-insensitive prefix search), and an archive
-  writer, reader and verifier. The writer compresses on every CPU core and
+- `xwa-format`: the XWA format, draft v0.3: the article content encoding,
+  the title index (case- and accent-insensitive prefix search, folded the
+  same way in every language by a table each archive carries, and ranked by
+  popularity), and an archive writer, reader and verifier. The writer compresses on every CPU core and
   produces the same bytes for the same input.
 - `xwa-convert`: ZIM to XWA conversion of Wikipedia, and of the other
   wikis Kiwix makes the same way (Wiktionary, Wikivoyage, Vikidia and the
@@ -30,7 +31,8 @@ Early. What works today:
   Redirects, including mwoffliner's redirects to a section, become
   searchable alternative titles. Links to a section of another article,
   and redirects to a section (from links or from search), open the article
-  at that section.
+  at that section. Wikipedia archives say which article is each day's, for
+  the e-reader's "On this day", in all of Wikipedia's languages.
 - `xwa-fetch`: the Kiwix library catalog, downloads (resumed after an
   interruption, mirrors tried in turn, checked against their SHA-256), and
   copying archives to SD cards (into the card's `wiki` folder, where the
@@ -139,13 +141,15 @@ xwa-tool info wiki.xwa                      # format, features, sections, metada
 xwa-tool verify wiki.xwa                    # check every checksum, article, link and image
 xwa-tool dump wiki.xwa --title "Albert Einstein"
 xwa-tool dump wiki.xwa --search "einst"
+xwa-tool dump wiki.xwa --search "einst" --popular
 xwa-tool dump wiki.xwa --image 12 --out diagram.pgm
 ```
 
 Pushing a `v*` tag builds Windows, macOS and Linux binaries and attaches them
 to a GitHub release, each zip with a `THIRD-PARTY-LICENSES.txt` that lists
 every crate in the programs with its licence text. `cargo xtask licenses`
-writes the same file locally.
+writes the same file locally. `cargo xtask days` refreshes the table of each
+Wikipedia's day articles from Wikidata.
 
 ## License
 
