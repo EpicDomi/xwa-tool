@@ -1,15 +1,15 @@
 # Offline wiki archive format, draft v0
 
 Status: draft for review. The format is XWA (`.xwa` files); the converter
-is xwa-tool. Everything here is open to change until the first reader and
-writer agree on it.
+is xwa-tool. This text describes version 0.3. Everything here is open to
+change until the first reader and writer agree on it.
 
 ## 1. Goals
 
 1. Fast on the device: a title lookup costs 1-3 SD reads, opening an
    article 2 reads, following a link 1-2 reads, jumping to any section or
    table 1-2 reads. No B-tree walks for images, formulas or links.
-2. Small: a front-coded title index (~28 B per entry measured), math as
+2. Small: a front-coded title index (~26-30 B per entry measured), math as
    vectors (~82 B per formula measured), lossless 2-bit line art.
 3. Device profiles: one container, two encodings. The X4 Pro (ESP32-S3,
    8 MB PSRAM) gets everything it can use; the X4/X3 (ESP32-C3, ~380 KB
@@ -45,7 +45,10 @@ the profile from the target device.
 - `u48` offsets (6 bytes) in tables where space matters; 256 TB limit.
 - Sections start on 4096-byte boundaries (8 SD sectors).
 - Strings are UTF-8, length-prefixed with a varint unless stated otherwise.
-- CRC32C (Castagnoli) for integrity checks.
+- Checksums are CRC-32 as in zlib, PNG and the ESP32's ROM (polynomial
+  0x04C11DB7, reflected; initial value and final XOR 0xFFFFFFFF; the
+  CRC-32 of the ASCII bytes `123456789` is 0xCBF43926).
+- Reserved fields and flag bits are 0; readers ignore them.
 
 ## 3. File layout
 
@@ -60,7 +63,7 @@ offset 0      Superblock (4096 bytes)
 |---|---|---|
 | 0 | u8[8] | magic `XWA\0\r\n\x1a\n` |
 | 8 | u16 | version_major (0 = draft) |
-| 10 | u16 | version_minor (2 = this text) |
+| 10 | u16 | version_minor (3 = this text) |
 | 12 | u32 | superblock_size (4096) |
 | 16 | u64 | file_size |
 | 24 | u32 | required_features (bitset, see 3.3) |
@@ -68,13 +71,14 @@ offset 0      Superblock (4096 bytes)
 | 32 | u8 | profile: 0 = compact (X4/X3), 1 = full (X4 Pro) |
 | 33 | u8 | text_codec: 0 = raw deflate, 1 = zstd |
 | 34 | u8 | deflate_window_bits (9-15) |
-| 35 | u8 | reserved |
+| 35 | u8 | chunk_bits: every content chunk but the last holds 2^chunk_bits bytes (9-15; xwa-tool writes 15) |
 | 36 | u32 | section_count |
 | 40 | Section[section_count] | section directory, 32 bytes each |
-| 4092 | u32 | CRC32C of bytes 0..4091 |
+| 4092 | u32 | CRC-32 of bytes 0..4091 |
 
-`Section` (32 bytes): `u32 type`, `u32 flags`, `u64 offset`, `u64 length`,
-`u32 crc32c` (of the section bytes, 0 = not computed), `u32 reserved`.
+`Section` (32 bytes): `u32 type`, `u32 flags` (reserved), `u64 offset`,
+`u64 length`, `u32 crc32` (of the section bytes, 0 = not computed), `u32
+reserved`. A type appears at most once.
 
 `file_size` must equal the size of the file. A reader that finds a shorter
 file reports an incomplete copy rather than reading past the end; copying
@@ -84,6 +88,13 @@ While `version_major` is 0, every minor version may change the layout:
 readers accept only the minor version they were written for, and tell the
 user to convert the archive again when it is older. Version 0.2 added named
 places (7.2): anchor links (7.3) and anchors on title index entries (6.2).
+Version 0.3, from the firmware reader's review, made search keys fold
+through a table the archive carries (6.1, FOLD), put popularity in the
+title index (6.2, 6.4) for a most-popular-first search (6.5), shortened the
+inner blocks' keys (6.4), fixed the chunk size (7.1), made heading anchors
+stateless (7.2), gave icons a size (7.3) and formula records a length
+(8.1), wrote down what readers may rely on in text (7.3), added DAYS (5.3),
+and changed the checksums from CRC32C to CRC-32.
 
 ### 3.2 Section types
 
@@ -93,7 +104,7 @@ places (7.2): anchor links (7.3) and anchors on title index entries (6.2).
 | 2 | ARTICLES | yes | Article table |
 | 3 | TITLES | yes | Display titles blob |
 | 4 | TINDEX_LEAF | yes | Front-coded title index leaf blocks |
-| 5 | TINDEX_INNER | yes | Upper levels of the title index |
+| 5 | TINDEX_INNER | yes | Upper levels of the title index (empty over one leaf block) |
 | 6 | CHUNK_TABLE | yes | Content chunk locations |
 | 7 | BLOBS | yes | Compressed content chunks and encoded images |
 | 8 | IMAGE_TABLE | if images | Image records |
@@ -101,6 +112,8 @@ places (7.2): anchor links (7.3) and anchors on title index entries (6.2).
 | 10 | ZSTD_DICT | optional | Shared zstd dictionary (zstd archives only) |
 | 11 | FONT | optional | Fallback font (a complete `.cpfont` v4 file) |
 | 12 | WORD_INDEX | optional | Title-word search index (later) |
+| 13 | FOLD | yes | How to fold search input (6.1) |
+| 14 | DAYS | optional | The article for each day of the year (5.3) |
 
 Readers ignore unknown section types.
 
@@ -149,9 +162,14 @@ they exist only in the title index. Record, 16 bytes:
 | offset_in_chunk | u16 | Byte offset of the stream in the decompressed chunk |
 | chunk_count | u16 | Chunks the stream touches, `first_chunk` included |
 | title_ref | u32 | Offset into TITLES |
-| flags | u16 | infobox, tables, math, images, disambiguation, list |
-| popularity | u8 | 0-255, log-scaled incoming link count (optional) |
+| flags | u16 | bit 0 infobox, 1 tables, 2 math, 3 images, 4 disambiguation, 5 list |
+| popularity | u8 | 0-255, how many articles link to it, log-scaled |
 | reserved | u8 | |
+
+xwa-tool sets `popularity` to round(13 × log2(1 + n)), at most 255, for n
+links from other articles: 1 link gives 13, 1,000 give 130. Optional
+feature bit 2 says the scores were computed; without it they are all 0.
+Each title index entry carries its article's score too (6.2).
 
 Random article: pick a uniform id in `[0, count)`. Lookup by id: one read.
 
@@ -159,15 +177,68 @@ Random article: pick a uniform id in `[0, count)`. Lookup by id: one read.
 
 Concatenated `varint length + UTF-8` display titles, addressed by
 `title_ref`. Used for headers, history and link previews without
-decompressing content.
+decompressing content. Titles are tidy lines (7.3).
+
+### 5.3 Days (DAYS)
+
+For "On this day": 366 `u32` article ids, one per day from January 1 to
+December 31 with February 29 (the days of a leap year, in order), or
+0xFFFFFFFF where the archive has no article for that day. Outside leap
+years, readers skip February 29 (entry 59).
+
+xwa-tool finds each day's article by the title Wikidata gives it in the
+archive's Wikipedia ("January 1", "1er janvier", "1. Januar", "1月1日"):
+`cargo xtask days` collects the titles of 262 Wikipedias from Wikidata into
+a table the converter carries. Archives of other wikis, or of Wikipedia
+selections without the day articles, have no DAYS section.
 
 ## 6. Title index
 
-### 6.1 Normalisation
+### 6.1 Search keys (FOLD)
 
-`key = collapse_whitespace(casefold(strip_combining(NFKD(title))))`, with
-`_` treated as a space. Search input is normalised the same way, so
-"albert einstein", "Albert Einstein" and "Älbert Einstein" match.
+A title's search key is the title folded one code point at a time, so a
+reader folds what the user types exactly as the converter folded the
+titles, with a table from the archive rather than Unicode data of its own:
+
+1. ASCII: `A`-`Z` become `a`-`z`; `_`, tab, line feed, vertical tab, form
+   feed, carriage return and space become a space; the rest stay.
+2. Hangul syllables (U+AC00-D7A3) become their conjoining jamo, as Unicode
+   decomposes them: for s = c − 0xAC00, U+1100 + s / 588, then U+1161 +
+   (s % 588) / 28, then U+11A7 + s % 28 unless s % 28 is 0.
+3. Every other code point is looked up in the FOLD section: found, it
+   becomes the fold given there, which may be empty; not found, it stays.
+
+Then each run of spaces becomes one space, and spaces at either end go.
+"albert einstein", "Albert_Einstein", "ALBERT EINSTEIN" and "Älbert
+Einstein" share a key. Keys are compared as bytes. A key folds to itself,
+so typing a title's key always finds it.
+
+xwa-tool works the table out from Unicode's data (through Rust's
+unicode-normalization and caseless crates); since the table travels in the
+archive, readers never depend on which Unicode version that was. Each code
+point is decomposed (NFKD),
+stripped, case-folded (full case folding), decomposed and stripped again,
+with white space and `_` made spaces, until nothing changes. Stripping
+leaves out what accents and other diacritics add to letters (U+0300-036F,
+U+1AB0-1AFF, U+1DC0-1DFF, U+20D0-20FF, U+FE20-FE2F), Hebrew points and
+cantillation, Arabic vowel signs and Quranic marks, variation selectors,
+and invisible format characters (soft hyphen, zero-width spaces and
+joiners, direction marks, tags). Marks that are letters stay: Indic vowel
+signs, kana voicing marks, Thai tone marks, so `कि` and `क`, `が` and `か`,
+`ไก่` and `ไก` have different keys.
+
+FOLD: `u32 count`, `u32 reserved`, then `count` 8-byte records in code
+point order, then a string pool. A record is `u32 code_point`, `u8 length`
+(of the fold in UTF-8 bytes) and 3 bytes: the fold itself, padded with
+zeros, when it is at most 3 bytes long, else the `u24` offset of the fold
+in the pool. Records never straddle a 4096-byte block, so the X4 can
+binary-search the section a block at a time, and 82% of folds need no pool
+read. No record is for ASCII or a Hangul syllable. An archive lists only
+the folds its keys can use: those made of spaces and characters that occur
+in its keys (a character whose fold has any other cannot match a key,
+folded or not), and every empty fold. Measured: 2,710 to 4,404 records
+(21.7 to 36.9 KB) in the English archives tried, 5,732 (49.6 KB) in Swedish
+Wikipedia's; the whole table is 7,775 records in 68.8 KB.
 
 ### 6.2 Entries
 
@@ -187,46 +258,102 @@ varint disp_shared     bytes shared with the previous display title
 varint disp_suffix_len, display suffix bytes
 varint article_id
 u8     flags           bit0 redirect, bit1 anchor follows, bits2-7 reserved
+u8     popularity      its article's popularity (5.1), for ranking (6.5)
 u32    anchor          only with bit1: the named place (7.2) a redirect to
                        a section leads to
 ```
 
 The first entry of each block has `*_shared = 0`. Choosing an entry with
 an anchor opens its article at that place, found as for an anchor link
-(7.2); when the article has no such place, it opens at the top.
+(7.2); when the article has no such place, it opens at the top. Display
+titles are tidy lines (7.3).
 
 ### 6.3 Leaf blocks (TINDEX_LEAF)
 
 4096-byte blocks: `u16 entry_count`, `u16 used_bytes`, entries, zero
-padding, `u32 crc32c` in the last 4 bytes. Measured with the Rust builder: 28.5
-bytes per entry for the mathematics ZIM (104,216 entries, 2.99 MB, built in
-0.4 s) and 23.8 for chemistry; about 0.6 GB for English Wikipedia's ~21.7 M
+padding, `u32 crc32` in the last 4 bytes. An entry always fits in one block
+(MediaWiki titles are at most 255 bytes), but entries with the same key may
+continue from one block into the next. Measured: 29.9 bytes per title in
+the mathematics archive (103,101 titles, 3.1 MB), 25.6 in chemistry, 25.9
+in Swedish Wikipedia's (4.48 M titles, 116 MB) and 13.9 for Simple
+Wiktionary's one-word titles; about 0.6 GB for English Wikipedia's ~21.7 M
 titles.
 
 ### 6.4 Inner levels (TINDEX_INNER)
 
-A static B+tree over leaf blocks, built bottom-up. Each 4096-byte inner
-block holds front-coded first keys of its children plus `u32` child block
-numbers (about 270 children per block). The root is block 0. English
-Wikipedia works out to ~155K leaf blocks under ~580 inner blocks (~2.4 MB):
-the X4 Pro caches every inner block in PSRAM (1 SD read per lookup); the C3
-caches only the root (up to 3 reads).
+A static B+tree over the leaf blocks, built bottom-up. The root is inner
+block 0; an index of a single leaf block has no inner blocks. An inner
+block is `u8 level` (1: its children are leaf blocks; 2 and up: inner
+blocks), `u8 reserved`, `u16 child_count`, `u16 used_bytes`, then per
+child, in key order:
 
-### 6.5 Prefix search
+```
+varint sep_shared      bytes shared with the previous child's separator
+varint sep_suffix_len, separator suffix bytes
+u32    child           leaf block number (level 1), else inner block number
+u8     popularity      the highest popularity of any entry under the child
+```
 
-Descend to the first key `>= prefix`, then scan forward while keys start
-with the prefix, collecting up to N results. Ranking by `popularity` among
-the first M matches is optional.
+then zero padding and `u32 crc32` in the last 4 bytes. The first child has
+`sep_shared = 0`.
+
+A child's separator is a byte string `s` with `last < s ≤ first`, where
+`first` is the child's first key and `last` the key just before it, or
+`s = first` when the two keys are equal (a key continuing from one leaf
+block into the next). xwa-tool writes the shortest: `first` up to and
+including its first byte that differs from `last`, and an empty separator
+for the first leaf block. An inner block's separator in its parent is its
+first child's. Measured: 14-15 bytes per child (24-28 with whole keys), so
+a full block holds about 280 children. Swedish Wikipedia's 28,344 leaf
+blocks sit under 101 inner blocks (414 KB; 162 with whole keys), and
+English Wikipedia's ~150 K would need about 540 (2.2 MB): the X4 Pro can
+keep every inner block in PSRAM (one SD read per lookup), and the C3 keeps
+the root (2-3 reads).
+
+### 6.5 Search
+
+Both searches start from the search key of what was typed (6.1). The keys
+that start with a prefix `p` sort from `p` up to, not including, `p` with
+its last byte increased by one (UTF-8 has no 0xFF bytes).
+
+**In index order.** Descend from the root: in each inner block, to the last
+child whose separator is less than `p`, or to the first child when none
+is. In the leaf block, skip keys less than `p`, then collect entries while
+their keys start with `p`, going on into the following leaf blocks. (Going
+to the last child whose separator is at most `p` would miss entries with
+key `p` at the end of the block before.)
+
+**Most popular first.** The `k` most popular articles with an entry whose
+key starts with `p`: each article once, by its first such entry in index
+order; most popular first, and of equal popularity in index order. A
+best-first walk finds them without reading every match. Keep the subtrees
+still to open ordered by their highest popularity (highest first), then
+their separator (lowest first), starting with the root. Open the next one:
+an inner block adds those of its children whose keys can start with `p`
+(a child's keys run from its separator up to the next child's separator,
+that one included; for the last child of a block, the next separator after
+its block in the parent, and none for the last of all); a leaf block offers
+its entries that start with `p`.
+Stop when `k` articles are kept and the next subtree's popularity is less
+than that of the least popular one kept, or equal to it with a separator
+past that entry's key. Measured, for the 8 most popular: the median
+one-letter prefix reads 9 blocks in the chemistry and mathematics archives
+and 15.5 in Swedish Wikipedia's (at most 26), two letters 4-5 and 11 (at
+most 21), where a listing in index order reads 3. Most of the extra reads
+are leaf blocks holding redirects to articles already kept, which carry
+their article's popularity and so cannot be passed over; a reader may stop
+early and show what it has.
 
 ## 7. Content
 
 ### 7.1 Chunks
 
 Each article is one byte stream (7.2). Streams are concatenated in article
-id order and cut into chunks of at most 32,768 bytes uncompressed, in both
-profiles; a stream may start partway through one chunk and continue through
-the following ones. Small articles share a chunk; large ones span several.
-Each chunk is compressed independently:
+id order and cut into chunks of exactly 2^`chunk_bits` bytes uncompressed
+(32,768 in xwa-tool's archives, in both profiles), all but the last, which
+holds the rest (at least 1 byte); a stream may start partway through one
+chunk and continue through the following ones. Small articles share a
+chunk; large ones span several. Each chunk is compressed independently:
 
 - compact profile: raw deflate (window = `deflate_window_bits`, 15),
   decodable by the firmware's uzlib. xwa-tool compresses with libdeflate at
@@ -246,13 +373,14 @@ Why 32 KB: with the dictionary, 64 KB and 128 KB chunks would save only
 time on both devices.
 
 CHUNK_TABLE entry, 12 bytes: `u48 offset` (within BLOBS), `u24
-stored_size`, `u24 uncompressed_size` (1-32,768). The stored bytes are the
-compressed chunk followed by a `u32` CRC32C of the compressed bytes, so
-corruption is caught before decompression.
+stored_size`, `u24 uncompressed_size` (2^`chunk_bits`, or for the last chunk
+1 to 2^`chunk_bits`; a check). The stored bytes are the compressed chunk
+followed by a `u32` CRC-32 of the compressed bytes, so corruption is caught
+before decompression.
 
-To read from position `p` of an article stream, start at
-(`first_chunk`, `offset_in_chunk`) and walk forward through the following
-chunks' uncompressed sizes.
+Byte `p` of an article stream (counting its `stream_size` field from 0) is
+in chunk `first_chunk + ((offset_in_chunk + p) >> chunk_bits)`, at offset
+`(offset_in_chunk + p) & (2^chunk_bits − 1)` in it.
 
 ### 7.2 Article stream
 
@@ -286,45 +414,50 @@ as `_`. An article's places are:
 
 1. its anchor list, from the header above: each `hash` with the section
    it is in;
-2. each contents entry's own anchor, by rule: the entry's text with leading
-   and trailing white space removed and each run of white space replaced
-   by one `_`; when an earlier entry already has that name, `_2`, `_3`, ...
-   is appended, the first number that gives a new one.
+2. each contents entry's own anchor, by rule: the entry's text with the
+   spaces at either end removed and each run of spaces inside replaced by
+   one `_` (each entry on its own: two entries with the same text get the
+   same name).
 
 To find a place, look through the anchor list first, then the contents
-entries' anchors, and take the first match; with none, use the top. The
-converter lists only what the rule does not give: headings whose anchor on
-Wikipedia differs from the rule's, named places inside sections (template
-anchors, table rows, old-style anchors kept for old links), and nothing in
-the lead, which is the top anyway. Measured: 91.5% of the 14,484 links to
+entries' anchors in order, and take the first match; with none, use the
+top. The converter lists only what the rule does not give: headings whose
+anchor on Wikipedia differs from the rule's (among them the second and
+later of headings with the same text, which Wikipedia names `History_2`,
+`History_3`), named places inside sections (template anchors, table rows,
+old-style anchors kept for old links), and nothing in the lead, which is
+the top anyway. Measured: 91.5% of the 14,639 links to
 places in other articles in the chemistry ZIM find their place, and 87% of
 55,760 in mathematics; nearly all the rest are links to sections Wikipedia
-has since renamed or removed. The anchor lists and anchor links add 0.8%
-and 0.7% to the text.
+has since renamed or removed. Listing the anchors of repeated headings
+costs about 0.01% of the text (462 in Simple Wiktionary, 1,961 in
+Wikivoyage Europe).
 
 ### 7.3 Block stream
 
-A pre-order sequence of opcodes. Unknown opcodes carry a length so readers
-can skip them.
+A pre-order sequence of opcodes. EXT opcodes carry a length so that readers
+can skip what they do not know; any other unknown opcode is an error.
+Lists and quotes nest at most 64 deep, and at most 64 styles and links are
+open at once in an inline run.
 
 Block opcodes:
 
 | Op | Name | Payload |
 |---|---|---|
-| 0x01 | PARA | inline run (7.4) |
-| 0x02 | HEADING | u8 level, inline run |
-| 0x03 | LIST_START | u8 kind (bullet, number, definition) |
-| 0x04 | LIST_ITEM | (blocks follow until next item or end) |
+| 0x01 | PARA | inline run |
+| 0x02 | HEADING | u8 level, 1-6 as HTML's h1-h6 (sections are 2), inline run |
+| 0x03 | LIST_START | u8 kind: 0 bullet, 1 numbered, 2 definition |
+| 0x04 | LIST_ITEM | (blocks follow until the next item or the end) |
 | 0x05 | LIST_END | |
 | 0x06 | QUOTE_START / 0x07 QUOTE_END | |
-| 0x08 | PRE | string (monospace, no wrapping) |
+| 0x08 | PRE | string (preformatted text, monospace, no wrapping) |
 | 0x09 | RULE | |
 | 0x0A | FIGURE | varint image_id, inline run (caption) |
 | 0x0B | MATH_BLOCK | formula (8.1) |
-| 0x0C | TABLE_REF | varint table index (into header table list) |
+| 0x0C | TABLE_REF | varint table index (into the header's table list) |
 | 0x0D | INFOBOX_REF | |
-| 0x0E | GALLERY | varint n, n × (image_id, inline run) |
-| 0x7F | EXT | varint length, payload (skippable) |
+| 0x0E | GALLERY | varint n, n × (varint image_id, inline run) |
+| 0x7F | BLOCK_EXT | varint length, payload (skippable) |
 
 An inline run is `varint length` followed by inline opcodes:
 
@@ -332,15 +465,16 @@ An inline run is `varint length` followed by inline opcodes:
 |---|---|---|
 | 0x01-0x7F | TEXT | short text: op = length (1-127), then UTF-8 bytes |
 | 0x80 | TEXT_LONG | varint length, UTF-8 |
-| 0x81 | STYLE_PUSH | u8 style (bold, italic, sub, sup, mono, smallcaps) |
+| 0x81 | STYLE_PUSH | u8 style: 0 bold, 1 italic, 2 subscript, 3 superscript, 4 monospace, 5 small caps |
 | 0x82 | STYLE_POP | |
 | 0x83 | LINK_START | varint target article id, varint section index (0 = top) |
 | 0x84 | LINK_END | |
 | 0x85 | MATH | formula (8.1) |
-| 0x86 | ICON | varint image_id (small inline image: flags, symbols) |
+| 0x86 | ICON | varint image_id, u8 height (an image in a line of text: flags, symbols) |
 | 0x87 | BREAK | line break |
 | 0x88 | NOTE_REF | varint footnote number (footnotes later) |
 | 0x89 | LINK_ANCHOR | varint target article id, u32 anchor hash (7.2); ends with LINK_END |
+| 0xFF | INLINE_EXT | varint length, payload (skippable) |
 
 Links are resolved at conversion time: redirects are followed to the final
 article id, and links to missing articles are emitted as plain text. The
@@ -350,20 +484,50 @@ another article, or through a redirect to a section, is a LINK_ANCHOR,
 whose section the reader finds in the target's header when it opens it
 (7.2).
 
-Text is stored in logical order. Right-to-left handling (pre-shaping as
-today, or on-device bidi with the existing MiniBidi) is an open question.
+An ICON's `height` is the height to draw it at, in sixteenths of the size
+of body text (the size paragraphs are drawn at, whatever the size of the
+text around the icon); its width follows from the image's proportions.
+xwa-tool takes it from the page: the image's height in CSS pixels over the
+page's body text size (16 px in Wikipedia's ZIMs, so a 15 px flag has
+height 15).
+
+**Text.** What readers may rely on, which `xwa-tool verify` checks:
+
+- All text is UTF-8 in NFC. A TEXT or TEXT_LONG op is never empty and
+  holds whole characters.
+- Inline runs hold no control characters (U+0000-001F, U+007F-009F), so
+  no tabs or newlines: BREAK is the only line break. The only white space
+  is the space (U+0020) and the no-break spaces (U+00A0, U+2007, U+202F),
+  which must not be broken at.
+- Across a whole run, through styles and links: never two spaces in a
+  row, no space at the start or end or next to a BREAK, and no BREAK at
+  the start or end or twice in a row.
+- Titles, contents entries and display titles in the index are tidy lines:
+  the same, with no breaks.
+- PRE text separates lines with a line feed (U+000A) alone and holds no
+  other control characters (tabs are expanded with spaces to the next
+  multiple of 8 characters), and has no empty lines or trailing spaces at
+  either end.
+- Text is in logical order, as typed. Readers run the Unicode bidirectional
+  algorithm on each line they lay out (the firmware has MiniBidi) and shape
+  Arabic script themselves; line breaking happens on the device, so the
+  converter cannot reorder or shape. Bidi control characters (U+200E,
+  U+200F, U+202A-202E, U+2066-2069) are kept.
 
 ### 7.4 Tables and infobox
 
 Stored in the article's chunks after the body:
 
 ```
-TABLE: varint rows, varint cols, u8 flags, varint cell_count,
+TABLE: varint rows, varint cols, u8 flags (reserved), varint cell_count,
        per cell (row-major, by top-left corner):
                  u8 cell_flags (bit0 header), varint rowspan, varint colspan,
                  inline run
-INFOBOX: varint row_count, per row: u8 kind (header, image, label/value,
-         full-width), payload (inline runs, image_id)
+INFOBOX: varint row_count, per row: u8 kind, then by kind:
+         0 header: inline run
+         1 image: varint image_id, inline run (caption)
+         2 field: inline run (label), inline run (value)
+         3 full width: inline run
 ```
 
 ## 8. Math
@@ -391,10 +555,11 @@ formula images.
 Used by MATH (inline) and MATH_BLOCK:
 
 ```
+varint byte_length   of the rest of the record
 u8     flags         bit0 display (a block formula), bit1 has fallback image
 svarint width, ascent, descent   (MATH_GLYPHS units)
-varint item_count
-items:
+[varint fallback_image_id]       with flag bit1
+items, up to the end of the record:
   tag 0 GLYPH     varint glyph_id, u8 scale_code, svarint dx, svarint dy
   tag 1 GLYPH_XY  varint glyph_id, i16 sx, i16 sy (8.8 fixed), svarint dx, svarint dy
   tag 2 RULE      svarint dx, svarint dy, varint w, varint h
@@ -403,8 +568,14 @@ items:
                     followed by 1, 1, 2, 3 or 0 points; each point is
                     svarint x, y as a delta from the point written before
                     it (the first from 0, 0)
-[varint fallback_image_id]
 ```
+
+The length lets a reader skip a formula without reading its items: when
+paginating, or when it holds an item it does not know, drawing the
+fallback image or a placeholder in its box instead. It costs next to nothing:
+items run to the end of the record, so no item count is stored (with all
+of version 0.3's changes, the mathematics archive's compressed text is
+0.16% larger than in 0.2).
 
 Units are MATH_GLYPHS font units (1000 per em in xwa-tool's archives),
 with y pointing up. The formula's origin is the left end of its baseline;
@@ -513,7 +684,10 @@ firmware needs an offset-based variant of its existing `.cpfont` loader.
 
 | Operation | Reads |
 |---|---|
-| Search keystroke (prefix) | 1-3 (index) + 1 per extra leaf block |
+| Search keystroke, index order | 1-3 (index) + 1 per extra leaf block |
+| Search keystroke, most popular first | 4-16 median for 1-2 letters, 8 results (6.5) |
+| Fold a typed character | 0 (ASCII, Hangul), else 1 FOLD block (cached) |
+| On this day | 1 (DAYS) + opening the article |
 | Open article | 1 (article record) + 1 (chunk table) + 1 (chunk) |
 | Follow link | same as open article; no search |
 | Jump to section/table | 1-2 (chunk table, chunk) |
@@ -525,8 +699,9 @@ sector reads work without the "copy contiguously" step.
 
 ## 12. Open questions
 
-1. RTL: keep pre-shaping in the converter or move bidi to the device.
-2. Footnotes/references: include as NOTE_REF with a per-article notes block?
-3. Compact-profile deflate window: 32 KB (as today) or smaller.
-4. FAT32 cards: archives over 4 GB need exFAT; split archives are out of
+1. Footnotes/references: include as NOTE_REF with a per-article notes block?
+2. Compact-profile deflate window: 32 KB (as today) or smaller.
+3. FAT32 cards: archives over 4 GB need exFAT; split archives are out of
    scope for v0.
+4. A title word index (WORD_INDEX), to find "Albert Einstein" by typing
+   "einstein".

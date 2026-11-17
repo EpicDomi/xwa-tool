@@ -9,8 +9,8 @@ pub struct SectionEntry {
     pub flags: u32,
     pub offset: u64,
     pub length: u64,
-    /// CRC32C of the section bytes; 0 means not computed.
-    pub crc32c: u32,
+    /// CRC-32 of the section bytes; 0 means not computed.
+    pub crc32: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +23,9 @@ pub struct Superblock {
     pub profile: Profile,
     pub text_codec: TextCodec,
     pub deflate_window_bits: u8,
+    /// Every content chunk but the last holds exactly `1 << chunk_bits`
+    /// uncompressed bytes (spec 7.1).
+    pub chunk_bits: u8,
     pub sections: Vec<SectionEntry>,
 }
 
@@ -57,6 +60,7 @@ impl Superblock {
         b[32] = self.profile.code();
         b[33] = self.text_codec.code();
         b[34] = self.deflate_window_bits;
+        b[35] = self.chunk_bits;
         b[36..40].copy_from_slice(&(self.sections.len() as u32).to_le_bytes());
         for (i, s) in self.sections.iter().enumerate() {
             let o = SECTIONS_AT + i * SECTION_SIZE;
@@ -64,9 +68,9 @@ impl Superblock {
             b[o + 4..o + 8].copy_from_slice(&s.flags.to_le_bytes());
             b[o + 8..o + 16].copy_from_slice(&s.offset.to_le_bytes());
             b[o + 16..o + 24].copy_from_slice(&s.length.to_le_bytes());
-            b[o + 24..o + 28].copy_from_slice(&s.crc32c.to_le_bytes());
+            b[o + 24..o + 28].copy_from_slice(&s.crc32.to_le_bytes());
         }
-        let crc = crc32c::crc32c(&b[..CRC_AT]);
+        let crc = crate::crc::crc32(&b[..CRC_AT]);
         b[CRC_AT..].copy_from_slice(&crc.to_le_bytes());
         Ok(b)
     }
@@ -78,7 +82,7 @@ impl Superblock {
         let u16_at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
         let u32_at = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
         let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
-        if crc32c::crc32c(&b[..CRC_AT]) != u32_at(CRC_AT) {
+        if crate::crc::crc32(&b[..CRC_AT]) != u32_at(CRC_AT) {
             return Err(corrupt("superblock checksum mismatch"));
         }
         if u32_at(12) as usize != Self::SIZE {
@@ -103,7 +107,7 @@ impl Superblock {
                     flags: u32_at(o + 4),
                     offset: u64_at(o + 8),
                     length: u64_at(o + 16),
-                    crc32c: u32_at(o + 24),
+                    crc32: u32_at(o + 24),
                 }
             })
             .collect();
@@ -116,6 +120,7 @@ impl Superblock {
             profile,
             text_codec,
             deflate_window_bits: b[34],
+            chunk_bits: b[35],
             sections,
         })
     }
@@ -136,12 +141,13 @@ mod tests {
             profile: Profile::Full,
             text_codec: TextCodec::Zstd,
             deflate_window_bits: 15,
+            chunk_bits: 15,
             sections: vec![SectionEntry {
                 kind: 7,
                 flags: 0,
                 offset: 4096,
                 length: 99,
-                crc32c: 0xDEAD_BEEF,
+                crc32: 0xDEAD_BEEF,
             }],
         };
         let mut b = sb.encode().unwrap();

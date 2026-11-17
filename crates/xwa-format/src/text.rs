@@ -188,8 +188,8 @@ impl Renderer<'_> {
                 Inline::Math(f) => {
                     let _ = write!(s, "[{}]", formula(f));
                 }
-                Inline::Icon(image) => {
-                    let _ = write!(s, "[icon: image {image}]");
+                Inline::Icon { image, height } => {
+                    let _ = write!(s, "[icon: image {image}, {height}/16 em]");
                 }
                 Inline::Break => s.push_str(" / "),
                 Inline::NoteRef(n) => {

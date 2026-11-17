@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 unicode-normalization.workspace = true
 caseless.workspace = true
-crc32c.workspace = true
+crc32fast.workspace = true
 libdeflater.workspace = true
 zstd.workspace = true
 thiserror.workspace = true

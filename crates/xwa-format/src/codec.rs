@@ -38,7 +38,7 @@ impl ChunkCodec {
                     Some(d) => zstd::bulk::Compressor::with_dictionary(self.level, d)?,
                     None => zstd::bulk::Compressor::new(self.level)?,
                 };
-                // Chunks carry their own CRC32C and the archive has one dictionary.
+                // Chunks carry their own CRC-32 and the archive has one dictionary.
                 c.set_parameter(CParameter::ChecksumFlag(false))?;
                 c.set_parameter(CParameter::DictIdFlag(false))?;
                 c.set_parameter(CParameter::ContentSizeFlag(true))?;

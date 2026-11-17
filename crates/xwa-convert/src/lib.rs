@@ -5,6 +5,7 @@
 //! Links are resolved through a table of path hashes built from the
 //! directory before any article is read.
 
+mod days;
 pub mod html;
 pub mod images;
 pub mod links;
@@ -430,6 +431,19 @@ fn convert_inner(
         math: opts.math.then(math::MathEngine::new),
     };
     let main_article = zim.header().main_page.and_then(follow).map(|(id, _)| id);
+    // "On this day": the article for each day, where a Wikipedia has them.
+    let days = wiki_code(&zim)
+        .and_then(|code| days::titles(&code))
+        .map(|titles| {
+            let mut found = [None; xwa_format::DAYS_IN_YEAR];
+            for (day, title) in titles.iter().enumerate() {
+                if !title.is_empty() {
+                    found[day] = table.links.get(&days::path(title));
+                }
+            }
+            found
+        })
+        .filter(|found| found.iter().any(Option::is_some));
 
     let profile = opts.device.profile();
     // Temporary files go next to the archive: the system's temporary folder
@@ -479,6 +493,9 @@ fn convert_inner(
     writer.set_meta("device", opts.device.name());
     if let Some(id) = main_article {
         writer.set_meta("main_article", id.to_string());
+    }
+    if let Some(days) = &days {
+        writer.set_days(days);
     }
 
     // Every article has its id now, so redirects can be followed; their

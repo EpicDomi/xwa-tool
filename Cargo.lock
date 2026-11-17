@@ -805,15 +805,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
-name = "crc32c"
-version = "0.6.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f132a176423ee852e8f0a35d43088d1850966b50745be818a88b76f64b1c6cb"
-dependencies = [
- "rustc_version",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5247,9 +5238,11 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde_json",
+ "ureq",
+ "zstd",
 ]
 
 [[package]]
@@ -5278,6 +5271,7 @@ dependencies = [
  "scraper",
  "thiserror 2.0.21",
  "ttf-parser",
+ "unicode-normalization",
  "xwa-fetch",
  "xwa-format",
  "xwa-zim",
@@ -5304,7 +5298,7 @@ name = "xwa-format"
 version = "0.1.0"
 dependencies = [
  "caseless",
- "crc32c",
+ "crc32fast",
  "libdeflater",
  "tempfile",
  "thiserror 2.0.21",

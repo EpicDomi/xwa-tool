@@ -8,7 +8,12 @@
 //! it ships, one that ships none gets the standard text of its licence when
 //! `xtask/licenses/` has one, and anything missing is a warning, never an
 //! error.
+//!
+//! `cargo xtask days` writes `crates/xwa-convert/data/days.tsv.zst`, the
+//! title of each Wikipedia's article for each day of the year, from
+//! Wikidata, which the converter uses for the DAYS section.
 
+mod days;
 mod spdx;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,7 +67,11 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("licenses") => licenses(&args[1..]),
-        _ => Err("usage: cargo xtask licenses [--target TRIPLE]... [--out FILE]".into()),
+        Some("days") if args.len() == 1 => days::write(&workspace_root()),
+        _ => Err(
+            "usage: cargo xtask licenses [--target TRIPLE]... [--out FILE]\n       cargo xtask days"
+                .into(),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

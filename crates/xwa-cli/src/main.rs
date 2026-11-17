@@ -160,6 +160,10 @@ struct DumpArgs {
     /// Maximum results for --search.
     #[arg(long, default_value_t = 20)]
     limit: usize,
+    /// With --search: the most popular titles first, as the device ranks
+    /// them, instead of index order.
+    #[arg(long, requires = "search")]
+    popular: bool,
 }
 
 fn main() -> ExitCode {
@@ -497,13 +501,19 @@ fn xwa_info(path: &Path) -> CliResult {
     println!("  requires: {}", feature_names(sb.required_features, &req));
     println!("  optional: {}", feature_names(sb.optional_features, &opt));
     println!(
-        "  {} articles, {} chunks, {} images{}",
+        "  {} articles, {} chunks of {} bytes, {} images{}",
         a.article_count(),
         a.chunk_count(),
+        a.chunk_size(),
         a.image_count(),
         a.glyph_count()
             .map_or(String::new(), |g| format!(", {g} math glyphs"))
     );
+    println!("  {} folding rules for search", a.fold_entries());
+    if let Some(days) = a.days()? {
+        let found = days.iter().flatten().count();
+        println!("  an article for {found} of the 366 days of the year");
+    }
     println!("sections:");
     let mut sections = sb.sections.clone();
     sections.sort_by_key(|s| s.offset);
@@ -513,7 +523,7 @@ fn xwa_info(path: &Path) -> CliResult {
             reader::section_name(s.kind),
             s.offset,
             s.length,
-            s.crc32c
+            s.crc32
         );
     }
     println!("metadata:");
@@ -585,6 +595,12 @@ fn verify(path: &Path) -> CliResult {
             r.anchor_links - r.anchor_links_found
         );
     }
+    if r.listed_places > 0 {
+        println!(
+            "{} named places listed in articles; {} headings repeat an earlier one's text",
+            r.listed_places, r.repeated_headings
+        );
+    }
     println!(
         "{} images ({:.1} MB), {} titles ({} redirects); checked in {:.1}s",
         r.images,
@@ -612,11 +628,11 @@ fn dump_cmd(args: &DumpArgs) -> CliResult {
     let id = if let Some(id) = args.id {
         Some(id)
     } else if let Some(title) = &args.title {
-        let key = search_key(title);
+        let key = a.search_key(title);
         let hits = a.search(title, 1000)?;
         let mut exact: Vec<_> = hits
             .iter()
-            .filter(|h| search_key(&h.display) == key)
+            .filter(|h| a.search_key(&h.display) == key)
             .collect();
         exact.sort_by_key(|h| h.flags & title_index::FLAG_REDIRECT);
         match exact.first() {
@@ -664,7 +680,17 @@ fn dump_cmd(args: &DumpArgs) -> CliResult {
         return Ok(());
     }
     if let Some(prefix) = &args.search {
-        for h in a.search(prefix, args.limit)? {
+        let hits = if args.popular {
+            a.search_popular(prefix, args.limit)?
+        } else {
+            a.search(prefix, args.limit)?
+        };
+        eprintln!(
+            "{} results, {} title index blocks read",
+            hits.len(),
+            a.index_block_reads()
+        );
+        for h in hits {
             if h.flags & title_index::FLAG_REDIRECT != 0 {
                 let target = title_of(h.article).unwrap_or_default();
                 let section = match h.anchor {
@@ -674,9 +700,12 @@ fn dump_cmd(args: &DumpArgs) -> CliResult {
                     },
                     None => String::new(),
                 };
-                println!("{:>9}  {} -> {target}{section}", h.article, h.display);
+                println!(
+                    "{:>9} {:>3}  {} -> {target}{section}",
+                    h.article, h.popularity, h.display
+                );
             } else {
-                println!("{:>9}  {}", h.article, h.display);
+                println!("{:>9} {:>3}  {}", h.article, h.popularity, h.display);
             }
         }
         return Ok(());

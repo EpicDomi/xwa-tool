@@ -3,6 +3,10 @@
 //! In memory, styles and links wrap their contents; on disk they become
 //! push/pop opcodes inside length-prefixed inline runs.
 
+use std::borrow::Cow;
+
+use unicode_normalization::{UnicodeNormalization, is_nfc};
+
 use crate::error::corrupt;
 use crate::{Result, varint};
 
@@ -90,8 +94,13 @@ pub enum Inline {
         content: Vec<Inline>,
     },
     Math(Formula),
-    /// A small inline image such as a flag or symbol.
-    Icon(u32),
+    /// An image in a line of text, such as a flag or symbol.
+    Icon {
+        image: u32,
+        /// The height to draw it at, in sixteenths of the body text size
+        /// (1-255); the width follows from the image's proportions.
+        height: u8,
+    },
     Break,
     NoteRef(u32),
 }
@@ -268,41 +277,50 @@ pub fn anchor_hash(name: &str) -> u32 {
     })
 }
 
-/// The anchor each table-of-contents entry gets by rule (spec 7.2): its text
-/// with leading and trailing white space removed and every run of white
-/// space made one `_`; a name already taken by an earlier entry gets `_2`,
-/// `_3`, ... appended, the first number that makes it new.
-pub fn heading_anchors<'a>(texts: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut taken = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for text in texts {
-        let base = text.split_whitespace().collect::<Vec<_>>().join("_");
-        let mut name = base.clone();
-        let mut n = 2;
-        while taken.contains(&name) {
-            name = format!("{base}_{n}");
-            n += 1;
+/// The anchor a table-of-contents entry gets by rule (spec 7.2): its text
+/// with the spaces at either end removed and every run of spaces inside
+/// made one `_`. Each entry on its own: two entries with one text get one
+/// name, and the converter lists the anchor of the second.
+pub fn heading_anchor(text: &str) -> String {
+    text.split(' ')
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
+/// [`anchor_hash`] of [`heading_anchor`], without building the name.
+pub fn heading_anchor_hash(text: &str) -> u32 {
+    let mut h = 0x811C_9DC5u32;
+    let mut first = true;
+    for word in text.split(' ').filter(|w| !w.is_empty()) {
+        if !first {
+            h = (h ^ b'_' as u32).wrapping_mul(0x0100_0193);
         }
-        taken.insert(name.clone());
-        out.push(name);
+        first = false;
+        for b in word.bytes() {
+            h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+        }
     }
-    out
+    h
 }
 
 /// The section a named place is in (spec 7.2): the article's own anchor
-/// list first, then the anchors its headings get by rule. `None` when the
-/// article has no such place; links then open at the top.
+/// list first, then the anchors its headings get by rule, the first that
+/// matches. `None` when the article has no such place; links then open at
+/// the top.
 pub fn find_anchor(header: &ArticleHeader, hash: u32) -> Option<u32> {
     if let Some(a) = header.anchors.iter().find(|a| a.hash == hash) {
         return Some(a.section);
     }
-    heading_anchors(header.toc.iter().map(|e| e.text.as_str()))
+    header
+        .toc
         .iter()
-        .position(|name| anchor_hash(name) == hash)
+        .position(|e| heading_anchor_hash(&e.text) == hash)
         .map(|i| i as u32 + 1)
 }
 
 /// Concatenated text of inlines, for headings in the table of contents.
+/// A tidy line (spec 7.3), as [`tidy_line`] makes it.
 pub fn plain_text(inlines: &[Inline]) -> String {
     let mut out = String::new();
     fn walk(inlines: &[Inline], out: &mut String) {
@@ -311,12 +329,205 @@ pub fn plain_text(inlines: &[Inline]) -> String {
                 Inline::Text(t) => out.push_str(t),
                 Inline::Styled(_, c) | Inline::Link { content: c, .. } => walk(c, out),
                 Inline::Break => out.push(' '),
-                Inline::Math(_) | Inline::Icon(_) | Inline::NoteRef(_) => {}
+                Inline::Math(_) | Inline::Icon { .. } | Inline::NoteRef(_) => {}
             }
         }
     }
     walk(inlines, &mut out);
-    out
+    match tidy_line(&out) {
+        Cow::Borrowed(_) => out,
+        Cow::Owned(tidy) => tidy,
+    }
+}
+
+// ------------------------------------------------------------- text rules
+
+/// The no-break spaces, which text keeps as they are (spec 7.3).
+pub fn is_no_break_space(c: char) -> bool {
+    matches!(c, '\u{A0}' | '\u{2007}' | '\u{202F}')
+}
+
+/// White space text may not hold: all but the space and the no-break
+/// spaces.
+fn is_other_space(c: char) -> bool {
+    c != ' ' && c.is_whitespace() && !is_no_break_space(c)
+}
+
+/// Whether `s` is a tidy line (spec 7.3): in NFC, without control
+/// characters, white space only as single spaces (U+0020) and no-break
+/// spaces, and no space at either end.
+pub fn is_tidy_line(s: &str) -> bool {
+    let mut after_space = true;
+    for c in s.chars() {
+        if c == ' ' {
+            if after_space {
+                return false;
+            }
+            after_space = true;
+        } else if c.is_control() || is_other_space(c) {
+            return false;
+        } else {
+            after_space = false;
+        }
+    }
+    !s.ends_with(' ') && is_nfc(s)
+}
+
+/// `s` as a tidy line: control characters left out, runs of other white
+/// space made one space, none at either end, then NFC.
+pub fn tidy_line(s: &str) -> Cow<'_, str> {
+    if is_tidy_line(s) {
+        return Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut space = false;
+    for c in s.chars() {
+        if c == ' ' || is_other_space(c) {
+            space = !out.is_empty();
+        } else if !c.is_control() {
+            if space {
+                out.push(' ');
+                space = false;
+            }
+            out.push(c);
+        }
+    }
+    Cow::Owned(out.nfc().collect())
+}
+
+/// Preformatted text as stored (spec 7.3): in NFC, lines ending in a line
+/// feed alone, tabs expanded with spaces to the next multiple of 8
+/// characters, no other control characters, and no empty lines or
+/// trailing spaces at the ends.
+pub fn tidy_pre(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut column = 0usize;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\n');
+                column = 0;
+            }
+            '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => {
+                out.push('\n');
+                column = 0;
+            }
+            '\t' => {
+                let to = (column / 8 + 1) * 8;
+                out.extend(std::iter::repeat_n(' ', to - column));
+                column = to;
+            }
+            c if c.is_control() => {}
+            c => {
+                out.push(c);
+                column += 1;
+            }
+        }
+    }
+    let out: String = out.nfc().collect();
+    out.trim_start_matches('\n')
+        .trim_end_matches(['\n', ' '])
+        .to_string()
+}
+
+/// Whether `s` is as [`tidy_pre`] leaves preformatted text.
+fn is_tidy_pre(s: &str) -> bool {
+    !s.starts_with('\n')
+        && !s.ends_with(['\n', ' '])
+        && s.chars().all(|c| c == '\n' || !c.is_control())
+        && !s.contains(['\u{2028}', '\u{2029}'])
+        && is_nfc(s)
+}
+
+/// Where an article's text breaks the rules readers may rely on (spec
+/// 7.3), one line per problem.
+pub fn text_problems(a: &Article) -> Vec<String> {
+    let mut problems = Vec::new();
+    if !is_tidy_line(&a.title) {
+        problems.push(format!("title {:?} is not a tidy line", a.title));
+    }
+    fn blocks(list: &[Block], p: &mut Vec<String>) {
+        for b in list {
+            match b {
+                Block::Para(c) | Block::Heading { content: c, .. } => run(c, p),
+                Block::Figure { caption, .. } => run(caption, p),
+                Block::Gallery(items) => items.iter().for_each(|(_, c)| run(c, p)),
+                Block::List { items, .. } => items.iter().for_each(|i| blocks(i, p)),
+                Block::Quote(inner) => blocks(inner, p),
+                Block::Pre(t) if !is_tidy_pre(t) => {
+                    p.push(format!("preformatted text {t:?} is not tidy"))
+                }
+                Block::Pre(_)
+                | Block::Rule
+                | Block::MathBlock(_)
+                | Block::TableRef(_)
+                | Block::InfoboxRef => {}
+            }
+        }
+    }
+    /// What the rules see of a run: its characters, with anything else as
+    /// a stand-in (`\0` for an icon, formula or note, `\n` for a break).
+    fn run(inlines: &[Inline], p: &mut Vec<String>) {
+        let mut flat = String::new();
+        fn walk(inlines: &[Inline], flat: &mut String, p: &mut Vec<String>) {
+            for i in inlines {
+                match i {
+                    Inline::Text(t) => {
+                        if t.is_empty()
+                            || !is_nfc(t)
+                            || t.chars().any(|c| c.is_control() || is_other_space(c))
+                        {
+                            p.push(format!("text {t:?} is empty, not NFC, or holds control characters or other white space"));
+                        }
+                        flat.push_str(t);
+                    }
+                    Inline::Styled(_, c) | Inline::Link { content: c, .. } => walk(c, flat, p),
+                    Inline::Break => flat.push('\n'),
+                    Inline::Math(_) | Inline::NoteRef(_) => flat.push('\0'),
+                    Inline::Icon { height, .. } => {
+                        if *height == 0 {
+                            p.push("an icon has height 0".to_string());
+                        }
+                        flat.push('\0');
+                    }
+                }
+            }
+        }
+        walk(inlines, &mut flat, p);
+        for bad in ["  ", " \n", "\n ", "\n\n"] {
+            if flat.contains(bad) {
+                p.push(format!("text {flat:?} has {bad:?}"));
+            }
+        }
+        if flat.starts_with([' ', '\n']) || flat.ends_with([' ', '\n']) {
+            p.push(format!(
+                "text {flat:?} starts or ends with a space or break"
+            ));
+        }
+    }
+    blocks(&a.body, &mut problems);
+    for t in &a.tables {
+        for c in &t.cells {
+            run(&c.content, &mut problems);
+        }
+    }
+    if let Some(ib) = &a.infobox {
+        for row in &ib.rows {
+            match row {
+                InfoboxRow::Header(c) | InfoboxRow::Full(c) => run(c, &mut problems),
+                InfoboxRow::Image { caption, .. } => run(caption, &mut problems),
+                InfoboxRow::Field { label, value } => {
+                    run(label, &mut problems);
+                    run(value, &mut problems);
+                }
+            }
+        }
+    }
+    problems
 }
 
 // ---------------------------------------------------------------- encoding
@@ -371,9 +582,10 @@ fn encode_inline_ops(out: &mut Vec<u8>, inlines: &[Inline]) {
                 out.push(op::MATH);
                 encode_formula(out, f);
             }
-            Inline::Icon(image) => {
+            Inline::Icon { image, height } => {
                 out.push(op::ICON);
                 varint::put(out, *image as u64);
+                out.push(*height);
             }
             Inline::Break => out.push(op::BREAK),
             Inline::NoteRef(n) => {
@@ -392,12 +604,24 @@ fn encode_run(out: &mut Vec<u8>, inlines: &[Inline]) {
     out.extend_from_slice(&ops);
 }
 
+/// A formula record (spec 8.1): `varint byte_length`, then the record.
 pub fn encode_formula(out: &mut Vec<u8>, f: &Formula) {
+    let mut record = Vec::new();
+    encode_formula_record(&mut record, f);
+    varint::put(out, record.len() as u64);
+    out.extend_from_slice(&record);
+}
+
+/// The record after its length: the box, the fallback image, then the
+/// items up to the end.
+fn encode_formula_record(out: &mut Vec<u8>, f: &Formula) {
     out.push(u8::from(f.display) | (u8::from(f.fallback_image.is_some()) << 1));
     for v in [f.width, f.ascent, f.descent] {
         varint::put_signed(out, v as i64);
     }
-    varint::put(out, f.items.len() as u64);
+    if let Some(img) = f.fallback_image {
+        varint::put(out, img as u64);
+    }
     for item in &f.items {
         match *item {
             MathItem::Path { dx, dy, ref ops } => {
@@ -471,9 +695,6 @@ pub fn encode_formula(out: &mut Vec<u8>, f: &Formula) {
                 varint::put(out, h as u64);
             }
         }
-    }
-    if let Some(img) = f.fallback_image {
-        varint::put(out, img as u64);
     }
 }
 
@@ -764,7 +985,10 @@ fn decode_run(c: &mut Cursor) -> Result<Vec<Inline>> {
                 Some(closed)
             }
             op::MATH => Some(Inline::Math(decode_formula(&mut run)?)),
-            op::ICON => Some(Inline::Icon(run.u32v()?)),
+            op::ICON => Some(Inline::Icon {
+                image: run.u32v()?,
+                height: run.u8()?,
+            }),
             op::BREAK => Some(Inline::Break),
             op::NOTE_REF => Some(Inline::NoteRef(run.u32v()?)),
             op::INLINE_EXT => {
@@ -788,11 +1012,23 @@ fn utf8(b: &[u8]) -> Result<String> {
     String::from_utf8(b.to_vec()).map_err(|_| corrupt("text is not UTF-8"))
 }
 
+/// Reads what [`encode_formula`] writes.
 pub fn decode_formula_bytes(buf: &[u8]) -> Result<Formula> {
-    decode_formula(&mut Cursor::new(buf))
+    let mut c = Cursor::new(buf);
+    let f = decode_formula(&mut c)?;
+    if !c.at_end() {
+        return Err(corrupt("bytes after the formula"));
+    }
+    Ok(f)
 }
 
 fn decode_formula(c: &mut Cursor) -> Result<Formula> {
+    let len = c.varint()? as usize;
+    decode_formula_record(&mut Cursor::new(c.bytes(len)?))
+}
+
+/// The record after its length; its items run to its end.
+fn decode_formula_record(c: &mut Cursor) -> Result<Formula> {
     let flags = c.u8()?;
     let mut f = Formula {
         display: flags & 1 != 0,
@@ -801,9 +1037,10 @@ fn decode_formula(c: &mut Cursor) -> Result<Formula> {
         descent: c.i32v()?,
         ..Default::default()
     };
-    let n = c.count()?;
-    f.items.reserve(n);
-    for _ in 0..n {
+    if flags & 2 != 0 {
+        f.fallback_image = Some(c.u32v()?);
+    }
+    while !c.at_end() {
         let item = match c.u8()? {
             0 => MathItem::Glyph {
                 glyph: c.u32v()?,
@@ -864,9 +1101,6 @@ fn decode_formula(c: &mut Cursor) -> Result<Formula> {
             t => return Err(corrupt(format!("unknown math item {t}"))),
         };
         f.items.push(item);
-    }
-    if flags & 2 != 0 {
-        f.fallback_image = Some(c.u32v()?);
     }
     Ok(f)
 }
@@ -1089,7 +1323,7 @@ pub fn for_each_link_mut(a: &mut Article, f: &mut impl FnMut(u32, &mut Place)) {
                 Inline::Styled(_, c) => inlines(c, f),
                 Inline::Text(_)
                 | Inline::Math(_)
-                | Inline::Icon(_)
+                | Inline::Icon { .. }
                 | Inline::Break
                 | Inline::NoteRef(_) => {}
             }
@@ -1165,7 +1399,7 @@ pub fn walk_refs<'a>(a: &'a Article, f: &mut impl FnMut(Ref<'a>)) {
                     inlines(content, f);
                 }
                 Inline::Math(x) => formula(x, f),
-                Inline::Icon(img) => f(Ref::Image(*img)),
+                Inline::Icon { image, .. } => f(Ref::Image(*image)),
                 Inline::Text(_) | Inline::Break | Inline::NoteRef(_) => {}
             }
         }
@@ -1292,9 +1526,12 @@ mod tests {
                         ],
                     ),
                     Inline::Break,
-                    Inline::Icon(2),
+                    Inline::Icon {
+                        image: 2,
+                        height: 15,
+                    },
                     Inline::NoteRef(1),
-                    text(&"long text ".repeat(40)),
+                    text("long text ".repeat(40).trim_end()),
                 ]),
                 Block::Heading {
                     level: 2,
@@ -1390,22 +1627,17 @@ mod tests {
         assert_eq!(anchor_hash("foobar"), 0xBF9C_F968);
         // A space counts as the underscore links write.
         assert_eq!(anchor_hash("Early life"), anchor_hash("Early_life"));
-        assert_eq!(
-            heading_anchors([
-                "History",
-                " Early  life ",
-                "History",
-                "History_2",
-                "History"
-            ]),
-            [
-                "History",
-                "Early_life",
-                "History_2",
-                "History_2_2",
-                "History_3"
-            ]
-        );
+        // Each heading on its own, spaces made one `_`.
+        for (text, name) in [
+            ("History", "History"),
+            (" Early  life ", "Early_life"),
+            ("History_2", "History_2"),
+            ("", ""),
+            ("  ", ""),
+        ] {
+            assert_eq!(heading_anchor(text), name);
+            assert_eq!(heading_anchor_hash(text), anchor_hash(name), "{text:?}");
+        }
     }
 
     #[test]
@@ -1477,6 +1709,60 @@ mod tests {
             let _ = decode_article(&damaged);
             damaged[i] ^= 0xA5;
         }
+    }
+
+    #[test]
+    fn lines_are_made_tidy() {
+        for (raw, tidy) in [
+            ("Plain title", "Plain title"),
+            ("  Two\t\tspaces \n", "Two spaces"),
+            ("Bell\u{7}less", "Bellless"),
+            ("Caf\u{65}\u{301}", "Café"),
+            ("10\u{202F}km\u{A0}", "10\u{202F}km\u{A0}"),
+            ("", ""),
+        ] {
+            assert_eq!(tidy_line(raw), tidy, "{raw:?}");
+            assert!(is_tidy_line(&tidy_line(raw)));
+        }
+        assert!(matches!(tidy_line("Already tidy"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn preformatted_text_is_made_tidy() {
+        assert_eq!(
+            tidy_pre("\r\nint\tx;\r\n\tab\tc\rend  \n\n"),
+            "int     x;\n        ab      c\nend"
+        );
+        assert_eq!(tidy_pre("a\u{0}b\u{2028}c"), "ab\nc");
+    }
+
+    #[test]
+    fn text_problems_are_found() {
+        assert_eq!(text_problems(&sample_article()), Vec::<String>::new());
+        let bad = |run: Vec<Inline>| Article {
+            title: "T".into(),
+            body: vec![Block::Para(run)],
+            ..Default::default()
+        };
+        let text = |t: &str| Inline::Text(t.into());
+        for run in [
+            vec![text(" lead")],
+            vec![text("trail ")],
+            vec![text("a "), Inline::Styled(Style::Bold, vec![text(" b")])],
+            vec![text("a "), Inline::Break, text("b")],
+            vec![text("a\tb")],
+            vec![text("e\u{301}")],
+            vec![Inline::Break, text("b")],
+        ] {
+            assert!(!text_problems(&bad(run.clone())).is_empty(), "{run:?}");
+        }
+        let fine = vec![
+            text("a "),
+            Inline::Styled(Style::Bold, vec![text("b")]),
+            Inline::Break,
+            text("c\u{A0}"),
+        ];
+        assert!(text_problems(&bad(fine)).is_empty());
     }
 
     #[test]

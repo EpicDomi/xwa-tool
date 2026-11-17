@@ -12,9 +12,10 @@ use std::collections::HashMap;
 use ego_tree::NodeRef;
 use scraper::node::Element;
 use scraper::{Html, Node};
+use unicode_normalization::{UnicodeNormalization, is_nfc};
 use xwa_format::content::{
     Anchor, Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Place, Style,
-    Table, anchor_hash, heading_anchors, plain_text,
+    Table, anchor_hash, heading_anchor_hash, is_no_break_space, plain_text, tidy_pre,
 };
 use xwa_format::records::article_flags;
 
@@ -116,6 +117,7 @@ pub fn extract(
 ) -> Extracted {
     let doc = Html::parse_document(html);
     let root = content_root(&doc);
+    let text_px = body_text_px(&doc);
     let mut cx = Cx {
         path,
         self_id,
@@ -130,6 +132,7 @@ pub fn extract(
         in_cell: 0,
         images: Vec::new(),
         image_slots: HashMap::new(),
+        text_px,
     };
     let mut flow = Flow {
         top: true,
@@ -149,14 +152,13 @@ pub fn extract(
             _ => None,
         })
         .collect();
-    let derived = heading_anchors(texts.iter().map(String::as_str));
     let mut sections: HashMap<u32, u32> = HashMap::new();
     let mut listed: Vec<Anchor> = Vec::new();
     let mut n = 0;
     for (b, a) in body.iter().zip(&anchors) {
         if matches!(b, Block::Heading { .. }) {
             n += 1;
-            let by_rule = anchor_hash(&derived[n as usize - 1]);
+            let by_rule = heading_anchor_hash(&texts[n as usize - 1]);
             sections.entry(by_rule).or_insert(n);
             if let Some(a) = a {
                 let hash = anchor_hash(a);
@@ -200,6 +202,26 @@ pub fn extract(
         flags: cx.flags,
         stats: cx.stats,
         images: cx.images,
+    }
+}
+
+/// The body text size the page's skin sets, in CSS pixels: Vector 2022's
+/// font size setting is a class on the root element (small 14, standard 16,
+/// large 20). Other skins set 16.
+fn body_text_px(doc: &Html) -> f32 {
+    let root = doc.root_element().value();
+    if root
+        .classes()
+        .any(|c| c == "vector-feature-custom-font-size-clientpref-0")
+    {
+        14.0
+    } else if root
+        .classes()
+        .any(|c| c == "vector-feature-custom-font-size-clientpref-2")
+    {
+        20.0
+    } else {
+        16.0
     }
 }
 
@@ -432,6 +454,9 @@ struct Cx<'a> {
     images: Vec<ImageUse>,
     /// Image key to its index in `images`.
     image_slots: HashMap<u32, u32>,
+    /// The page's body text size in CSS pixels, which image sizes in the
+    /// HTML are relative to.
+    text_px: f32,
 }
 
 impl Cx<'_> {
@@ -491,12 +516,9 @@ impl Cx<'_> {
                 }
             }
             "pre" => {
-                let text = text_content(node);
-                let text = text
-                    .trim_end_matches(['\n', '\r', ' '])
-                    .trim_start_matches(['\n', '\r']);
+                let text = tidy_pre(&text_content(node));
                 if !text.is_empty() {
-                    flow.block(Block::Pre(text.to_string()));
+                    flow.block(Block::Pre(text));
                 }
             }
             "hr" => flow.block(Block::Rule),
@@ -512,9 +534,9 @@ impl Cx<'_> {
                 || e.attr("typeof").is_some_and(|t| t.starts_with("mw:File")) =>
             {
                 // An image on its own in running text: an icon if small, else a figure.
-                if let Some(image) = self.image(node, true) {
+                if let Some((image, height)) = self.image(node, true) {
                     if self.images[image as usize].kind == Kind::Icon {
-                        flow.run.push(Inline::Icon(image));
+                        flow.run.push(Inline::Icon { image, height });
                     } else {
                         flow.block(Block::Figure {
                             image,
@@ -570,8 +592,9 @@ impl Cx<'_> {
     }
 
     /// The first image in `node` (or `node` itself), as an index into
-    /// `self.images`. `inline` images that are small become icons.
-    fn image(&mut self, node: NodeRef<'_, Node>, inline: bool) -> Option<u32> {
+    /// `self.images`, with the height to draw it at in a line of text (an
+    /// ICON's, spec 7.3). `inline` images that are small become icons.
+    fn image(&mut self, node: NodeRef<'_, Node>, inline: bool) -> Option<(u32, u8)> {
         let img = node.descendants().find_map(|d| {
             element(&d).filter(|e| {
                 e.name() == "img" && !e.classes().any(|c| c.starts_with("mwe-math-fallback"))
@@ -601,17 +624,27 @@ impl Cx<'_> {
             dim("data-file-width").unwrap_or(0),
             dim("data-file-height").unwrap_or(0),
         );
+        // The height the page draws it at: as given, or from the width
+        // given and the original's proportions; else one line of text.
+        let height_px = match (dim("width"), dim("height"), source_size) {
+            (_, Some(h), _) => Some(h as f32),
+            (Some(w), None, (sw, sh)) if sw > 0 => Some(w as f32 * sh as f32 / sw as f32),
+            _ => None,
+        };
+        let height = height_px.map_or(16.0, |h| (h * 16.0 / self.text_px).round());
+        let height = height.clamp(1.0, 255.0) as u8;
         self.stats.images += 1;
         let next = self.images.len() as u32;
         let images = &mut self.images;
-        Some(*self.image_slots.entry(key).or_insert_with(|| {
+        let index = *self.image_slots.entry(key).or_insert_with(|| {
             images.push(ImageUse {
                 key,
                 kind,
                 source_size,
             });
             next
-        }))
+        });
+        Some((index, height))
     }
 
     fn figure(
@@ -620,7 +653,7 @@ impl Cx<'_> {
         caption: Option<NodeRef<'_, Node>>,
         flow: &mut Flow,
     ) {
-        let Some(image) = self.image(node, false) else {
+        let Some((image, _)) = self.image(node, false) else {
             return;
         };
         let mut run = Vec::new();
@@ -641,7 +674,7 @@ impl Cx<'_> {
             .filter(|d| element(d).is_some_and(|e| has_class(e, "gallerybox")))
             .collect();
         for b in boxes {
-            let Some(image) = self.image(b, false) else {
+            let Some((image, _)) = self.image(b, false) else {
                 continue;
             };
             let mut caption = Vec::new();
@@ -732,13 +765,19 @@ impl Cx<'_> {
                 .unwrap_or(false);
         if self.in_cell > 0 && horizontal {
             let mut run = Vec::new();
-            for (i, item) in items.into_iter().enumerate() {
-                if i > 0 {
+            for item in items {
+                let mut part = Vec::new();
+                flatten(item, &mut part);
+                if part.is_empty() {
+                    continue;
+                }
+                if !run.is_empty() {
                     run.push(Inline::Text(" · ".into()));
                 }
-                flatten(item, &mut run);
+                run.extend(part);
             }
-            return Some(Block::Para(run));
+            normalize(&mut run);
+            return (!run.is_empty()).then_some(Block::Para(run));
         }
         Some(Block::List { kind, items })
     }
@@ -938,7 +977,7 @@ impl Cx<'_> {
                     {
                         // An image row. Without the image (pictures off, or
                         // not in the ZIM) its caption means little.
-                        if let Some(image) = self.image(*cell, false) {
+                        if let Some((image, _)) = self.image(*cell, false) {
                             let caption = cell
                                 .descendants()
                                 .find(|d| {
@@ -999,9 +1038,14 @@ impl Cx<'_> {
         }
         self.in_cell -= 1;
         for row in &mut out {
-            if let InfoboxRow::Field { label, .. } = row {
+            if let InfoboxRow::Field { label, value } = row {
                 // Taxoboxes write "Kingdom:"; the reader adds its own separator.
+                // What was before the colon may be a break or a space.
                 trim_trailing(label, ':');
+                trim_end(label);
+                if label.is_empty() {
+                    *row = InfoboxRow::Full(std::mem::take(value));
+                }
             }
         }
         // Section headers whose rows were all images or empty.
@@ -1050,14 +1094,9 @@ impl Cx<'_> {
             "br" if !is_script_stack(node) => out.push(Inline::Break),
             "br" => {}
             "a" => self.link(node, e, out),
-            "img" => {
-                if let Some(image) = self.image(node, true) {
-                    out.push(Inline::Icon(image));
-                }
-            }
-            "figure" => {
-                if let Some(image) = self.image(node, true) {
-                    out.push(Inline::Icon(image));
+            "img" | "figure" => {
+                if let Some((image, height)) = self.image(node, true) {
+                    out.push(Inline::Icon { image, height });
                 }
             }
             "math" => match self.formula(node, false) {
@@ -1400,9 +1439,14 @@ fn normalize(run: &mut Vec<Inline>) {
                 Inline::Text(t) => {
                     let mut s = String::with_capacity(t.len());
                     // Word joiners and byte-order marks are invisible but
-                    // may draw as boxes in a device font.
-                    for c in t.chars().filter(|c| !matches!(c, '\u{2060}' | '\u{feff}')) {
-                        if c.is_whitespace() && c != '\u{a0}' {
+                    // may draw as boxes in a device font; control characters
+                    // other than white space mean nothing in text.
+                    let shown = |c: &char| {
+                        !matches!(c, '\u{2060}' | '\u{feff}')
+                            && (c.is_whitespace() || !c.is_control())
+                    };
+                    for c in t.chars().filter(shown) {
+                        if c.is_whitespace() && !is_no_break_space(c) {
                             if !*prev_space {
                                 s.push(' ');
                                 *prev_space = true;
@@ -1461,7 +1505,7 @@ fn normalize(run: &mut Vec<Inline>) {
                     }
                     *prev_space = true;
                 }
-                Inline::Math(_) | Inline::Icon(_) | Inline::NoteRef(_) => *prev_space = false,
+                Inline::Math(_) | Inline::Icon { .. } | Inline::NoteRef(_) => *prev_space = false,
             }
             out.push(item);
         }
@@ -1470,6 +1514,18 @@ fn normalize(run: &mut Vec<Inline>) {
     let mut prev_space = true;
     walk(run, &mut prev_space);
     trim_end(run);
+    nfc(run);
+}
+
+/// Puts every text in NFC (spec 7.3).
+fn nfc(run: &mut [Inline]) {
+    for i in run {
+        match i {
+            Inline::Text(t) if !is_nfc(t) => *t = t.nfc().collect(),
+            Inline::Styled(_, c) | Inline::Link { content: c, .. } => nfc(c),
+            _ => {}
+        }
+    }
 }
 
 /// Joins adjacent text items (after a merge of two styled runs).
@@ -1560,7 +1616,7 @@ pub fn for_each_formula_mut(a: &mut Article, f: &mut impl FnMut(&mut Formula)) {
             match i {
                 Inline::Math(x) => f(x),
                 Inline::Styled(_, c) | Inline::Link { content: c, .. } => inlines(c, f),
-                Inline::Text(_) | Inline::Icon(_) | Inline::Break | Inline::NoteRef(_) => {}
+                Inline::Text(_) | Inline::Icon { .. } | Inline::Break | Inline::NoteRef(_) => {}
             }
         }
     }
@@ -1607,7 +1663,7 @@ pub fn for_each_image_mut(a: &mut Article, f: &mut impl FnMut(&mut u32)) {
     fn inlines(list: &mut [Inline], f: &mut impl FnMut(&mut u32)) {
         for i in list {
             match i {
-                Inline::Icon(image) => f(image),
+                Inline::Icon { image, .. } => f(image),
                 Inline::Math(x) => formula(x, f),
                 Inline::Styled(_, c) | Inline::Link { content: c, .. } => inlines(c, f),
                 Inline::Text(_) | Inline::Break | Inline::NoteRef(_) => {}
@@ -1952,6 +2008,26 @@ mod tests {
     }
 
     #[test]
+    fn a_label_ends_with_its_text_once_its_colon_goes() {
+        // Swedish Wikipedia's bandy infoboxes write "År<br>:".
+        let x = run(r#"<table class="infobox"><tbody>
+            <tr><th class="infobox-label"><b>År</b><br>:</th><td class="infobox-data"><b>Klubb</b></td></tr>
+            <tr><th class="infobox-label">:</th><td class="infobox-data">Västerås SK</td></tr>
+            </tbody></table><p>Text.</p>"#);
+        assert!(xwa_format::content::text_problems(&x.article).is_empty());
+        assert_eq!(
+            x.article.infobox.unwrap().rows,
+            vec![
+                InfoboxRow::Field {
+                    label: vec![Inline::Styled(Style::Bold, vec![text("År")])],
+                    value: vec![Inline::Styled(Style::Bold, vec![text("Klubb")])]
+                },
+                InfoboxRow::Full(vec![text("Västerås SK")]),
+            ]
+        );
+    }
+
+    #[test]
     fn chrome_is_dropped_and_hatnotes_kept() {
         let x = run(
             r#"<div class="hatnote navigation-not-searchable">For the album, see <a rel="mw:WikiLink" href="Geometry">Geometry</a>.</div>
@@ -2149,7 +2225,14 @@ mod image_tests {
                 },
                 InfoboxRow::Field {
                     label: vec![text("Flag")],
-                    value: vec![Inline::Icon(1), text(" Greece")]
+                    // 15 px high on a page of 16 px text.
+                    value: vec![
+                        Inline::Icon {
+                            image: 1,
+                            height: 15
+                        },
+                        text(" Greece")
+                    ]
                 },
             ]
         );
@@ -2169,7 +2252,15 @@ mod image_tests {
                     ]
                 },
                 Block::Gallery(vec![(0, vec![text("Again")])]),
-                Block::Para(vec![text("See "), Inline::Icon(1), text(" here.")]),
+                // The same image, drawn smaller here.
+                Block::Para(vec![
+                    text("See "),
+                    Inline::Icon {
+                        image: 1,
+                        height: 14
+                    },
+                    text(" here.")
+                ]),
             ]
         );
         assert_eq!((x.stats.images, x.stats.images_skipped), (5, 1));
@@ -2188,8 +2279,40 @@ mod image_tests {
                     image: 100,
                     caption: vec![]
                 },
-                Block::Para(vec![Inline::Icon(101)])
+                Block::Para(vec![Inline::Icon {
+                    image: 101,
+                    height: 10
+                }])
             ]
+        );
+    }
+
+    #[test]
+    fn icon_heights_follow_the_page_text_size() {
+        let icon = |html: &str| match &run(html).article.body[..] {
+            [Block::Para(run)] => run.clone(),
+            other => panic!("{other:?}"),
+        };
+        let img = r#"<p><img src="./_assets_/h/Flag.png" width="21" height="14"></p>"#;
+        // Small text (14 px): 14 px is one line.
+        let small = format!(
+            r#"<html class="vector-feature-custom-font-size-clientpref-0"><body>{img}</body></html>"#
+        );
+        assert_eq!(
+            icon(&small),
+            [Inline::Icon {
+                image: 0,
+                height: 16
+            }]
+        );
+        // Without a height, from the width and the original's proportions.
+        let wide = r#"<p><span><img src="./_assets_/h/Flag.png" width="32" data-file-width="300" data-file-height="200"></span></p>"#;
+        assert_eq!(
+            icon(wide),
+            [Inline::Icon {
+                image: 0,
+                height: 21
+            }]
         );
     }
 }

@@ -84,7 +84,7 @@ impl ArticleRecord {
 pub struct ChunkEntry {
     /// Offset within BLOBS.
     pub offset: u64,
-    /// Compressed bytes plus the 4-byte CRC32C.
+    /// Compressed bytes plus the 4-byte CRC-32.
     pub stored_size: u32,
     pub uncompressed_size: u32,
 }
