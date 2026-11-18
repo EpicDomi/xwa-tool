@@ -12,8 +12,13 @@
 //! `cargo xtask days` writes `crates/xwa-convert/data/days.tsv.zst`, the
 //! title of each Wikipedia's article for each day of the year, from
 //! Wikidata, which the converter uses for the DAYS section.
+//!
+//! `cargo xtask fonts` writes `crates/xwa-convert/data/fonts.tsv.zst`, the
+//! Noto fonts the converter draws the fallback FONT from, with their
+//! files' addresses, checksums and coverage.
 
 mod days;
+mod fonts;
 mod spdx;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,8 +73,9 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("licenses") => licenses(&args[1..]),
         Some("days") if args.len() == 1 => days::write(&workspace_root()),
+        Some("fonts") if args.len() == 1 => fonts::write(&workspace_root()),
         _ => Err(
-            "usage: cargo xtask licenses [--target TRIPLE]... [--out FILE]\n       cargo xtask days"
+            "usage: cargo xtask licenses [--target TRIPLE]... [--out FILE]\n       cargo xtask days\n       cargo xtask fonts"
                 .into(),
         ),
     };

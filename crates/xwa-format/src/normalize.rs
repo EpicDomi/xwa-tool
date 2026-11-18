@@ -184,27 +184,60 @@ pub fn search_key(title: &str) -> String {
     search_key_with(title, fold_table())
 }
 
-/// The characters that occur in an index's keys.
+/// A set of code points, as a bit per code point: the characters an
+/// index's keys use, or an archive's text.
 #[derive(Clone)]
-pub struct KeyChars(Vec<u64>);
+pub struct CharSet(Vec<u64>);
 
-impl Default for KeyChars {
+impl Default for CharSet {
     fn default() -> Self {
         Self(vec![0; 0x11_0000_usize.div_ceil(64)])
     }
 }
 
-impl KeyChars {
-    pub fn insert_str(&mut self, key: &str) {
-        for c in key.chars() {
-            let c = c as usize;
-            self.0[c / 64] |= 1 << (c % 64);
-        }
+impl std::fmt::Debug for CharSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CharSet({} code points)", self.len())
+    }
+}
+
+impl CharSet {
+    pub fn insert(&mut self, c: char) {
+        let c = c as usize;
+        self.0[c / 64] |= 1 << (c % 64);
+    }
+
+    pub fn insert_str(&mut self, s: &str) {
+        s.chars().for_each(|c| self.insert(c));
     }
 
     pub fn contains(&self, c: char) -> bool {
         let c = c as usize;
         self.0[c / 64] & (1 << (c % 64)) != 0
+    }
+
+    /// Adds every code point of `other`.
+    pub fn union(&mut self, other: &CharSet) {
+        for (a, b) in self.0.iter_mut().zip(&other.0) {
+            *a |= b;
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|w| *w == 0)
+    }
+
+    /// The code points, in order.
+    pub fn iter(&self) -> impl Iterator<Item = char> + '_ {
+        self.0.iter().enumerate().flat_map(|(i, &w)| {
+            (0..64)
+                .filter(move |b| w & (1 << b) != 0)
+                .filter_map(move |b| char::from_u32((i * 64 + b) as u32))
+        })
     }
 }
 
@@ -222,7 +255,7 @@ const INLINE_FOLD: usize = 3;
 /// (of the fold in UTF-8 bytes) and three bytes: the fold itself, padded
 /// with zeros, when it is at most 3 bytes long, or else the `u24` offset
 /// of the fold in the pool. Records never straddle a 4096-byte block.
-pub fn encode_fold_section(keys: &KeyChars) -> Vec<u8> {
+pub fn encode_fold_section(keys: &CharSet) -> Vec<u8> {
     let wanted: Vec<&(char, Box<str>)> = fold_table()
         .iter()
         .filter(|(_, f)| f.chars().all(|d| d == ' ' || keys.contains(d)))
@@ -358,7 +391,7 @@ mod tests {
 
     #[test]
     fn every_fold_reads_back_from_the_section() {
-        let mut keys = KeyChars::default();
+        let mut keys = CharSet::default();
         for (_, f) in fold_table() {
             keys.insert_str(f);
         }
@@ -380,7 +413,7 @@ mod tests {
 
     #[test]
     fn damage_to_a_fold_section_is_never_a_panic() {
-        let mut keys = KeyChars::default();
+        let mut keys = CharSet::default();
         keys.insert_str(&search_key("Émile Zola ﷺ Straße"));
         let section = encode_fold_section(&keys);
         for cut in 0..section.len().min(4096) {
@@ -400,7 +433,7 @@ mod tests {
     #[test]
     fn the_fold_section_folds_as_the_full_table_does() {
         let titles = ["Émile Zola", "Straße", "Ἀθῆναι", "東京", "كتاب", "가나다"];
-        let mut keys = KeyChars::default();
+        let mut keys = CharSet::default();
         for t in titles {
             keys.insert_str(&search_key(t));
         }

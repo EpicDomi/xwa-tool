@@ -32,7 +32,11 @@ Early. What works today:
   searchable alternative titles. Links to a section of another article,
   and redirects to a section (from links or from search), open the article
   at that section. Wikipedia archives say which article is each day's, for
-  the e-reader's "On this day", in all of Wikipedia's languages.
+  the e-reader's "On this day", in all of Wikipedia's languages. Each
+  archive carries a fallback font: outlines, from the Noto fonts, of every
+  character its text uses that the e-reader's own fonts lack (Greek, IPA,
+  symbols, Arabic, Chinese...). The Noto fonts it needs are downloaded the
+  first time and kept; `--no-fallback-font` leaves it out.
 - `xwa-fetch`: the Kiwix library catalog, downloads (resumed after an
   interruption, mirrors tried in turn, checked against their SHA-256), and
   copying archives to SD cards (into the card's `wiki` folder, where the
@@ -149,7 +153,8 @@ Pushing a `v*` tag builds Windows, macOS and Linux binaries and attaches them
 to a GitHub release, each zip with a `THIRD-PARTY-LICENSES.txt` that lists
 every crate in the programs with its licence text. `cargo xtask licenses`
 writes the same file locally. `cargo xtask days` refreshes the table of each
-Wikipedia's day articles from Wikidata.
+Wikipedia's day articles from Wikidata, and `cargo xtask fonts` the catalogue
+of Noto fonts the fallback font is drawn from.
 
 ## License
 

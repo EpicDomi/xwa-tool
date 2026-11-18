@@ -578,6 +578,7 @@ impl<S: Source> Archive<S> {
         self.verify_images(&mut r, progress)?;
         self.verify_index(&mut r, &popularity, progress)?;
         self.verify_days(&mut r)?;
+        self.verify_font(&mut r)?;
         self.verify_counts(&mut r);
         Ok(r)
     }
@@ -698,6 +699,7 @@ impl<S: Source> Archive<S> {
                     continue;
                 }
             };
+            content::for_each_text(&article, &mut |t| r.text_chars.insert_str(t));
             for p in content::text_problems(&article).into_iter().take(3) {
                 r.problem(format!("article {id}: {p}"));
             }
@@ -901,6 +903,7 @@ impl<S: Source> Archive<S> {
             if n.is_multiple_of(4096) {
                 progress("title index", n, n.max(leaf_blocks * 100));
             }
+            r.text_chars.insert_str(&hit.display);
             let folded = self.search_key(&hit.display);
             if folded.as_bytes() != key {
                 problems.push(format!(
@@ -1007,6 +1010,41 @@ impl<S: Source> Archive<S> {
             }
         }
         progress("title index", n, n);
+        Ok(())
+    }
+
+    /// The FONT section (spec 10), if the archive has one.
+    pub fn font(&self) -> Result<Option<crate::font::Font>> {
+        let Some(s) = self.superblock.section(section::FONT) else {
+            return Ok(None);
+        };
+        let len = usize::try_from(s.length).map_err(|_| corrupt("FONT too large"))?;
+        Ok(Some(crate::font::Font::decode(
+            &self.read_at(s.offset, len)?,
+        )?))
+    }
+
+    fn verify_font(&self, r: &mut VerifyReport) -> Result<()> {
+        let font = match self.font() {
+            Ok(f) => f,
+            Err(Error::Io(e)) => return Err(Error::Io(e)),
+            Err(e) => {
+                r.problem(describe(&e));
+                return Ok(());
+            }
+        };
+        let glyphs = font.as_ref().map(|f| &f.glyphs);
+        r.font_glyphs = glyphs.map_or(0, |g| g.len());
+        r.without_glyph = r
+            .text_chars
+            .iter()
+            .filter(|&c| crate::font::needs_fallback(c))
+            .filter(|c| glyphs.is_none_or(|g| !g.contains_key(c)))
+            .collect();
+        let has_bit = self.superblock.optional_features & crate::optional::FONT != 0;
+        if has_bit != font.is_some() {
+            r.problem("the fallback font feature bit does not match the FONT section");
+        }
         Ok(())
     }
 
@@ -1148,6 +1186,11 @@ pub struct VerifyReport {
     /// for headings whose text an earlier heading has.
     pub listed_places: u64,
     pub repeated_headings: u64,
+    /// Every code point the text uses; glyphs in FONT, and the characters
+    /// of the text the firmware's fonts lack that FONT has no glyph for.
+    pub text_chars: crate::normalize::CharSet,
+    pub font_glyphs: usize,
+    pub without_glyph: Vec<char>,
     pub text_bytes: u64,
     pub image_bytes: u64,
     /// The first [`VerifyReport::MAX_LISTED`] problems.

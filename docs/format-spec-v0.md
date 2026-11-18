@@ -1,7 +1,7 @@
 # Offline wiki archive format, draft v0
 
 Status: draft for review. The format is XWA (`.xwa` files); the converter
-is xwa-tool. This text describes version 0.3. Everything here is open to
+is xwa-tool. This text describes version 0.4. Everything here is open to
 change until the first reader and writer agree on it.
 
 ## 1. Goals
@@ -63,7 +63,7 @@ offset 0      Superblock (4096 bytes)
 |---|---|---|
 | 0 | u8[8] | magic `XWA\0\r\n\x1a\n` |
 | 8 | u16 | version_major (0 = draft) |
-| 10 | u16 | version_minor (3 = this text) |
+| 10 | u16 | version_minor (4 = this text) |
 | 12 | u32 | superblock_size (4096) |
 | 16 | u64 | file_size |
 | 24 | u32 | required_features (bitset, see 3.3) |
@@ -94,7 +94,9 @@ title index (6.2, 6.4) for a most-popular-first search (6.5), shortened the
 inner blocks' keys (6.4), fixed the chunk size (7.1), made heading anchors
 stateless (7.2), gave icons a size (7.3) and formula records a length
 (8.1), wrote down what readers may rely on in text (7.3), added DAYS (5.3),
-and changed the checksums from CRC32C to CRC-32.
+and changed the checksums from CRC32C to CRC-32. Version 0.4 made FONT
+outline glyphs that one rasteriser draws at any size (10), and gave tables
+their caption (7.4).
 
 ### 3.2 Section types
 
@@ -110,7 +112,7 @@ and changed the checksums from CRC32C to CRC-32.
 | 8 | IMAGE_TABLE | if images | Image records |
 | 9 | MATH_GLYPHS | if math | Glyph outline table |
 | 10 | ZSTD_DICT | optional | Shared zstd dictionary (zstd archives only) |
-| 11 | FONT | optional | Fallback font (a complete `.cpfont` v4 file) |
+| 11 | FONT | optional | Outline glyphs for what the firmware's fonts lack (10) |
 | 12 | WORD_INDEX | optional | Title-word search index (later) |
 | 13 | FOLD | yes | How to fold search input (6.1) |
 | 14 | DAYS | optional | The article for each day of the year (5.3) |
@@ -523,12 +525,17 @@ TABLE: varint rows, varint cols, u8 flags (reserved), varint cell_count,
        per cell (row-major, by top-left corner):
                  u8 cell_flags (bit0 header), varint rowspan, varint colspan,
                  inline run
+       inline run (the caption; empty when the table has none)
 INFOBOX: varint row_count, per row: u8 kind, then by kind:
          0 header: inline run
          1 image: varint image_id, inline run (caption)
          2 field: inline run (label), inline run (value)
          3 full width: inline run
 ```
+
+The caption belongs to the table, not to the text around it, so a reader
+that shows tables in a viewer of their own can title them there, and show
+the table in the text as a line ("Table: caption") that opens it.
 
 ## 8. Math
 
@@ -675,10 +682,78 @@ feature bit 3.
 
 ## 10. Fallback font (FONT)
 
-A complete `.cpfont` v4 file (the firmware's existing SD font format),
-subset to the code points the archive needs that the built-in fonts do not
-cover. Replaces the 16 MB FBF1 blob appended to every `.img` today. The
-firmware needs an offset-based variant of its existing `.cpfont` loader.
+Outline glyphs for the characters an archive's text uses that the
+firmware's built-in reader fonts cannot draw, in the MATH_GLYPHS outline
+encoding (8.2), so the rasteriser that draws formulas draws them too, at
+any size and with anti-aliasing. A reader draws a character from FONT when
+its own font lacks it, so a reader font from the SD card with more
+coverage is still used where it has the glyph.
+
+```
+u16 upem, i16 ascender, i16 descender, u16 line_gap
+u32 range_count, then per range (sorted, not overlapping):
+    u32 first_code_point, u32 last_code_point, u32 first_glyph
+    (glyph = first_glyph + code point - first_code_point)
+u32 glyph_count
+u16 advance[glyph_count]            (font units)
+u32 glyph_offset[glyph_count + 1]   (from the start of the glyph data)
+glyph data: per glyph i16 xmin, ymin, xmax, ymax, then MOVE, LINE, QUAD,
+            CUBIC and CLOSE commands and END, as MATH_GLYPHS (8.2)
+```
+
+xwa-tool writes `upem` 1000, ascender 1069, descender −293 and line gap 0
+(Noto Sans's), scales every glyph to 1000 units per em, and numbers the
+glyphs in code point order, one range per run of consecutive code points.
+A glyph is drawn at the size of the text around it; one that draws nothing
+but takes space (U+3000) has an empty outline. There is no hinting, and
+regular weight only: bold and italic text uses the same glyphs.
+
+**What it holds.** Every code point the text uses (titles, contents
+entries, body, captions, tables, the infobox, preformatted text, display
+titles in the title index, and META's title and description), except the
+firmware's built-in coverage below and characters that draw nothing
+(control characters and Unicode's default-ignorable code points: joiners,
+direction marks, variation selectors, tags). For the Arabic letters among
+them it adds their presentation forms (U+FB50-FDFF and U+FE70-FEFF that
+decompose to the letter) and the Lam-Alef ligatures (U+FEF5-FEFC), which
+the firmware's shaper turns Arabic into (7.3). Glyphs are per code point:
+combining marks are drawn on their base by the reader, and scripts that
+need complex shaping (Indic conjuncts, Khmer, Myanmar) are drawn letter by
+letter.
+
+The built-in coverage, the code points both of the firmware's reader
+fonts (Bookerly and Noto Sans, 10-18 pt) draw:
+
+```
+0000, 000D, 0020-007E, 00A0-017F, 01A0-01A1, 01AF-01B0, 01C4-01F5,
+01F8-021F, 0300-0304, 0306-030C, 030F, 0311-0315, 031B, 0323-0329,
+032D-032E, 0330-0331, 0342, 0344-0345, 0400-045F, 0462-0463, 0472-0475,
+048A-04FF, 1EA0-1EF9, 2000-2030, 2032-203C, 203E, 2043-2044,
+2047-2049, 2053, 2057, 205F-2064, 2070, 2074-2079, 207F-2089,
+20A3-20A4, 20A7, 20AC, 2212, FB00-FB06, FFFD
+```
+
+**Where the glyphs come from.** The Noto fonts (SIL Open Font License
+1.1; META `license.font` says so), as Google Fonts serves them, looked in
+in this order: Noto Sans (Latin, Greek, Cyrillic, IPA, Devanagari), each
+script's own Noto font (Arabic, Hebrew, Armenian, Georgian, the Indic and
+Southeast Asian scripts, Ethiopic, and 30 more), Noto Sans Math, Noto Sans
+Symbols and Symbols 2, the CJK fonts, and Noto Emoji (monochrome). The CJK
+fonts go in the order the archive's language wants: Japanese takes JP
+first, Korean KR, Cantonese HK, and everything else SC, then TC, HK, JP
+and KR; a character in a CJK block (CJK punctuation, kana, Hangul, Han,
+full-width forms) looks in them before any other. `cargo xtask fonts`
+pins each font's file, checksum and coverage; the converter downloads only
+the fonts an archive needs, the first time, and keeps them. Optional
+feature bit 0 is set when FONT is present.
+
+Measured: 2 glyphs for the Ray Charles selection, 457 (135 KB) for Simple
+Wiktionary, 2,599 (0.9 MB, 0.55% of the archive) for chemistry, 6,816 (2.2
+MB, 3%) for mathematics and 10,157 (4.8 MB, 0.56%) for Swedish Wikipedia's
+2.6 million articles. A Han character takes about 590 bytes, most other
+glyphs 200-300. What no Noto font draws is rare: private-use and
+unassigned code points in the source text, some of CJK extension B, and
+symbols added in Unicode 15 and 16 (`xwa-tool verify` lists them).
 
 ## 11. Device I/O budget (expected)
 

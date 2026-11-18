@@ -42,7 +42,7 @@ fn put_i16s(out: &mut Vec<u8>, values: &[i16]) {
     }
 }
 
-fn encode_outline(o: &Outline, out: &mut Vec<u8>) {
+pub(crate) fn encode_outline(o: &Outline, out: &mut Vec<u8>) {
     put_i16s(out, &o.bbox);
     for op in &o.ops {
         match *op {
@@ -136,7 +136,7 @@ fn i16s(g: &[u8], p: &mut usize, n: usize) -> std::result::Result<Vec<i16>, Stri
         .collect())
 }
 
-fn decode_outline(g: &[u8]) -> std::result::Result<Outline, String> {
+pub(crate) fn decode_outline(g: &[u8]) -> std::result::Result<Outline, String> {
     let mut p = 0usize;
     let bb = i16s(g, &mut p, 4)?;
     let mut o = Outline {

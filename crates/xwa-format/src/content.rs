@@ -197,6 +197,8 @@ pub struct Table {
     pub flags: u8,
     /// Cells in row-major order of their top-left corners.
     pub cells: Vec<Cell>,
+    /// The table's caption (empty when it has none).
+    pub caption: Vec<Inline>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -514,6 +516,7 @@ pub fn text_problems(a: &Article) -> Vec<String> {
         for c in &t.cells {
             run(&c.content, &mut problems);
         }
+        run(&t.caption, &mut problems);
     }
     if let Some(ib) = &a.infobox {
         for row in &ib.rows {
@@ -772,6 +775,7 @@ fn encode_table(out: &mut Vec<u8>, t: &Table) {
         varint::put(out, c.colspan as u64);
         encode_run(out, &c.content);
     }
+    encode_run(out, &t.caption);
 }
 
 fn encode_infobox(out: &mut Vec<u8>, ib: &Infobox) {
@@ -1189,6 +1193,7 @@ fn decode_table(c: &mut Cursor) -> Result<Table> {
         cols: c.u32v()?,
         flags: c.u8()?,
         cells: Vec::new(),
+        caption: Vec::new(),
     };
     let n = c.count()?;
     t.cells.reserve(n);
@@ -1201,6 +1206,7 @@ fn decode_table(c: &mut Cursor) -> Result<Table> {
             content: decode_run(c)?,
         });
     }
+    t.caption = decode_run(c)?;
     Ok(t)
 }
 
@@ -1349,6 +1355,7 @@ pub fn for_each_link_mut(a: &mut Article, f: &mut impl FnMut(u32, &mut Place)) {
     blocks(&mut a.body, f);
     for t in &mut a.tables {
         t.cells.iter_mut().for_each(|c| inlines(&mut c.content, f));
+        inlines(&mut t.caption, f);
     }
     if let Some(ib) = &mut a.infobox {
         for row in &mut ib.rows {
@@ -1376,6 +1383,49 @@ pub enum Ref<'a> {
     /// Index into the article's own table list.
     Table(u32),
     Infobox,
+}
+
+/// Calls `f` with every piece of text an article shows: its title, the
+/// text of its body, tables and infobox, captions and preformatted text.
+pub fn for_each_text<'a>(a: &'a Article, f: &mut impl FnMut(&'a str)) {
+    fn inlines<'a>(list: &'a [Inline], f: &mut impl FnMut(&'a str)) {
+        for i in list {
+            match i {
+                Inline::Text(t) => f(t),
+                Inline::Styled(_, c) | Inline::Link { content: c, .. } => inlines(c, f),
+                Inline::Math(_) | Inline::Icon { .. } | Inline::Break | Inline::NoteRef(_) => {}
+            }
+        }
+    }
+    fn blocks<'a>(list: &'a [Block], f: &mut impl FnMut(&'a str)) {
+        for b in list {
+            match b {
+                Block::Para(c) | Block::Heading { content: c, .. } => inlines(c, f),
+                Block::Figure { caption, .. } => inlines(caption, f),
+                Block::Gallery(items) => items.iter().for_each(|(_, c)| inlines(c, f)),
+                Block::List { items, .. } => items.iter().for_each(|i| blocks(i, f)),
+                Block::Quote(inner) => blocks(inner, f),
+                Block::Pre(t) => f(t),
+                Block::MathBlock(_) | Block::TableRef(_) | Block::InfoboxRef | Block::Rule => {}
+            }
+        }
+    }
+    f(&a.title);
+    blocks(&a.body, f);
+    for t in &a.tables {
+        t.cells.iter().for_each(|c| inlines(&c.content, f));
+        inlines(&t.caption, f);
+    }
+    for row in a.infobox.iter().flat_map(|ib| &ib.rows) {
+        match row {
+            InfoboxRow::Header(c) | InfoboxRow::Full(c) => inlines(c, f),
+            InfoboxRow::Image { caption, .. } => inlines(caption, f),
+            InfoboxRow::Field { label, value } => {
+                inlines(label, f);
+                inlines(value, f);
+            }
+        }
+    }
 }
 
 /// Calls `f` for every reference in the article, in document order.
@@ -1430,6 +1480,7 @@ pub fn walk_refs<'a>(a: &'a Article, f: &mut impl FnMut(Ref<'a>)) {
     blocks(&a.body, f);
     for t in &a.tables {
         t.cells.iter().for_each(|c| inlines(&c.content, f));
+        inlines(&t.caption, f);
     }
     if let Some(ib) = &a.infobox {
         for row in &ib.rows {
@@ -1568,6 +1619,10 @@ mod tests {
                 },
             ],
             tables: vec![Table {
+                caption: vec![
+                    text("Areas of the "),
+                    Inline::Styled(Style::Italic, vec![text("squares")]),
+                ],
                 rows: 2,
                 cols: 2,
                 flags: 1,

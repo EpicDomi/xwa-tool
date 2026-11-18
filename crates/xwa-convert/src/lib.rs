@@ -6,6 +6,7 @@
 //! directory before any article is read.
 
 mod days;
+pub mod fallback;
 pub mod html;
 pub mod images;
 pub mod links;
@@ -82,6 +83,9 @@ pub struct Options {
     /// Where to get sharper copies of diagrams than the ZIM's pictures
     /// (Wikimedia, over the internet), if anywhere.
     pub diagrams: Option<Arc<Diagrams>>,
+    /// Where to get the Noto fonts the fallback FONT is drawn from (spec
+    /// 10); without it the archive has no FONT.
+    pub fonts: Option<Arc<xwa_fetch::fonts::Fonts>>,
 }
 
 impl Options {
@@ -93,6 +97,7 @@ impl Options {
             jpeg_quality: 75,
             math: true,
             diagrams: None,
+            fonts: None,
         }
     }
 }
@@ -108,6 +113,9 @@ pub enum Stage {
     Diagrams,
     /// Converting pictures; `done` and `total` count images.
     Images,
+    /// Getting the fonts the fallback FONT is drawn from; `done` and
+    /// `total` count fonts.
+    Fonts,
     /// Building the title index and writing the tables.
     Finishing,
 }
@@ -136,6 +144,8 @@ pub struct Report {
     pub diagrams: Option<FetchReport>,
     /// Pictures stored from a sharper copy.
     pub sharper_images: u64,
+    /// What building the fallback FONT found, when it was asked for.
+    pub fallback_font: Option<fallback::Report>,
     pub zim_bytes: u64,
     pub elapsed: Duration,
 }
@@ -766,6 +776,57 @@ fn convert_inner(
         })?;
     }
 
+    // Glyphs for what the firmware's own fonts cannot draw.
+    let fallback_font = match &opts.fonts {
+        Some(fonts) => {
+            let text = writer.text_chars();
+            let wanted = fallback::wanted(&text);
+            let language = zim
+                .metadata("Language")?
+                .map(|v| String::from_utf8_lossy(&v).trim().to_string());
+            let order = fallback::search_order(fallback::catalogue(), language.as_deref());
+            let total = fallback::fonts_needed(&wanted, &order) as u64;
+            check(Progress {
+                stage: Stage::Fonts,
+                done: 0,
+                total,
+            })?;
+            let mut done = 0u64;
+            let mut stopped = None;
+            // Once the network fails, only fonts already kept are used, so an
+            // offline conversion does not wait for every font in turn.
+            let mut offline = false;
+            let (font, report) = fallback::build(&wanted, &text, &order, &mut |f| {
+                if stopped.is_some() {
+                    return Err("cancelled".to_string());
+                }
+                if offline && !fonts.is_cached(&f.sha256) {
+                    return Err("not downloaded: no connection".to_string());
+                }
+                let data = fonts.get(&f.url, &f.sha256, f.size);
+                offline |= matches!(data, Err(xwa_fetch::Error::Network(_)));
+                let data = data.map_err(|e| e.to_string());
+                done += 1;
+                if let Err(e) = check(Progress {
+                    stage: Stage::Fonts,
+                    done,
+                    total: total.max(done),
+                }) {
+                    stopped = Some(e);
+                }
+                data
+            });
+            if let Some(e) = stopped {
+                return Err(e);
+            }
+            if let Some(font) = font {
+                writer.set_font(font);
+                writer.set_meta("license.font", fallback::LICENSE);
+            }
+            Some(report)
+        }
+        None => None,
+    };
     check(Progress {
         stage: Stage::Finishing,
         done: 0,
@@ -801,6 +862,7 @@ fn convert_inner(
         pages_left_out,
         diagrams: diagram_report,
         sharper_images,
+        fallback_font,
         zim_bytes,
         elapsed: started.elapsed(),
     })
