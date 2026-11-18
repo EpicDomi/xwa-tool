@@ -873,11 +873,11 @@ impl Cx<'_> {
             flow.run.extend(run);
             return;
         }
-        if let Some(c) = caption.filter(|c| !c.is_empty()) {
-            flow.block(Block::Para(vec![styled(Style::Bold, c)]));
-        }
         self.stats.tables += 1;
-        self.tables.push(table);
+        self.tables.push(Table {
+            caption: caption.unwrap_or_default(),
+            ..table
+        });
         flow.block(Block::TableRef(self.tables.len() as u32 - 1));
     }
 
@@ -939,6 +939,7 @@ impl Cx<'_> {
             cols: cols as u32,
             flags: 0,
             cells,
+            caption: Vec::new(),
         }
     }
 
@@ -1637,6 +1638,7 @@ pub fn for_each_formula_mut(a: &mut Article, f: &mut impl FnMut(&mut Formula)) {
     blocks(&mut a.body, f);
     for t in &mut a.tables {
         t.cells.iter_mut().for_each(|c| inlines(&mut c.content, f));
+        inlines(&mut t.caption, f);
     }
     if let Some(ib) = &mut a.infobox {
         for row in &mut ib.rows {
@@ -1694,6 +1696,7 @@ pub fn for_each_image_mut(a: &mut Article, f: &mut impl FnMut(&mut u32)) {
     blocks(&mut a.body, f);
     for t in &mut a.tables {
         t.cells.iter_mut().for_each(|c| inlines(&mut c.content, f));
+        inlines(&mut t.caption, f);
     }
     if let Some(ib) = &mut a.infobox {
         for row in &mut ib.rows {
@@ -1965,14 +1968,10 @@ mod tests {
             <tr><th rowspan="2">Name</th><th colspan="2">Lengths</th></tr>
             <tr><th>a</th><th>b</th></tr>
             <tr><td>Small</td><td>3</td><td><ul><li>4</li><li>four</li></ul></td></tr></tbody></table>"#);
-        assert_eq!(
-            x.article.body,
-            vec![
-                Block::Para(vec![Inline::Styled(Style::Bold, vec![text("Sides")])]),
-                Block::TableRef(0)
-            ]
-        );
+        // The caption goes with the table, for the table viewer.
+        assert_eq!(x.article.body, vec![Block::TableRef(0)]);
         let t = &x.article.tables[0];
+        assert_eq!(t.caption, vec![text("Sides")]);
         assert_eq!((t.rows, t.cols, t.cells.len()), (3, 3, 7));
         assert_eq!((t.cells[0].rowspan, t.cells[1].colspan), (2, 2));
         assert_eq!(
@@ -2143,12 +2142,13 @@ mod more_tests {
             ]
         );
         assert_eq!(x.stats.tables_dropped, 1);
+        assert_eq!(x.article.body[1], Block::TableRef(0));
         assert_eq!(
-            x.article.body[1],
-            Block::Para(vec![Inline::Styled(
-                Style::Bold,
-                vec![text("Bold caption")]
-            )])
+            x.article.tables[0].caption,
+            vec![
+                Inline::Styled(Style::Bold, vec![text("Bold")]),
+                text(" caption")
+            ]
         );
     }
 }

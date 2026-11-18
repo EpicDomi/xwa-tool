@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-use crate::normalize::{KeyChars, search_key};
+use crate::normalize::{CharSet, search_key};
 use crate::{BLOCK_SIZE, varint};
 
 const LEAF_HEADER: usize = 4;
@@ -191,7 +191,7 @@ pub struct LeafWriter<W: Write> {
     /// The highest popularity in each finished leaf, and in this one.
     leaf_popularity: Vec<u8>,
     popularity: u8,
-    key_chars: KeyChars,
+    key_chars: CharSet,
     scratch: Vec<u8>,
     entry_count: usize,
     redirect_count: usize,
@@ -207,7 +207,7 @@ pub struct Leaves<W> {
     /// The highest popularity in each leaf block, for [`build_inner`].
     pub leaf_popularity: Vec<u8>,
     /// The characters the keys use, for the FOLD section.
-    pub key_chars: KeyChars,
+    pub key_chars: CharSet,
     pub entry_count: usize,
     /// Entries with [`FLAG_REDIRECT`].
     pub redirect_count: usize,
@@ -229,7 +229,7 @@ impl<W: Write> LeafWriter<W> {
             separators: Vec::new(),
             leaf_popularity: Vec::new(),
             popularity: 0,
-            key_chars: KeyChars::default(),
+            key_chars: CharSet::default(),
             scratch: Vec::new(),
             entry_count: 0,
             redirect_count: 0,

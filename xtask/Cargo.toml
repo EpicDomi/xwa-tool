@@ -4,10 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Repository chores: the release's third-party notice, and the table of day articles"
+description = "Repository chores: the release's third-party notice, and the day article and font tables"
 repository.workspace = true
 
 [dependencies]
 serde_json.workspace = true
+sha2.workspace = true
+ttf-parser.workspace = true
 ureq.workspace = true
 zstd.workspace = true

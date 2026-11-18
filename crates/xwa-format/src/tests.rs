@@ -139,6 +139,11 @@ fn article(id: u32) -> Article {
             11 => {
                 body.push(Block::TableRef(tables.len() as u32));
                 tables.push(Table {
+                    caption: if rng.below(2) == 0 {
+                        vec![Inline::Text(words(&mut rng, 3))]
+                    } else {
+                        Vec::new()
+                    },
                     rows: 2,
                     cols: 2,
                     flags: 0,
@@ -393,6 +398,48 @@ fn small_full_archive_has_no_dictionary() {
     assert!(!a.has_dictionary());
     assert!(a.verify(&mut |_, _, _| {}).unwrap().ok());
     assert_eq!(a.search("on", 5).unwrap()[0].article, 0);
+}
+
+#[test]
+fn the_fallback_font_covers_the_text_and_verify_says_what_it_lacks() {
+    use crate::font::{Font, Glyph};
+    use crate::math_glyphs::Outline;
+    let mut w = ArchiveWriter::new(Cursor::new(Vec::new()), options(Profile::Compact)).unwrap();
+    let article = Article {
+        title: "Pi".into(),
+        body: vec![Block::Para(vec![Inline::Text("π and ω".into())])],
+        ..Default::default()
+    };
+    w.add_article(0, &article, 0).unwrap();
+    w.add_redirect("Пи → π", 0, None).unwrap();
+    w.set_meta("description", "数学");
+    let chars = w.text_chars();
+    for c in ['P', 'π', 'ω', '→', '数'] {
+        assert!(chars.contains(c), "{c}");
+    }
+    let mut font = Font {
+        upem: 1000,
+        ascender: 1069,
+        descender: -293,
+        ..Default::default()
+    };
+    font.glyphs.insert(
+        'π',
+        Glyph {
+            advance: 600,
+            outline: Outline::default(),
+        },
+    );
+    w.set_font(font.encode().unwrap());
+    let (bytes, _) = finish(w);
+    let a = Archive::from_source(bytes).unwrap();
+    assert_eq!(a.font().unwrap().unwrap(), font);
+    let r = a.verify(&mut |_, _, _| {}).unwrap();
+    assert!(r.ok(), "{:?}", r.problems);
+    assert_eq!(r.font_glyphs, 1);
+    // ω from the body and → from the redirect; Cyrillic is the firmware's
+    // own, and META is not checked.
+    assert_eq!(r.without_glyph, ['ω', '→']);
 }
 
 #[test]

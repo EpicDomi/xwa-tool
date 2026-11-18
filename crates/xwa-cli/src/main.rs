@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use xwa_convert::{Device, Stage};
+use xwa_fetch::fonts::Fonts;
 use xwa_fetch::wikimedia::Diagrams;
 use xwa_format::content::{Place, for_each_link_mut};
 use xwa_format::normalize::search_key;
@@ -60,6 +61,15 @@ enum Command {
         /// system's cache folder).
         #[arg(long, requires = "hd_diagrams")]
         hd_cache: Option<PathBuf>,
+        /// Leave out the fallback font that draws the characters the
+        /// e-reader's own fonts lack (Greek, IPA, symbols, other scripts).
+        /// Its Noto fonts are downloaded the first time they are needed.
+        #[arg(long)]
+        no_fallback_font: bool,
+        /// Where the fallback font's Noto fonts are kept for next time
+        /// (default: the system's cache folder).
+        #[arg(long, conflicts_with = "no_fallback_font")]
+        font_cache: Option<PathBuf>,
     },
     /// List the ZIM files in the Kiwix library.
     Catalog {
@@ -185,11 +195,20 @@ fn main() -> ExitCode {
             math_as_text,
             hd_diagrams,
             hd_cache,
+            no_fallback_font,
+            font_cache,
         } => {
             let device = match device {
                 DeviceArg::X4Pro => Device::X4Pro,
                 DeviceArg::X4 => Device::X4,
                 DeviceArg::X3 => Device::X3,
+            };
+            let fonts = if no_fallback_font {
+                None
+            } else {
+                font_cache
+                    .or_else(Fonts::default_cache)
+                    .map(|cache| std::sync::Arc::new(Fonts::new(cache)))
             };
             match diagram_source(hd_diagrams && !no_images, hd_cache) {
                 Ok(diagrams) => {
@@ -200,6 +219,7 @@ fn main() -> ExitCode {
                         jpeg_quality,
                         math: !math_as_text,
                         diagrams,
+                        fonts,
                     };
                     convert(&zim, out, &opts)
                 }
@@ -258,6 +278,7 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
             Stage::Articles => "converting articles",
             Stage::Diagrams => "downloading sharper diagrams",
             Stage::Images => "converting pictures",
+            Stage::Fonts => "getting fonts for the fallback font",
             Stage::Finishing => "writing the title index and tables",
         };
         progress.update(stage, p.done, p.total);
@@ -309,6 +330,43 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         );
         if let Some(why) = &d.stopped {
             println!("  sharper diagrams stopped early: {why}");
+        }
+    }
+    if let Some(f) = &r.fallback_font {
+        println!(
+            "  fallback font: {} glyphs ({:.1} MB) from {}{}",
+            f.glyphs,
+            mb(f.bytes as u64),
+            if f.fonts.is_empty() {
+                "no font".to_string()
+            } else {
+                f.fonts.join(", ")
+            },
+            if f.missing > 0 {
+                format!("; {} characters have no glyph", f.missing)
+            } else {
+                String::new()
+            }
+        );
+        // One line per reason: offline, every font fails the same way.
+        let mut reasons: Vec<(&str, Vec<&str>)> = Vec::new();
+        for (family, why) in &f.failed {
+            match reasons.iter_mut().find(|(w, _)| *w == why.as_str()) {
+                Some((_, families)) => families.push(family),
+                None => reasons.push((why, vec![family])),
+            }
+        }
+        for (why, families) in reasons {
+            let names = if families.len() > 3 {
+                format!(
+                    "{} and {} more",
+                    families[..3].join(", "),
+                    families.len() - 3
+                )
+            } else {
+                families.join(", ")
+            };
+            println!("  fallback font: could not get {names}: {why}");
         }
     }
     println!(
@@ -510,6 +568,9 @@ fn xwa_info(path: &Path) -> CliResult {
             .map_or(String::new(), |g| format!(", {g} math glyphs"))
     );
     println!("  {} folding rules for search", a.fold_entries());
+    if let Some(font) = a.font()? {
+        println!("  {} glyphs in the fallback font", font.glyphs.len());
+    }
     if let Some(days) = a.days()? {
         let found = days.iter().flatten().count();
         println!("  an article for {found} of the 366 days of the year");
@@ -593,6 +654,19 @@ fn verify(path: &Path) -> CliResult {
             r.anchor_links,
             r.anchor_links_found,
             r.anchor_links - r.anchor_links_found
+        );
+    }
+    if r.font_glyphs > 0 || !r.without_glyph.is_empty() {
+        let sample: String = r.without_glyph.iter().take(24).collect();
+        println!(
+            "fallback font: {} glyphs; {} characters of the text the e-reader's fonts lack have none{}",
+            r.font_glyphs,
+            r.without_glyph.len(),
+            if sample.is_empty() {
+                String::new()
+            } else {
+                format!(" ({sample})")
+            }
         );
     }
     if r.listed_places > 0 {

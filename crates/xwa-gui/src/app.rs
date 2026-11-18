@@ -9,6 +9,7 @@ use iced::widget::operation;
 use iced::{Point, Size, Subscription, Task, event, keyboard, mouse, window};
 use xwa_convert::Stage;
 use xwa_fetch::drives::Drive;
+use xwa_fetch::fonts::Fonts;
 use xwa_fetch::wikimedia::Diagrams;
 use xwa_fetch::{Book, Language, size_text};
 
@@ -1491,6 +1492,8 @@ impl App {
             .flatten()
             .map(|cache| Arc::new(Diagrams::new(cache)));
         let sharper = diagrams.is_some();
+        // The fallback font, for letters and symbols the e-reader's fonts lack.
+        let fonts = Fonts::default_cache().map(|cache| Arc::new(Fonts::new(cache)));
         self.converting_sharper = sharper;
         self.converting_images = images;
         let (tx, rx) = iced::futures::channel::mpsc::unbounded();
@@ -1498,6 +1501,7 @@ impl App {
             let opts = xwa_convert::Options {
                 images,
                 diagrams,
+                fonts,
                 ..xwa_convert::Options::new(device)
             };
             let mut throttle = Throttle::default();
@@ -1733,7 +1737,7 @@ fn conversion_progress(p: xwa_convert::Progress, images: bool, sharper: bool) ->
         Stage::Articles => "Converting articles",
         Stage::Diagrams => "Downloading sharper diagrams",
         Stage::Images => "Converting pictures",
-        Stage::Finishing => "Finishing",
+        Stage::Fonts | Stage::Finishing => "Finishing",
     };
     let step = steps.iter().position(|s| *s == name).unwrap_or(0);
     let part = if p.total == 0 {
@@ -1751,9 +1755,12 @@ fn conversion_progress(p: xwa_convert::Progress, images: bool, sharper: bool) ->
         Stage::Articles => 0.05 + articles * part,
         Stage::Diagrams => 0.05 + articles + diagrams * part,
         Stage::Images => 0.05 + articles + diagrams + pictures * part,
-        Stage::Finishing => 0.95 + 0.05 * part,
+        Stage::Fonts => 0.95 + 0.025 * part,
+        Stage::Finishing => 0.975 + 0.025 * part,
     };
-    let label = if p.total > 0 && p.stage != Stage::Finishing {
+    let label = if p.stage == Stage::Fonts {
+        format!("Fonts: {} of {}", group(p.done), group(p.total))
+    } else if p.total > 0 && p.stage != Stage::Finishing {
         format!("{} of {}", group(p.done), group(p.total))
     } else {
         String::new()

@@ -172,6 +172,8 @@ pub struct ArchiveWriter<W: Write + Seek> {
     /// The ARTICLES section, without popularity, which is set later.
     articles: Spool,
     popularity: Vec<u8>,
+    /// Every code point the text uses, for the fallback FONT (spec 10).
+    text_chars: normalize::CharSet,
     /// The TITLES section.
     titles: Spool,
     title_sorter: TitleSorter,
@@ -252,6 +254,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             chunks: Vec::new(),
             articles,
             popularity: Vec::new(),
+            text_chars: normalize::CharSet::default(),
             titles,
             title_sorter,
             max_redirect: None,
@@ -278,6 +281,17 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// article contains a formula.
     pub fn set_math_glyphs(&mut self, data: Vec<u8>) {
         self.set_extra(section::MATH_GLYPHS, data);
+    }
+
+    /// Every code point the archive's text uses so far: articles, the
+    /// titles of redirects, and META's values (the archive's title and
+    /// description).
+    pub fn text_chars(&self) -> normalize::CharSet {
+        let mut chars = self.text_chars.clone();
+        for (_, v) in &self.meta {
+            chars.insert_str(v);
+        }
+        chars
     }
 
     /// Supplies the fallback FONT section (spec 10).
@@ -355,6 +369,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             self.required |= required::MATH;
             self.summary.formulas += formulas;
         }
+        content::for_each_text(article, &mut |t| self.text_chars.insert_str(t));
         let stream = content::encode_article(article);
         self.summary.text_raw += stream.len() as u64;
 
@@ -410,6 +425,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         if title.is_empty() {
             return Ok(());
         }
+        self.text_chars.insert_str(title);
         if self
             .max_redirect
             .as_ref()

@@ -113,7 +113,13 @@ impl Renderer<'_> {
     }
 
     fn table(&mut self, t: &Table, indent: &str) {
-        self.line(indent, &format!("[table {}x{}]", t.rows, t.cols));
+        let caption = self.inlines(&t.caption);
+        let caption = if caption.is_empty() {
+            String::new()
+        } else {
+            format!(": {caption}")
+        };
+        self.line(indent, &format!("[table {}x{}{caption}]", t.rows, t.cols));
         for row in table_rows(t) {
             let cells: Vec<String> = row
                 .iter()
@@ -273,6 +279,7 @@ mod tests {
         // | a (2 rows) | b     |
         // |            | c | d |   <- 3 columns
         let t = Table {
+            caption: Vec::new(),
             rows: 2,
             cols: 3,
             flags: 0,

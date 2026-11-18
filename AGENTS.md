@@ -36,7 +36,11 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
 - `xtask`: repository chores; `cargo xtask licenses` writes the third-party
   notice that ships in every release zip, and `cargo xtask days` writes
   `crates/xwa-convert/data/days.tsv.zst`, each Wikipedia's day articles
-  from Wikidata, for the DAYS section.
+  from Wikidata, for the DAYS section; `cargo xtask fonts` writes
+  `crates/xwa-convert/data/fonts.tsv.zst`, the Noto fonts on Google Fonts
+  (address, SHA-256, coverage) that the fallback FONT is drawn from
+  (`xwa-convert/src/fallback.rs`; `xwa-fetch/src/fonts.rs` downloads and
+  keeps them).
 - `docs/format-spec-v0.md`: the format specification.
 
 ## Rules
@@ -53,5 +57,7 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   `src/components/themes/lyra/`): keep its sizes, fonts and icons in step
   with the firmware rather than inventing new ones.
 - Do not test sharper diagrams against Wikimedia from CI or shared servers:
-  point `XWA_TOOL_UPLOADS` at a local stand-in server instead.
+  point `XWA_TOOL_UPLOADS` at a local stand-in server instead. Likewise,
+  test the fallback font with stand-in fonts (KaTeX's) and a prepared
+  cache, not against Google Fonts.
 - Do not commit, tag, or push unless the user asks.
