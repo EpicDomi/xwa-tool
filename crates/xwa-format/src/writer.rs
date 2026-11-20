@@ -18,6 +18,7 @@ use std::thread::JoinHandle;
 
 use crate::codec::{ChunkCodec, MAX_CHUNK, train_dictionary};
 use crate::content::{self, Article, Ref};
+use crate::font::FontStyle;
 use crate::records::{
     ArticleRecord, ChunkEntry, ImageRecord, U24_MAX, U48_MAX, article_flags, image_encoding,
 };
@@ -174,6 +175,8 @@ pub struct ArchiveWriter<W: Write + Seek> {
     popularity: Vec<u8>,
     /// Every code point the text uses, for the fallback FONT (spec 10).
     text_chars: normalize::CharSet,
+    /// The code points articles draw bold, italic and bold italic.
+    styled_chars: [normalize::CharSet; 3],
     /// The TITLES section.
     titles: Spool,
     title_sorter: TitleSorter,
@@ -255,6 +258,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             articles,
             popularity: Vec::new(),
             text_chars: normalize::CharSet::default(),
+            styled_chars: Default::default(),
             titles,
             title_sorter,
             max_redirect: None,
@@ -294,10 +298,23 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         chars
     }
 
-    /// Supplies the fallback FONT section (spec 10).
-    pub fn set_font(&mut self, data: Vec<u8>) {
-        self.optional |= optional::FONT;
-        self.set_extra(section::FONT, data);
+    /// The code points articles so far draw in `style` (spec 10.1). Text
+    /// drawn in another style may use them too; for regular, this is
+    /// [`Self::text_chars`].
+    pub fn styled_chars(&self, style: FontStyle) -> normalize::CharSet {
+        match style {
+            FontStyle::Regular => self.text_chars(),
+            _ => self.styled_chars[style as usize - 1].clone(),
+        }
+    }
+
+    /// Supplies the fallback FONT section (spec 10), or for another style
+    /// FONT_BOLD, FONT_ITALIC or FONT_BOLD_ITALIC (10.1).
+    pub fn set_font(&mut self, style: FontStyle, data: Vec<u8>) {
+        if style == FontStyle::Regular {
+            self.optional |= optional::FONT;
+        }
+        self.set_extra(style.section(), data);
     }
 
     /// Supplies the DAYS section (spec 5.3): the article for each day of
@@ -369,7 +386,12 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             self.required |= required::MATH;
             self.summary.formulas += formulas;
         }
-        content::for_each_text(article, &mut |t| self.text_chars.insert_str(t));
+        content::for_each_styled_text(article, &mut |t, style| {
+            self.text_chars.insert_str(t);
+            if style != FontStyle::Regular {
+                self.styled_chars[style as usize - 1].insert_str(t);
+            }
+        });
         let stream = content::encode_article(article);
         self.summary.text_raw += stream.len() as u64;
 

@@ -1,5 +1,6 @@
 //! FONT section (spec 10): outline glyphs for the characters an archive's
-//! text uses that the firmware's own fonts cannot draw.
+//! text uses that the firmware's own fonts cannot draw. FONT_BOLD,
+//! FONT_ITALIC and FONT_BOLD_ITALIC (spec 10.1) share its layout.
 //!
 //! ```text
 //! u16 upem, i16 ascender, i16 descender, u16 line_gap
@@ -112,6 +113,62 @@ pub fn draws_nothing(c: char) -> bool {
 /// Whether FONT should have a glyph for `c` when the text uses it.
 pub fn needs_fallback(c: char) -> bool {
     !is_built_in(c) && !draws_nothing(c)
+}
+
+/// The style a font section draws (spec 10.1), and the style text is
+/// drawn in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FontStyle {
+    Regular,
+    Bold,
+    Italic,
+    BoldItalic,
+}
+
+impl FontStyle {
+    pub const ALL: [FontStyle; 4] = [
+        FontStyle::Regular,
+        FontStyle::Bold,
+        FontStyle::Italic,
+        FontStyle::BoldItalic,
+    ];
+
+    pub fn new(bold: bool, italic: bool) -> Self {
+        match (bold, italic) {
+            (false, false) => FontStyle::Regular,
+            (true, false) => FontStyle::Bold,
+            (false, true) => FontStyle::Italic,
+            (true, true) => FontStyle::BoldItalic,
+        }
+    }
+
+    pub fn is_bold(self) -> bool {
+        matches!(self, FontStyle::Bold | FontStyle::BoldItalic)
+    }
+
+    pub fn is_italic(self) -> bool {
+        matches!(self, FontStyle::Italic | FontStyle::BoldItalic)
+    }
+
+    /// The section that holds this style's glyphs.
+    pub fn section(self) -> u32 {
+        match self {
+            FontStyle::Regular => crate::section::FONT,
+            FontStyle::Bold => crate::section::FONT_BOLD,
+            FontStyle::Italic => crate::section::FONT_ITALIC,
+            FontStyle::BoldItalic => crate::section::FONT_BOLD_ITALIC,
+        }
+    }
+
+    /// The section's name.
+    pub fn section_name(self) -> &'static str {
+        match self {
+            FontStyle::Regular => "FONT",
+            FontStyle::Bold => "FONT_BOLD",
+            FontStyle::Italic => "FONT_ITALIC",
+            FontStyle::BoldItalic => "FONT_BOLD_ITALIC",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

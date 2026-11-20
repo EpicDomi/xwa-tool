@@ -1,16 +1,17 @@
 //! The fallback FONT (spec 10): outline glyphs, from the Noto fonts, for
 //! the characters an archive's text uses that the firmware's own fonts
-//! cannot draw. `cargo xtask fonts` makes the catalogue of fonts.
+//! cannot draw, and FONT_BOLD (10.1): their bold glyphs, from the bold of
+//! the same family. `cargo xtask fonts` makes the catalogue of fonts.
 
 use std::collections::BTreeMap;
 
 use ttf_parser::{Face, OutlineBuilder};
 use unicode_normalization::UnicodeNormalization;
-use xwa_format::font::{Font, Glyph, needs_fallback};
+use xwa_format::font::{Font, FontStyle, Glyph, needs_fallback};
 use xwa_format::math_glyphs::{GlyphOp, Outline};
 use xwa_format::normalize::CharSet;
 
-/// One line per font: family, URL, SHA-256, size, coverage.
+/// One line per file: family, style, URL, SHA-256, size, coverage.
 static CATALOGUE: &[u8] = include_bytes!("../data/fonts.tsv.zst");
 
 /// What every glyph is scaled to.
@@ -23,10 +24,9 @@ const DESCENDER: i16 = -293;
 pub const LICENSE: &str =
     "Fallback glyphs from the Noto fonts (Google Fonts), SIL Open Font License 1.1";
 
-/// A font the fallback can draw glyphs from.
+/// One style of a font family, as a file on Google Fonts.
 #[derive(Debug, Clone)]
-pub struct CatalogFont {
-    pub family: String,
+pub struct FontFile {
     pub url: String,
     pub sha256: String,
     pub size: u64,
@@ -34,7 +34,7 @@ pub struct CatalogFont {
     pub coverage: Vec<(u32, u32)>,
 }
 
-impl CatalogFont {
+impl FontFile {
     pub fn covers(&self, c: char) -> bool {
         let c = c as u32;
         let i = self.coverage.partition_point(|&(_, hi)| hi < c);
@@ -42,35 +42,78 @@ impl CatalogFont {
     }
 }
 
+/// A font family the fallback can draw glyphs from.
+#[derive(Debug, Clone)]
+pub struct CatalogFont {
+    pub family: String,
+    pub regular: FontFile,
+    /// Its bold, italic and bold italic, where the family has them.
+    pub styled: [Option<FontFile>; 3],
+}
+
+impl CatalogFont {
+    /// Whether its regular style has a glyph for `c`.
+    pub fn covers(&self, c: char) -> bool {
+        self.regular.covers(c)
+    }
+
+    /// The file for `style`, if the family has it.
+    pub fn file(&self, style: FontStyle) -> Option<&FontFile> {
+        match style {
+            FontStyle::Regular => Some(&self.regular),
+            _ => self.styled[style as usize - 1].as_ref(),
+        }
+    }
+}
+
 /// The catalogue, in the order fonts are looked in.
 pub fn catalogue() -> Vec<CatalogFont> {
     let table = zstd::decode_all(CATALOGUE).expect("the font catalogue is zstd");
     let table = String::from_utf8(table).expect("the font catalogue is UTF-8");
-    table
-        .lines()
-        .filter_map(|line| {
-            let mut f = line.split('\t');
-            let (family, url, sha256, size, cover) =
-                (f.next()?, f.next()?, f.next()?, f.next()?, f.next()?);
-            let coverage = cover
-                .split(',')
-                .filter_map(|r| {
-                    let (a, b) = r.split_once('-').unwrap_or((r, r));
-                    Some((
-                        u32::from_str_radix(a, 16).ok()?,
-                        u32::from_str_radix(b, 16).ok()?,
-                    ))
-                })
-                .collect();
-            Some(CatalogFont {
-                family: family.to_string(),
-                url: url.to_string(),
-                sha256: sha256.to_string(),
-                size: size.parse().ok()?,
-                coverage,
+    let mut out: Vec<CatalogFont> = Vec::new();
+    for line in table.lines() {
+        let mut f = line.split('\t');
+        let (Some(family), Some(style), Some(url), Some(sha256), Some(size), Some(cover)) =
+            (f.next(), f.next(), f.next(), f.next(), f.next(), f.next())
+        else {
+            continue;
+        };
+        let coverage = cover
+            .split(',')
+            .filter_map(|r| {
+                let (a, b) = r.split_once('-').unwrap_or((r, r));
+                Some((
+                    u32::from_str_radix(a, 16).ok()?,
+                    u32::from_str_radix(b, 16).ok()?,
+                ))
             })
-        })
-        .collect()
+            .collect();
+        let Ok(size) = size.parse() else { continue };
+        let file = FontFile {
+            url: url.to_string(),
+            sha256: sha256.to_string(),
+            size,
+            coverage,
+        };
+        // A family's regular file comes first, its other styles after it.
+        let styled = match style {
+            "bold" => FontStyle::Bold,
+            "italic" => FontStyle::Italic,
+            "bold-italic" => FontStyle::BoldItalic,
+            _ => {
+                out.push(CatalogFont {
+                    family: family.to_string(),
+                    regular: file,
+                    styled: Default::default(),
+                });
+                continue;
+            }
+        };
+        if let Some(font) = out.last_mut().filter(|f| f.family == family) {
+            font.styled[styled as usize - 1] = Some(file);
+        }
+    }
+    out
 }
 
 /// The CJK fonts in the order a text in `language` (ISO 639-3) wants them:
@@ -180,8 +223,20 @@ pub struct Report {
     pub fonts: Vec<String>,
     /// Characters of the text no font had a glyph for.
     pub missing: usize,
+    /// FONT_BOLD and the like: glyphs, size, and the code points asked
+    /// for that their family has no face for, which the reader
+    /// synthesises.
+    pub styled: Vec<StyledReport>,
     /// Fonts that could not be had, and why.
     pub failed: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StyledReport {
+    pub style: FontStyle,
+    pub glyphs: usize,
+    pub bytes: usize,
+    pub synthesised: usize,
 }
 
 /// Collects a glyph's outline in the FONT encoding, scaled to [`UPEM`].
@@ -256,48 +311,110 @@ fn glyph(face: &Face, c: char) -> Option<Glyph> {
     })
 }
 
-/// The fonts in `fonts` that [`build`] would load for `wanted`, when every
-/// one can be had.
-pub fn fonts_needed(wanted: &[char], fonts: &[CatalogFont]) -> usize {
-    let (cjk, rest): (Vec<char>, Vec<char>) = wanted.iter().partition(|&&c| is_cjk(c));
+/// The font in `fonts` a character's regular glyph is first looked for
+/// in: a CJK font for a character in a CJK block, then the first that has
+/// it.
+fn source(c: char, fonts: &[CatalogFont]) -> Option<usize> {
+    is_cjk(c)
+        .then(|| fonts.iter().position(|f| is_cjk_font(f) && f.covers(c)))
+        .flatten()
+        .or_else(|| fonts.iter().position(|f| f.covers(c)))
+}
+
+/// The font files [`build`] would load for `wanted` and `styled`, when
+/// every one can be had.
+pub fn fonts_needed(
+    wanted: &[char],
+    styled: &[(FontStyle, Vec<char>)],
+    fonts: &[CatalogFont],
+) -> usize {
     let mut used = std::collections::BTreeSet::new();
-    for c in cjk {
-        if let Some(f) = fonts.iter().find(|f| is_cjk_font(f) && f.covers(c)) {
-            used.insert(f.family.as_str());
-            continue;
-        }
-        if let Some(f) = fonts.iter().find(|f| f.covers(c)) {
-            used.insert(f.family.as_str());
+    for &c in wanted {
+        if let Some(i) = source(c, fonts) {
+            used.insert((i, FontStyle::Regular));
         }
     }
-    for c in rest {
-        if let Some(f) = fonts.iter().find(|f| f.covers(c)) {
-            used.insert(f.family.as_str());
+    for (style, chars) in styled {
+        for &c in chars {
+            if let Some(i) = source(c, fonts)
+                && fonts[i].file(*style).is_some_and(|f| f.covers(c))
+            {
+                used.insert((i, *style));
+            }
         }
     }
     used.len()
 }
 
-/// Builds FONT for `wanted` from `fonts`, looking in them in order. `load`
-/// gives a font's file; when it fails, the characters are looked for in
-/// the fonts after it. `None` when no glyph was found.
+/// Gives a font file's bytes.
+pub type Load<'a> = dyn FnMut(&CatalogFont, &FontFile) -> Result<Vec<u8>, String> + 'a;
+
+/// Font files, each loaded once.
+struct Files<'a> {
+    load: &'a mut Load<'a>,
+    /// By SHA-256; `None` for one that could not be had.
+    loaded: BTreeMap<String, Option<Vec<u8>>>,
+}
+
+impl Files<'_> {
+    fn open(
+        &mut self,
+        font: &CatalogFont,
+        file: &FontFile,
+        report: &mut Report,
+    ) -> Option<Face<'_>> {
+        let load = &mut self.load;
+        let entry =
+            self.loaded
+                .entry(file.sha256.clone())
+                .or_insert_with(|| match load(font, file) {
+                    Ok(d) if Face::parse(&d, 0).is_ok() => Some(d),
+                    Ok(_) => {
+                        report
+                            .failed
+                            .push((font.family.clone(), "not a font".to_string()));
+                        None
+                    }
+                    Err(e) => {
+                        report.failed.push((font.family.clone(), e));
+                        None
+                    }
+                });
+        entry.as_deref().and_then(|d| Face::parse(d, 0).ok())
+    }
+}
+
+/// Builds FONT for `wanted` from `fonts`, looking in them in order, and
+/// for each of `styled` its section: the glyph of each code point FONT
+/// has, from that style of the family its regular glyph came from. `load`
+/// gives a font file; when a regular one fails, the characters are looked
+/// for in the fonts after it. Gives each section that has a glyph.
 pub fn build(
     wanted: &[char],
     text: &CharSet,
+    styled: &[(FontStyle, Vec<char>)],
     fonts: &[CatalogFont],
-    load: &mut dyn FnMut(&CatalogFont) -> Result<Vec<u8>, String>,
-) -> (Option<Vec<u8>>, Report) {
+    load: &mut Load,
+) -> (Vec<(FontStyle, Vec<u8>)>, Report) {
     let mut report = Report::default();
+    let mut files = Files {
+        load,
+        loaded: BTreeMap::new(),
+    };
+
+    // Regular: each character from the first font that has it.
     let mut glyphs: BTreeMap<char, Glyph> = BTreeMap::new();
+    // The font each glyph came from.
+    let mut came_from: BTreeMap<char, usize> = BTreeMap::new();
     let mut left: Vec<char> = wanted.to_vec();
     // CJK characters look in the CJK fonts first, whatever their place.
     let order = fonts
         .iter()
-        .filter(|f| is_cjk_font(f))
-        .map(|f| (f, true))
-        .chain(fonts.iter().map(|f| (f, false)));
-    let mut loaded: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
-    for (font, cjk_pass) in order {
+        .enumerate()
+        .filter(|(_, f)| is_cjk_font(f))
+        .map(|(i, f)| (i, f, true))
+        .chain(fonts.iter().enumerate().map(|(i, f)| (i, f, false)));
+    for (i, font, cjk_pass) in order {
         let here: Vec<char> = left
             .iter()
             .copied()
@@ -306,29 +423,14 @@ pub fn build(
         if here.is_empty() {
             continue;
         }
-        let entry = loaded
-            .entry(font.family.clone())
-            .or_insert_with(|| match load(font) {
-                Ok(d) => Some(d),
-                Err(e) => {
-                    report.failed.push((font.family.clone(), e));
-                    None
-                }
-            });
-        let Some(data) = entry.as_deref() else {
-            continue;
-        };
-        let Ok(face) = Face::parse(data, 0) else {
-            report
-                .failed
-                .push((font.family.clone(), "not a font".to_string()));
-            *entry = None;
+        let Some(face) = files.open(font, &font.regular, &mut report) else {
             continue;
         };
         let mut found = 0;
         for c in here {
             if let Some(g) = glyph(&face, c) {
                 glyphs.insert(c, g);
+                came_from.insert(c, i);
                 found += 1;
             }
         }
@@ -342,26 +444,82 @@ pub fn build(
     }
     report.missing = left.iter().filter(|&&c| text.contains(c)).count();
     if glyphs.is_empty() {
-        return (None, report);
+        return (Vec::new(), report);
     }
-    let font = Font {
+
+    // Other styles: from the same family, or not at all.
+    let mut sections = Vec::new();
+    let mut styled_fonts = Vec::new();
+    for (style, chars) in styled {
+        let mut by_font: BTreeMap<usize, Vec<char>> = BTreeMap::new();
+        for c in chars {
+            if let Some(&i) = came_from.get(c) {
+                by_font.entry(i).or_default().push(*c);
+            }
+        }
+        let asked: usize = by_font.values().map(Vec::len).sum();
+        let mut styled_glyphs = BTreeMap::new();
+        for (i, chars) in by_font {
+            let font = &fonts[i];
+            let Some(file) = font.file(*style) else {
+                continue;
+            };
+            if !chars.iter().any(|&c| file.covers(c)) {
+                continue;
+            }
+            let Some(face) = files.open(font, file, &mut report) else {
+                continue;
+            };
+            for c in chars {
+                if let Some(g) = glyph(&face, c) {
+                    styled_glyphs.insert(c, g);
+                }
+            }
+        }
+        let synthesised = asked - styled_glyphs.len();
+        styled_fonts.push((*style, styled_glyphs, synthesised));
+    }
+
+    let font = |glyphs| Font {
         upem: UPEM,
         ascender: ASCENDER,
         descender: DESCENDER,
         line_gap: 0,
         glyphs,
     };
-    report.glyphs = font.glyphs.len();
-    match font.encode() {
+    report.glyphs = glyphs.len();
+    match font(glyphs).encode() {
         Ok(bytes) => {
             report.bytes = bytes.len();
-            (Some(bytes), report)
+            sections.push((FontStyle::Regular, bytes));
         }
         Err(e) => {
             report.failed.push(("FONT".to_string(), e.to_string()));
-            (None, report)
+            return (Vec::new(), report);
         }
     }
+    for (style, glyphs, synthesised) in styled_fonts {
+        let mut r = StyledReport {
+            style,
+            glyphs: glyphs.len(),
+            bytes: 0,
+            synthesised,
+        };
+        if !glyphs.is_empty() {
+            match font(glyphs).encode() {
+                Ok(bytes) => {
+                    r.bytes = bytes.len();
+                    sections.push((style, bytes));
+                }
+                Err(e) => {
+                    let name = style.section_name().to_string();
+                    report.failed.push((name, e.to_string()));
+                }
+            }
+        }
+        report.styled.push(r);
+    }
+    (sections, report)
 }
 
 #[cfg(test)]
@@ -422,39 +580,113 @@ mod tests {
 
     #[test]
     fn builds_from_the_fonts_it_can_have() {
-        // KaTeX's fonts stand in for Noto: Greek from Main, the rest missing.
-        let face_data = katex_native::FONTS
-            .iter()
-            .find(|f| f.postscript_name() == "KaTeX_Main-Regular")
-            .expect("KaTeX Main")
-            .data;
-        let main = Face::parse(face_data, 0).unwrap();
-        let stand_in = |family: &str, covers: &str| CatalogFont {
-            family: family.to_string(),
-            url: String::new(),
-            sha256: String::new(),
+        // KaTeX's fonts stand in for Noto: Greek from Main, ∑ from Size1,
+        // which has no bold, the rest missing.
+        let katex = |name: &str| {
+            katex_native::FONTS
+                .iter()
+                .find(|f| f.postscript_name() == name)
+                .expect(name)
+                .data
+        };
+        let (main, main_bold, size1) = (
+            katex("KaTeX_Main-Regular"),
+            katex("KaTeX_Main-Bold"),
+            katex("KaTeX_Size1-Regular"),
+        );
+        let file = |url: &str, covers: &str| FontFile {
+            url: url.to_string(),
+            sha256: url.to_string(),
             size: 0,
             coverage: covers.chars().map(|c| (c as u32, c as u32)).collect(),
         };
-        let fonts = [stand_in("Broken", "Γ"), stand_in("Main", "ΓΔ∞")];
+        let stand_in = |family: &str, covers: &str, bold: bool| CatalogFont {
+            family: family.to_string(),
+            regular: file(family, covers),
+            styled: [
+                bold.then(|| file(&format!("{family} bold"), covers)),
+                None,
+                None,
+            ],
+        };
+        let fonts = [
+            stand_in("Broken", "Γ", true),
+            stand_in("Size1", "∑", false),
+            stand_in("Main", "ΓΔ∞", true),
+        ];
         let mut text = CharSet::default();
-        text.insert_str("ΓΔ∞ж中");
+        text.insert_str("ΓΔ∞∑ж中");
         let w = wanted(&text);
-        let (bytes, report) = build(&w, &text, &fonts, &mut |f| match f.family.as_str() {
-            "Main" => Ok(face_data.to_vec()),
-            _ => Err("offline".to_string()),
-        });
-        let font = Font::decode(&bytes.unwrap()).unwrap();
+        let mut bold = CharSet::default();
+        bold.insert_str("Γ∑ж中");
+        let styled = [(FontStyle::Bold, wanted(&bold))];
+        assert_eq!(fonts_needed(&w, &styled, &fonts), 4);
+        let (sections, report) = build(
+            &w,
+            &text,
+            &styled,
+            &fonts,
+            &mut |_, f| match f.url.as_str() {
+                "Main" => Ok(main.to_vec()),
+                "Main bold" => Ok(main_bold.to_vec()),
+                "Size1" => Ok(size1.to_vec()),
+                _ => Err("offline".to_string()),
+            },
+        );
+        assert_eq!(sections.len(), 2);
+        let font = Font::decode(&sections[0].1).unwrap();
+        assert_eq!(sections[0].0, FontStyle::Regular);
         assert!(font.glyphs.contains_key(&'Γ') && font.glyphs.contains_key(&'∞'));
-        assert_eq!(report.fonts, ["Main"]);
+        assert_eq!(report.fonts, ["Size1", "Main"]);
         assert_eq!(report.failed.len(), 1);
         // 中 has no font; ж is the firmware's own.
         assert_eq!(report.missing, 1);
+        let scaled = |face: &[u8], c: char| {
+            let face = Face::parse(face, 0).unwrap();
+            let id = face.glyph_index(c).unwrap();
+            let scale = 1000.0 / face.units_per_em() as f32;
+            (face.glyph_hor_advance(id).unwrap() as f32 * scale).round() as u16
+        };
         let gamma = &font.glyphs[&'Γ'];
-        let scale = 1000.0 / main.units_per_em() as f32;
-        let id = main.glyph_index('Γ').unwrap();
-        let advance = (main.glyph_hor_advance(id).unwrap() as f32 * scale).round() as u16;
-        assert_eq!(gamma.advance, advance);
+        assert_eq!(gamma.advance, scaled(main, 'Γ'));
         assert!(!gamma.outline.ops.is_empty());
+
+        // Bold Γ from Main's bold; Size1 has no bold, so ∑ is synthesised.
+        assert_eq!(sections[1].0, FontStyle::Bold);
+        let bold = Font::decode(&sections[1].1).unwrap();
+        assert_eq!(bold.glyphs.keys().collect::<String>(), "Γ");
+        assert_eq!(bold.glyphs[&'Γ'].advance, scaled(main_bold, 'Γ'));
+        assert_ne!(bold.glyphs[&'Γ'], *gamma);
+        assert_eq!(report.styled.len(), 1);
+        assert_eq!(
+            (report.styled[0].glyphs, report.styled[0].synthesised),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn the_catalogue_has_the_styles_google_fonts_has() {
+        let fonts = catalogue();
+        let sans = &fonts[0];
+        assert_eq!(sans.family, "Noto Sans");
+        assert!(FontStyle::ALL.iter().all(|&s| sans.file(s).is_some()));
+        let has = |family: &str, style| {
+            fonts
+                .iter()
+                .find(|f| f.family == family)
+                .unwrap()
+                .file(style)
+                .is_some()
+        };
+        assert!(has("Noto Sans SC", FontStyle::Bold));
+        assert!(has("Noto Sans Arabic", FontStyle::Bold));
+        assert!(!has("Noto Sans Arabic", FontStyle::Italic));
+        assert!(!has("Noto Sans Math", FontStyle::Bold));
+        // Only Noto Sans has an italic.
+        let italic = fonts
+            .iter()
+            .filter(|f| f.file(FontStyle::Italic).is_some())
+            .count();
+        assert_eq!(italic, 1);
     }
 }

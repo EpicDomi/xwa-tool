@@ -10,6 +10,7 @@ use xwa_convert::{Device, Stage};
 use xwa_fetch::fonts::Fonts;
 use xwa_fetch::wikimedia::Diagrams;
 use xwa_format::content::{Place, for_each_link_mut};
+use xwa_format::font::FontStyle;
 use xwa_format::normalize::search_key;
 use xwa_format::reader::{self, Archive as Xwa};
 use xwa_format::records::image_encoding;
@@ -70,6 +71,10 @@ enum Command {
         /// (default: the system's cache folder).
         #[arg(long, conflicts_with = "no_fallback_font")]
         font_cache: Option<PathBuf>,
+        /// Leave out the fallback font's real italic letters; the e-reader
+        /// slants the regular ones instead (a little smaller archive).
+        #[arg(long, conflicts_with = "no_fallback_font")]
+        no_real_italic: bool,
     },
     /// List the ZIM files in the Kiwix library.
     Catalog {
@@ -197,6 +202,7 @@ fn main() -> ExitCode {
             hd_cache,
             no_fallback_font,
             font_cache,
+            no_real_italic,
         } => {
             let device = match device {
                 DeviceArg::X4Pro => Device::X4Pro,
@@ -220,6 +226,7 @@ fn main() -> ExitCode {
                         math: !math_as_text,
                         diagrams,
                         fonts,
+                        real_italic: !no_real_italic,
                     };
                     convert(&zim, out, &opts)
                 }
@@ -348,6 +355,23 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
                 String::new()
             }
         );
+        for s in f.styled.iter().filter(|s| s.glyphs + s.synthesised > 0) {
+            let word = style_word(s.style);
+            println!(
+                "  {}: {} glyphs ({} KB){}",
+                s.style.section_name(),
+                s.glyphs,
+                s.bytes.div_ceil(1000),
+                if s.synthesised > 0 {
+                    format!(
+                        "; the e-reader synthesises the {} other characters drawn {word} (no {word} font)",
+                        s.synthesised
+                    )
+                } else {
+                    String::new()
+                }
+            );
+        }
         // One line per reason: offline, every font fails the same way.
         let mut reasons: Vec<(&str, Vec<&str>)> = Vec::new();
         for (family, why) in &f.failed {
@@ -571,6 +595,11 @@ fn xwa_info(path: &Path) -> CliResult {
     if let Some(font) = a.font()? {
         println!("  {} glyphs in the fallback font", font.glyphs.len());
     }
+    for style in &FontStyle::ALL[1..] {
+        if let Some(font) = a.styled_font(*style)? {
+            println!("  {} {} glyphs", font.glyphs.len(), style_word(*style));
+        }
+    }
     if let Some(days) = a.days()? {
         let found = days.iter().flatten().count();
         println!("  an article for {found} of the 366 days of the year");
@@ -658,8 +687,14 @@ fn verify(path: &Path) -> CliResult {
     }
     if r.font_glyphs > 0 || !r.without_glyph.is_empty() {
         let sample: String = r.without_glyph.iter().take(24).collect();
+        let styled: String = FontStyle::ALL[1..]
+            .iter()
+            .zip(r.styled_glyphs)
+            .filter(|&(_, n)| n > 0)
+            .map(|(s, n)| format!(", {n} {}", style_word(*s)))
+            .collect();
         println!(
-            "fallback font: {} glyphs; {} characters of the text the e-reader's fonts lack have none{}",
+            "fallback font: {} glyphs{styled}; {} characters of the text the e-reader's fonts lack have none{}",
             r.font_glyphs,
             r.without_glyph.len(),
             if sample.is_empty() {
@@ -984,4 +1019,14 @@ fn title_index_cmd(path: &Path, queries: &[String]) -> xwa_zim::Result<()> {
         }
     }
     Ok(())
+}
+
+/// How a style is named in output.
+fn style_word(style: FontStyle) -> &'static str {
+    match style {
+        FontStyle::Regular => "regular",
+        FontStyle::Bold => "bold",
+        FontStyle::Italic => "italic",
+        FontStyle::BoldItalic => "bold italic",
+    }
 }

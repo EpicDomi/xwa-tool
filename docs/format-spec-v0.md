@@ -116,8 +116,14 @@ their caption (7.4).
 | 12 | WORD_INDEX | optional | Title-word search index (later) |
 | 13 | FOLD | yes | How to fold search input (6.1) |
 | 14 | DAYS | optional | The article for each day of the year (5.3) |
+| 15 | FONT_BOLD | optional | FONT's layout: bold glyphs (10.1) |
+| 16 | FONT_ITALIC | optional | FONT's layout: italic glyphs (10.1) |
+| 17 | FONT_BOLD_ITALIC | optional | FONT's layout: bold italic glyphs (10.1) |
 
-Readers ignore unknown section types.
+Readers skip section types they do not know. A new optional section is
+added under a new type without changing the version; a change a reader
+cannot skip (a new required section, or a new layout for a known one)
+changes the version.
 
 BLOBS holds content chunks and image data in whatever order the writer
 produced them, so a converter can stream both into one file in a single
@@ -705,8 +711,8 @@ xwa-tool writes `upem` 1000, ascender 1069, descender −293 and line gap 0
 (Noto Sans's), scales every glyph to 1000 units per em, and numbers the
 glyphs in code point order, one range per run of consecutive code points.
 A glyph is drawn at the size of the text around it; one that draws nothing
-but takes space (U+3000) has an empty outline. There is no hinting, and
-regular weight only: bold and italic text uses the same glyphs.
+but takes space (U+3000) has an empty outline. There is no hinting. FONT
+is regular; bold and italic glyphs are in the sections of 10.1.
 
 **What it holds.** Every code point the text uses (titles, contents
 entries, body, captions, tables, the infobox, preformatted text, display
@@ -754,6 +760,78 @@ MB, 3%) for mathematics and 10,157 (4.8 MB, 0.56%) for Swedish Wikipedia's
 glyphs 200-300. What no Noto font draws is rare: private-use and
 unassigned code points in the source text, some of CJK extension B, and
 symbols added in Unicode 15 and 16 (`xwa-tool verify` lists them).
+
+### 10.1 Bold and italic (FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC)
+
+Each has FONT's layout byte for byte, with the same header values, and
+holds glyphs for some of FONT's code points in one style: never a code
+point FONT lacks. All three are optional, and so is every code point in
+them. A reader draws a code point in a style from that style's section
+when it has it, as it is, and otherwise synthesises it:
+
+- **Bold:** FONT_BOLD's glyph, else the FONT glyph emboldened, its
+  advance widened by twice the outline offset.
+- **Italic:** FONT_ITALIC's glyph, else the FONT glyph sheared 12°.
+  Scripts without an italic convention (CJK, Arabic, Hebrew, the Indic
+  scripts and similar) stay upright, as do the characters Noto Sans
+  Italic draws upright (below). Combining marks follow their base.
+- **Bold italic:** FONT_BOLD_ITALIC's glyph, else the FONT_BOLD glyph
+  sheared, else the FONT glyph emboldened and sheared, with the same
+  exceptions as italic.
+
+**The style text is drawn in.** In an article, the title, headings of
+levels 1-4, infobox header rows and field labels, table header cells and
+table captions are bold; headings of levels 5 and 6 are bold italic;
+everything else is regular. STYLE_PUSH bold and italic (7.3) add their
+style to the text around them, so italic in a bold heading is bold
+italic; the other styles keep it. Preformatted text is regular.
+
+**What FONT_BOLD holds.** Every FONT code point the article text draws
+bold or bold italic (bold italic is drawn from the bold glyph), with the
+Arabic presentation forms and Lam-Alef ligatures of the Arabic letters
+among them, as for FONT. Each glyph comes from the bold of the Noto
+family FONT's glyph came from; a code point whose family has no bold
+(Noto Sans Math, Symbols 2 and most historic scripts have none) is left
+out, for the reader to synthesise. 63 of the 174 families have a bold:
+Noto Sans, the CJK fonts, Arabic, Hebrew, the Indic and Southeast Asian
+fonts and most other scripts in use today.
+
+**FONT_ITALIC and FONT_BOLD_ITALIC.** By the same rules, for the code
+points drawn italic and bold italic, from the family's italic or bold
+italic; only Noto Sans has those. Glyphs Noto Sans Italic draws upright
+(Devanagari, and the list below) are kept as they are, so they stay
+upright. xwa-tool writes both unless told not to (`--no-real-italic`, or
+"Real italic" off in the app).
+
+**Upright in Noto Sans Italic.** Besides Devanagari, Noto Sans Italic and
+Bold Italic draw these upright (found by comparing each glyph with the
+regular one as it is and sheared 12°; those on the built-in list are the
+reader's own fonts' to draw):
+
+```
+002B, 003C, 003E, 005E, 007C, 00A4, 00A6, 00A9, 00AE, 00B0-00B1, 00B6,
+00D7, 00F7, 02C2-02C5, 02DA, 02E5-02EB, 02F9-02FC, 02FF, 0482,
+1D11-1D13, 1D1D-1D1F, 1D59, 1FBD, 1FBF, 2016, 2032-2034, 203B,
+204A-204D, 2052, 2055-205E, 207A, 208A, 20AF, 2102, 2104, 210A-210D,
+2110-2113, 2115, 2117-211D, 2120-2122, 2124, 2128, 212C-2131,
+2133-2138, 213C-2140, 2145-214A, 214C, 214F, 25CC, 2E00-2E0E,
+2E12-2E17, 2E19, 2E1B-2E1E, 2E20-2E27, 2E2A-2E2D, 2E30, 2E3D-2E3F,
+2E41, 2E5D, A673, A700-A719, A71B-A71C, A720-A721, AB32, AB3D-AB3E,
+FFFC-FFFD
+```
+
+Horizontal marks (dashes, = − ~, dots, ellipses) look the same either
+way.
+
+Measured (FONT_BOLD): 21 glyphs (5 KB) for Simple Wiktionary, 120 (34
+KB, 0.09% of the archive) for Wikipedia's top 100, 79 (24 KB, 0.01%) for
+chemistry, 716 (0.26 MB, 0.35%) for mathematics and 4,501 (2.2 MB,
+0.26%) for Swedish Wikipedia, mostly Han (lead sentences bold a name in
+its own script). The most is Vikidia's 2.9%, a small archive whose pages
+bold words in many scripts. FONT_ITALIC and FONT_BOLD_ITALIC together:
+3 KB for Simple Wiktionary, 11 KB for the top 100, 29 KB for chemistry,
+55 KB for mathematics (0.07%) and 98 KB for Swedish Wikipedia (0.01%);
+at most 0.16% (Vikidia).
 
 ## 11. Device I/O budget (expected)
 

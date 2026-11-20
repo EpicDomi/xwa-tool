@@ -1,12 +1,15 @@
 //! The fallback font catalogue: for each Noto family the converter may
 //! draw fallback glyphs from (spec 10), in the order it looks in them, the
-//! regular style's file on Google Fonts, its size and SHA-256, and the code
-//! points it covers.
+//! files of its styles on Google Fonts (regular, and bold, italic and bold
+//! italic where the family has them), their sizes and SHA-256, and the
+//! code points each covers.
 //!
-//! One line per font: family, URL, SHA-256, size in bytes, then its
-//! coverage as comma-separated hexadecimal ranges (`4E00-9FFF`), all
-//! tab-separated; compressed with zstd. Converters download a font only
-//! when an archive needs it, and check it against this.
+//! One line per file: family, style (`regular`, `bold`, `italic` or
+//! `bold-italic`), URL, SHA-256, size in bytes, then its coverage as
+//! comma-separated hexadecimal ranges (`4E00-9FFF`), all tab-separated; a
+//! family's regular file comes first. Compressed with zstd. Converters
+//! download a file only when an archive needs it, and check it against
+//! this.
 
 use std::path::Path;
 use std::time::Duration;
@@ -109,7 +112,7 @@ fn unwanted(family: &str) -> bool {
 /// Every family to catalogue, in search order: [`FIRST`], the other Noto
 /// Sans families, the Noto Serif ones for scripts without a Sans, the
 /// remaining Noto families, then [`LAST`].
-fn families(agent: &ureq::Agent) -> Result<Vec<String>, String> {
+fn families(agent: &ureq::Agent) -> Result<Vec<(String, Vec<&'static str>)>, String> {
     let meta = agent
         .get("https://fonts.google.com/metadata/fonts")
         .call()
@@ -121,9 +124,23 @@ fn families(agent: &ureq::Agent) -> Result<Vec<String>, String> {
         .map_err(|e| format!("Google Fonts: {e}"))?;
     let json: serde_json::Value =
         serde_json::from_str(meta.trim_start_matches(")]}'")).map_err(|e| e.to_string())?;
-    let mut all: Vec<String> = json["familyMetadataList"]
+    let list = json["familyMetadataList"]
         .as_array()
-        .ok_or("Google Fonts: no family list")?
+        .ok_or("Google Fonts: no family list")?;
+    // The styles besides regular each family has, by Google's names for
+    // them ("700", "400i", "700i").
+    let styles = |name: &str| -> Vec<&'static str> {
+        let fonts = list
+            .iter()
+            .find(|f| f["family"].as_str() == Some(name))
+            .and_then(|f| f["fonts"].as_object());
+        STYLES
+            .iter()
+            .filter(|(_, key)| fonts.is_some_and(|f| f.contains_key(*key)))
+            .map(|(style, _)| *style)
+            .collect()
+    };
+    let mut all: Vec<String> = list
         .iter()
         .filter_map(|f| f["family"].as_str())
         .filter(|f| f.starts_with("Noto ") && !unwanted(f))
@@ -151,8 +168,17 @@ fn families(agent: &ureq::Agent) -> Result<Vec<String>, String> {
             .collect::<Vec<_>>(),
     );
     out.extend(LAST.iter().map(|f| f.to_string()));
-    Ok(out)
+    Ok(out
+        .into_iter()
+        .map(|f| {
+            let s = styles(&f);
+            (f, s)
+        })
+        .collect())
 }
+
+/// The styles besides regular, and Google Fonts' names for them.
+const STYLES: &[(&str, &str)] = &[("bold", "700"), ("italic", "400i"), ("bold-italic", "700i")];
 
 /// Wikimedia and Google ask tools to say who they are.
 const USER_AGENT: &str = concat!(
@@ -175,11 +201,23 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-/// The URL of a family's regular style as one TrueType file. Google Fonts
+/// The URL of one style of a family as one TrueType file. Google Fonts
 /// serves whole files to clients that are not browsers.
-fn font_url(agent: &ureq::Agent, family: &str) -> Result<String, String> {
+fn font_url(
+    agent: &ureq::Agent,
+    family: &str,
+    style: &str,
+    has_italic: bool,
+) -> Result<String, String> {
+    let axes = match (style, has_italic) {
+        ("regular", _) => "",
+        ("bold", false) => ":wght@700",
+        ("bold", true) => ":ital,wght@0,700",
+        ("italic", _) => ":ital,wght@1,400",
+        _ => ":ital,wght@1,700",
+    };
     let url = format!(
-        "https://fonts.googleapis.com/css2?family={}",
+        "https://fonts.googleapis.com/css2?family={}{axes}",
         family.replace(' ', "+")
     );
     let css = agent
@@ -231,53 +269,70 @@ pub fn write(root: &Path) -> Result<(), String> {
     let families = families(&agent)?;
     let mut table = String::new();
     let mut total = 0u64;
-    for family in &families {
-        let url = font_url(&agent, family)?;
-        let data = agent
-            .get(&url)
-            .call()
-            .map_err(|e| format!("{family}: {e}"))?
-            .body_mut()
-            .with_config()
-            .limit(64 << 20)
-            .read_to_vec()
-            .map_err(|e| format!("{family}: {e}"))?;
-        let sha: String = Sha256::digest(&data)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let ranges = coverage(&data).map_err(|e| format!("{family}: {e}"))?;
-        let cover: Vec<String> = ranges
-            .iter()
-            .map(|&(a, b)| {
-                if a == b {
-                    format!("{a:X}")
-                } else {
-                    format!("{a:X}-{b:X}")
-                }
-            })
-            .collect();
-        eprintln!(
-            "{family}: {} KB, {} code points",
-            data.len() / 1024,
-            ranges.iter().map(|(a, b)| b - a + 1).sum::<u32>()
-        );
-        total += data.len() as u64;
-        table.push_str(&format!(
-            "{family}\t{url}\t{sha}\t{}\t{}\n",
-            data.len(),
-            cover.join(",")
-        ));
+    let mut files = 0;
+    for (family, styles) in &families {
+        let has_italic = styles.iter().any(|s| s.contains("italic"));
+        for style in std::iter::once(&"regular").chain(styles) {
+            let line = file_line(&agent, family, style, has_italic, &mut total)?;
+            table.push_str(&line);
+            files += 1;
+        }
     }
     let packed = zstd::encode_all(table.as_bytes(), 19).map_err(|e| e.to_string())?;
     let out = root.join("crates/xwa-convert/data/fonts.tsv.zst");
     std::fs::write(&out, &packed).map_err(|e| format!("{}: {e}", out.display()))?;
     eprintln!(
-        "wrote {} fonts ({} MB in all) to {} ({} bytes)",
+        "wrote {} families in {files} files ({} MB in all) to {} ({} bytes)",
         families.len(),
         total >> 20,
         out.display(),
         packed.len()
     );
     Ok(())
+}
+
+/// The catalogue line for one style of a family.
+fn file_line(
+    agent: &ureq::Agent,
+    family: &str,
+    style: &str,
+    has_italic: bool,
+    total: &mut u64,
+) -> Result<String, String> {
+    let url = font_url(agent, family, style, has_italic)?;
+    let data = agent
+        .get(&url)
+        .call()
+        .map_err(|e| format!("{family}: {e}"))?
+        .body_mut()
+        .with_config()
+        .limit(64 << 20)
+        .read_to_vec()
+        .map_err(|e| format!("{family}: {e}"))?;
+    let sha: String = Sha256::digest(&data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let ranges = coverage(&data).map_err(|e| format!("{family} {style}: {e}"))?;
+    let cover: Vec<String> = ranges
+        .iter()
+        .map(|&(a, b)| {
+            if a == b {
+                format!("{a:X}")
+            } else {
+                format!("{a:X}-{b:X}")
+            }
+        })
+        .collect();
+    eprintln!(
+        "{family} {style}: {} KB, {} code points",
+        data.len() / 1024,
+        ranges.iter().map(|(a, b)| b - a + 1).sum::<u32>()
+    );
+    *total += data.len() as u64;
+    Ok(format!(
+        "{family}\t{style}\t{url}\t{sha}\t{}\t{}\n",
+        data.len(),
+        cover.join(",")
+    ))
 }
