@@ -474,8 +474,11 @@ impl App {
         if self.conversion.running() {
             let steps = conversion_steps(self.converting_images, self.converting_sharper);
             page.top += progress_height(Some(steps.len()));
-            page.rows =
-                vec![Row::new(Kind::Item, "Stop converting").on_press(Message::AskStopConversion)];
+            page.rows = vec![stop_row(
+                &self.conversion,
+                "Stop converting",
+                Message::AskStopConversion,
+            )];
             return page;
         }
         if let Job::Finished(Ok(_)) = &self.conversion {
@@ -568,7 +571,7 @@ impl App {
         };
         if self.copy.running() {
             page.top = COPY_TOP + progress_height(None);
-            page.rows = vec![Row::new(Kind::Item, "Stop copying").on_press(Message::CancelCopy)];
+            page.rows = vec![stop_row(&self.copy, "Stop copying", Message::CancelCopy)];
             return page;
         }
         page.rows.push(
@@ -1478,6 +1481,16 @@ fn job_lines<'a>(job: &Job, what: &str) -> Vec<Element<'a, Message>> {
     lines
 }
 
+/// The row that stops a job; once pressed, it says so and cannot be
+/// pressed again while the work in hand finishes.
+fn stop_row(job: &Job, title: &str, stop: Message) -> Row<Message> {
+    if job.stopping() {
+        Row::new(Kind::Item, "Stopping…").subtitle("Finishing the work in hand")
+    } else {
+        Row::new(Kind::Item, title).on_press(stop)
+    }
+}
+
 fn progress_height(steps: Option<usize>) -> f32 {
     20.0 + steps.map_or(0.0, |n| n as f32 * 30.0 + 8.0) + 22.0 + 10.0 + 28.0 + 20.0
 }
@@ -1531,10 +1544,13 @@ fn progress_view<'a>(job: &Job, steps: Option<&[&str]>) -> Element<'a, Message> 
         .spacing(10)
         .align_y(Alignment::Center),
     );
-    let left = job
-        .time_left()
-        .map(time_left)
-        .unwrap_or_else(|| "Working out how long it will take…".into());
+    let left = if job.stopping() {
+        String::new()
+    } else {
+        job.time_left()
+            .map(time_left)
+            .unwrap_or_else(|| "Working out how long it will take…".into())
+    };
     col = col.push(label(left, Face::Small, SMALL).height(28));
     col.into()
 }
