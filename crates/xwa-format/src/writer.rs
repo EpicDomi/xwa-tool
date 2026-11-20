@@ -524,7 +524,25 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.ready.insert(seq, Blob::Image { id, data });
-        self.write_ready()
+        // An image waits for the text chunks before it that are still being
+        // compressed: collect those as they finish, and wait for them when
+        // too many images are held, or every image would stay in memory
+        // until `finish`.
+        self.receive(false)?;
+        while self.in_flight > 0 && self.ready.len() > self.max_waiting() {
+            self.receive(true)?;
+        }
+        Ok(())
+    }
+
+    /// How many finished blobs may wait for an earlier one to be written.
+    fn max_waiting(&self) -> usize {
+        self.threads * 64
+    }
+
+    /// Blobs finished but waiting for an earlier one to be written.
+    pub fn waiting(&self) -> usize {
+        self.ready.len()
     }
 
     fn cut_chunk(&mut self) -> Result<()> {
