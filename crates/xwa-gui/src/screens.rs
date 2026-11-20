@@ -47,6 +47,31 @@ pub struct Page {
 }
 
 const LIST_HINTS: [&str; 4] = ["« Back", "Select", "Up", "Down"];
+
+/// The italic screen's pictures, from the firmware's simulator, and what
+/// each shows.
+pub const ITALIC_PICTURES: [(&[u8], &str); 3] = [
+    (include_bytes!("../assets/italic-enlarged.png"), "Enlarged"),
+    (include_bytes!("../assets/italic-real.png"), "Real"),
+    (include_bytes!("../assets/italic-slanted.png"), "Slanted"),
+];
+
+/// The italic screen's pictures, decoded once.
+fn italic_picture(i: usize) -> image::Handle {
+    static PICTURES: std::sync::OnceLock<Vec<image::Handle>> = std::sync::OnceLock::new();
+    PICTURES.get_or_init(|| {
+        ITALIC_PICTURES
+            .iter()
+            .map(|(png, _)| {
+                let img = ::image::load_from_memory(png)
+                    .expect("bundled picture")
+                    .to_rgba8();
+                image::Handle::from_rgba(img.width(), img.height(), img.into_raw())
+            })
+            .collect()
+    })[i]
+        .clone()
+}
 const HOME_TOP: f32 = 192.0;
 const TILE_TOP: f32 = 150.0;
 const FIELD_TOP: f32 = 58.0;
@@ -88,6 +113,7 @@ impl App {
             Screen::Settings => self.settings_page(),
             Screen::Filter => self.filter_page(),
             Screen::Downloads => self.downloads_page(),
+            Screen::Italic => self.italic_page(),
         }
     }
 
@@ -481,6 +507,13 @@ impl App {
                 .subtitle("From Wikipedia, over the internet")
                 .value(on_off(self.images && self.sharper))
                 .on_press_maybe(self.images.then_some(Message::ToggleSharper)),
+            Row::new(Kind::Setting, "Real italic")
+                .subtitle("For letters the e-reader's fonts lack")
+                .value(on_off(self.real_italic))
+                .on_press(Message::ToggleItalic),
+            Row::new(Kind::Item, "See the difference")
+                .opens()
+                .on_press(Message::Open(Screen::Italic)),
             Row::new(
                 Kind::Action,
                 if matches!(self.conversion, Job::Finished(Err(_))) {
@@ -495,6 +528,31 @@ impl App {
             page.bottom = 96.0;
         }
         page
+    }
+
+    fn italic_page(&self) -> Page {
+        let spec = self.spec();
+        let hints = if spec.hints.is_some() {
+            eink::HINTS
+        } else {
+            0.0
+        };
+        let i = self.italic_picture;
+        Page {
+            title: "Italic".into(),
+            subtitle: Some(format!(
+                "{} · {} of {}",
+                ITALIC_PICTURES[i].1,
+                i + 1,
+                ITALIC_PICTURES.len()
+            )),
+            back: true,
+            top: spec.screen.height - eink::HEADER - hints,
+            bottom: 0.0,
+            rows: Vec::new(),
+            note: None,
+            hints: ["« Back", "Next", "Previous", "Next"],
+        }
     }
 
     fn card_page(&self) -> Page {
@@ -674,6 +732,25 @@ impl App {
                 .center_x(Length::Fill)
                 .into(),
             },
+            Screen::Italic => mouse_area(
+                container(
+                    image(italic_picture(self.italic_picture))
+                        .content_fit(iced::ContentFit::Contain)
+                        .filter_method(image::FilterMethod::Linear)
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .padding(Padding {
+                    top: 6.0,
+                    bottom: 12.0,
+                    left: SIDE,
+                    right: SIDE,
+                }),
+            )
+            .on_press(Message::ItalicPicture(1))
+            .on_scroll(Message::Scroll)
+            .interaction(mouse::Interaction::Pointer)
+            .into(),
             Screen::Card if self.copy.running() => {
                 let what = self.archive.as_deref().map(file_name).unwrap_or_default();
                 let to = self.drive.as_ref().map(drive_line).unwrap_or_default();

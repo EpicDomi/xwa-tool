@@ -798,7 +798,10 @@ fonts and most other scripts in use today.
 
 **FONT_ITALIC and FONT_BOLD_ITALIC.** By the same rules, for the code
 points drawn italic and bold italic, from the family's italic or bold
-italic; only Noto Sans has those. xwa-tool does not write them.
+italic; only Noto Sans has those. Glyphs Noto Sans Italic draws upright
+(Devanagari, and the list below) are kept as they are, so they stay
+upright. xwa-tool writes both unless told not to (`--no-real-italic`, or
+"Real italic" off in the app).
 
 **Upright in Noto Sans Italic.** Besides Devanagari, Noto Sans Italic and
 Bold Italic draw these upright (found by comparing each glyph with the
@@ -825,7 +828,10 @@ KB, 0.09% of the archive) for Wikipedia's top 100, 79 (24 KB, 0.01%) for
 chemistry, 716 (0.26 MB, 0.35%) for mathematics and 4,501 (2.2 MB,
 0.26%) for Swedish Wikipedia, mostly Han (lead sentences bold a name in
 its own script). The most is Vikidia's 2.9%, a small archive whose pages
-bold words in many scripts.
+bold words in many scripts. FONT_ITALIC and FONT_BOLD_ITALIC together:
+3 KB for Simple Wiktionary, 11 KB for the top 100, 29 KB for chemistry,
+55 KB for mathematics (0.07%) and 98 KB for Swedish Wikipedia (0.01%);
+at most 0.16% (Vikidia).
 
 ## 11. Device I/O budget (expected)
 

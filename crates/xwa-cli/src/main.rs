@@ -71,6 +71,10 @@ enum Command {
         /// (default: the system's cache folder).
         #[arg(long, conflicts_with = "no_fallback_font")]
         font_cache: Option<PathBuf>,
+        /// Leave out the fallback font's real italic letters; the e-reader
+        /// slants the regular ones instead (a little smaller archive).
+        #[arg(long, conflicts_with = "no_fallback_font")]
+        no_real_italic: bool,
     },
     /// List the ZIM files in the Kiwix library.
     Catalog {
@@ -198,6 +202,7 @@ fn main() -> ExitCode {
             hd_cache,
             no_fallback_font,
             font_cache,
+            no_real_italic,
         } => {
             let device = match device {
                 DeviceArg::X4Pro => Device::X4Pro,
@@ -221,6 +226,7 @@ fn main() -> ExitCode {
                         math: !math_as_text,
                         diagrams,
                         fonts,
+                        real_italic: !no_real_italic,
                     };
                     convert(&zim, out, &opts)
                 }
@@ -349,18 +355,17 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
                 String::new()
             }
         );
-        for s in &f.styled {
+        for s in f.styled.iter().filter(|s| s.glyphs + s.synthesised > 0) {
+            let word = style_word(s.style);
             println!(
-                "  {}: {} glyphs ({:.1} MB){}",
+                "  {}: {} glyphs ({} KB){}",
                 s.style.section_name(),
                 s.glyphs,
-                mb(s.bytes as u64),
+                s.bytes.div_ceil(1000),
                 if s.synthesised > 0 {
                     format!(
-                        "; {} more drawn {} have no {} font, so the e-reader synthesises them",
-                        s.synthesised,
-                        style_word(s.style),
-                        style_word(s.style)
+                        "; the e-reader synthesises the {} other characters drawn {word} (no {word} font)",
+                        s.synthesised
                     )
                 } else {
                     String::new()

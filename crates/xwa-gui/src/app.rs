@@ -56,6 +56,8 @@ pub enum Screen {
     /// How the library's list is filtered and sorted.
     Filter,
     Downloads,
+    /// Pictures of real italic beside slanted regular letters.
+    Italic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,6 +336,9 @@ pub enum Message {
     ZimRead(PathBuf, Result<ZimInfo, String>),
     ToggleImages,
     ToggleSharper,
+    ToggleItalic,
+    /// The next (1) or previous (-1) picture of italic.
+    ItalicPicture(isize),
     Convert,
     OutputChosen(Option<PathBuf>),
     Conversion(Event<String>),
@@ -420,6 +425,10 @@ pub struct App {
     pub zim_info: Option<Result<ZimInfo, String>>,
     pub images: bool,
     pub sharper: bool,
+    /// Real italic letters in the fallback font.
+    pub real_italic: bool,
+    /// Which picture the italic screen shows.
+    pub italic_picture: usize,
     pub conversion: Job,
     /// Whether the running conversion fetches sharper diagrams.
     pub converting_sharper: bool,
@@ -482,6 +491,8 @@ impl App {
             zim_info: None,
             images: true,
             sharper: false,
+            real_italic: true,
+            italic_picture: 0,
             conversion: Job::Idle,
             converting_sharper: false,
             converting_images: true,
@@ -634,6 +645,10 @@ impl App {
 
     /// Shows the next or previous page of the list.
     fn turn_page(&mut self, step: isize) {
+        if self.screen == Screen::Italic {
+            self.turn_italic(step);
+            return;
+        }
         let page = self.page();
         let pages = eink::paginate(&page.rows, self.list_room(&page));
         if pages.len() < 2 {
@@ -647,6 +662,11 @@ impl App {
         let next = (current + step).rem_euclid(pages.len() as isize) as usize;
         self.focus = pages[next].start;
         self.settle();
+    }
+
+    fn turn_italic(&mut self, step: isize) {
+        let n = crate::screens::ITALIC_PICTURES.len() as isize;
+        self.italic_picture = (self.italic_picture as isize + step).rem_euclid(n) as usize;
     }
 
     /// The height left for the list rows on the current screen.
@@ -687,6 +707,11 @@ impl App {
             }
             Key::Home => self.go(Screen::Home),
             Key::Back => return self.back(),
+            // The italic pictures turn like pages, whichever way.
+            Key::Left | Key::Up if self.screen == Screen::Italic => self.turn_italic(-1),
+            Key::Right | Key::Down | Key::Confirm if self.screen == Screen::Italic => {
+                self.turn_italic(1)
+            }
             Key::Confirm => {
                 let rows = self.page().rows;
                 if let Some(m) = rows.get(self.focus).and_then(|r| r.on_press.clone()) {
@@ -1049,6 +1074,9 @@ impl App {
             Message::ClosePopup => self.popup = None,
             Message::Opened(path) => return self.open_file(path),
             Message::Open(screen) => {
+                if screen == Screen::Italic {
+                    self.italic_picture = 0;
+                }
                 self.go(screen);
                 return self.entered();
             }
@@ -1164,6 +1192,12 @@ impl App {
                     self.sharper = !self.sharper;
                 }
             }
+            Message::ToggleItalic => {
+                if !self.conversion.running() {
+                    self.real_italic = !self.real_italic;
+                }
+            }
+            Message::ItalicPicture(step) => self.turn_italic(step),
             Message::Convert => {
                 let Some(zim) = self.zim.clone() else {
                     return Task::none();
@@ -1494,6 +1528,7 @@ impl App {
         let sharper = diagrams.is_some();
         // The fallback font, for letters and symbols the e-reader's fonts lack.
         let fonts = Fonts::default_cache().map(|cache| Arc::new(Fonts::new(cache)));
+        let real_italic = self.real_italic;
         self.converting_sharper = sharper;
         self.converting_images = images;
         let (tx, rx) = iced::futures::channel::mpsc::unbounded();
@@ -1502,6 +1537,7 @@ impl App {
                 images,
                 diagrams,
                 fonts,
+                real_italic,
                 ..xwa_convert::Options::new(device)
             };
             let mut throttle = Throttle::default();

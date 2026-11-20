@@ -87,6 +87,10 @@ pub struct Options {
     /// Where to get the Noto fonts the fallback FONT is drawn from (spec
     /// 10); without it the archive has no FONT.
     pub fonts: Option<Arc<xwa_fetch::fonts::Fonts>>,
+    /// With the fallback font, real italic glyphs too (FONT_ITALIC and
+    /// FONT_BOLD_ITALIC, spec 10.1); without, the e-reader slants the
+    /// regular ones.
+    pub real_italic: bool,
 }
 
 impl Options {
@@ -99,6 +103,7 @@ impl Options {
             math: true,
             diagrams: None,
             fonts: None,
+            real_italic: true,
         }
     }
 }
@@ -783,10 +788,15 @@ fn convert_inner(
             let text = writer.text_chars();
             let wanted = fallback::wanted(&text);
             // FONT_BOLD: what is drawn bold, and bold italic, which the
-            // reader draws as its bold glyph sheared.
+            // reader draws from the bold glyph when it has no bold italic.
             let mut bold = writer.styled_chars(FontStyle::Bold);
             bold.union(&writer.styled_chars(FontStyle::BoldItalic));
-            let styled = [(FontStyle::Bold, fallback::wanted(&bold))];
+            let mut styled = vec![(FontStyle::Bold, fallback::wanted(&bold))];
+            if opts.real_italic {
+                for style in [FontStyle::Italic, FontStyle::BoldItalic] {
+                    styled.push((style, fallback::wanted(&writer.styled_chars(style))));
+                }
+            }
             let language = zim
                 .metadata("Language")?
                 .map(|v| String::from_utf8_lossy(&v).trim().to_string());

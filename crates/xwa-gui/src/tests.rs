@@ -210,6 +210,31 @@ fn the_home_menu_opens_each_screen() {
 }
 
 #[test]
+fn the_italic_pictures_turn_like_pages_and_back_returns_to_converting() {
+    let mut app = app(Model::X4);
+    let _ = app.update(Message::Open(Screen::Convert));
+    assert!(app.real_italic, "real italic is on unless turned off");
+    let _ = app.update(Message::ToggleItalic);
+    assert!(!app.real_italic);
+    let _ = app.update(Message::Open(Screen::Italic));
+    assert_eq!(app.italic_picture, 0);
+    for (key, picture) in [
+        (Key::Right, 1),
+        (Key::Confirm, 2),
+        (Key::Down, 0),
+        (Key::Up, 2),
+    ] {
+        press(&mut app, key);
+        assert_eq!(app.italic_picture, picture, "{key:?}");
+    }
+    press(&mut app, Key::Back);
+    assert_eq!(app.screen, Screen::Convert);
+    // It opens at the first picture again.
+    let _ = app.update(Message::Open(Screen::Italic));
+    assert_eq!(app.italic_picture, 0);
+}
+
+#[test]
 fn the_selection_goes_round_the_list_and_skips_what_cannot_be_chosen() {
     let mut app = app(Model::X4);
     press(&mut app, Key::Left);
@@ -777,6 +802,14 @@ fn screens() {
             a.archive = Some(zim.with_extension("xwa"));
             let _ = a.update(Message::Open(Screen::Convert));
             snap(&a, &dir, &format!("{tag}-converted"));
+        }
+
+        let mut a = app(model);
+        let _ = a.update(Message::Open(Screen::Convert));
+        let _ = a.update(Message::Open(Screen::Italic));
+        for i in 1..=crate::screens::ITALIC_PICTURES.len() {
+            snap(&a, &dir, &format!("{tag}-italic-{i}"));
+            let _ = a.update(Message::ItalicPicture(1));
         }
 
         let mut a = app(model);
