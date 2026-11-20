@@ -57,6 +57,12 @@ pub mod section {
     pub const FOLD: u32 = 13;
     /// The article for each day of the year ("On this day").
     pub const DAYS: u32 = 14;
+    /// FONT's layout, for the code points drawn bold or bold italic.
+    pub const FONT_BOLD: u32 = 15;
+    /// FONT's layout, for the code points drawn italic.
+    pub const FONT_ITALIC: u32 = 16;
+    /// FONT's layout, for the code points drawn bold italic.
+    pub const FONT_BOLD_ITALIC: u32 = 17;
 }
 
 /// Days in a DAYS section: January 1 to December 31, February 29 included.

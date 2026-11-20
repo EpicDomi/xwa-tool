@@ -38,7 +38,8 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   `crates/xwa-convert/data/days.tsv.zst`, each Wikipedia's day articles
   from Wikidata, for the DAYS section; `cargo xtask fonts` writes
   `crates/xwa-convert/data/fonts.tsv.zst`, the Noto fonts on Google Fonts
-  (address, SHA-256, coverage) that the fallback FONT is drawn from
+  (each style's address, SHA-256, coverage) that the fallback FONT and
+  FONT_BOLD are drawn from
   (`xwa-convert/src/fallback.rs`; `xwa-fetch/src/fonts.rs` downloads and
   keeps them).
 - `docs/format-spec-v0.md`: the format specification.

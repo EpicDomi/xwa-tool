@@ -8,6 +8,7 @@ use std::borrow::Cow;
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 
 use crate::error::corrupt;
+use crate::font::FontStyle;
 use crate::{Result, varint};
 
 /// Deepest nesting of blocks or inlines the decoder accepts.
@@ -1388,41 +1389,66 @@ pub enum Ref<'a> {
 /// Calls `f` with every piece of text an article shows: its title, the
 /// text of its body, tables and infobox, captions and preformatted text.
 pub fn for_each_text<'a>(a: &'a Article, f: &mut impl FnMut(&'a str)) {
-    fn inlines<'a>(list: &'a [Inline], f: &mut impl FnMut(&'a str)) {
+    for_each_styled_text(a, &mut |t, _| f(t));
+}
+
+/// Calls `f` for every piece of text in the article with the style the
+/// reader draws it in (spec 10.1): the title, headings of levels 1-4,
+/// infobox headers and labels, table header cells and table captions
+/// bold; headings of levels 5 and 6 bold italic; everything else regular.
+/// Bold and italic marks add to the style around them; preformatted text
+/// is regular.
+pub fn for_each_styled_text<'a>(a: &'a Article, f: &mut impl FnMut(&'a str, FontStyle)) {
+    fn inlines<'a>(list: &'a [Inline], s: FontStyle, f: &mut impl FnMut(&'a str, FontStyle)) {
         for i in list {
             match i {
-                Inline::Text(t) => f(t),
-                Inline::Styled(_, c) | Inline::Link { content: c, .. } => inlines(c, f),
+                Inline::Text(t) => f(t, s),
+                Inline::Styled(Style::Bold, c) => {
+                    inlines(c, FontStyle::new(true, s.is_italic()), f)
+                }
+                Inline::Styled(Style::Italic, c) => {
+                    inlines(c, FontStyle::new(s.is_bold(), true), f)
+                }
+                Inline::Styled(_, c) | Inline::Link { content: c, .. } => inlines(c, s, f),
                 Inline::Math(_) | Inline::Icon { .. } | Inline::Break | Inline::NoteRef(_) => {}
             }
         }
     }
-    fn blocks<'a>(list: &'a [Block], f: &mut impl FnMut(&'a str)) {
+    fn blocks<'a>(list: &'a [Block], f: &mut impl FnMut(&'a str, FontStyle)) {
         for b in list {
             match b {
-                Block::Para(c) | Block::Heading { content: c, .. } => inlines(c, f),
-                Block::Figure { caption, .. } => inlines(caption, f),
-                Block::Gallery(items) => items.iter().for_each(|(_, c)| inlines(c, f)),
+                Block::Para(c) => inlines(c, FontStyle::Regular, f),
+                Block::Heading { level, content } => {
+                    let style = FontStyle::new(true, *level >= 5);
+                    inlines(content, style, f)
+                }
+                Block::Figure { caption, .. } => inlines(caption, FontStyle::Regular, f),
+                Block::Gallery(items) => items
+                    .iter()
+                    .for_each(|(_, c)| inlines(c, FontStyle::Regular, f)),
                 Block::List { items, .. } => items.iter().for_each(|i| blocks(i, f)),
                 Block::Quote(inner) => blocks(inner, f),
-                Block::Pre(t) => f(t),
+                Block::Pre(t) => f(t, FontStyle::Regular),
                 Block::MathBlock(_) | Block::TableRef(_) | Block::InfoboxRef | Block::Rule => {}
             }
         }
     }
-    f(&a.title);
+    f(&a.title, FontStyle::Bold);
     blocks(&a.body, f);
     for t in &a.tables {
-        t.cells.iter().for_each(|c| inlines(&c.content, f));
-        inlines(&t.caption, f);
+        for c in &t.cells {
+            inlines(&c.content, FontStyle::new(c.header, false), f);
+        }
+        inlines(&t.caption, FontStyle::Bold, f);
     }
     for row in a.infobox.iter().flat_map(|ib| &ib.rows) {
         match row {
-            InfoboxRow::Header(c) | InfoboxRow::Full(c) => inlines(c, f),
-            InfoboxRow::Image { caption, .. } => inlines(caption, f),
+            InfoboxRow::Header(c) => inlines(c, FontStyle::Bold, f),
+            InfoboxRow::Full(c) => inlines(c, FontStyle::Regular, f),
+            InfoboxRow::Image { caption, .. } => inlines(caption, FontStyle::Regular, f),
             InfoboxRow::Field { label, value } => {
-                inlines(label, f);
-                inlines(value, f);
+                inlines(label, FontStyle::Bold, f);
+                inlines(value, FontStyle::Regular, f);
             }
         }
     }

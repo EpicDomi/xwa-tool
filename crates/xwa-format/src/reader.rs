@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use crate::codec::{ChunkCodec, Decoder};
 use crate::content::{self, Article, Place, Ref};
 use crate::error::corrupt;
+use crate::font::FontStyle;
 use crate::normalize::{self, search_key_with};
 use crate::records::{ArticleRecord, ChunkEntry, ImageRecord, article_flags, image_encoding};
 use crate::superblock::{SectionEntry, Superblock};
@@ -100,6 +101,9 @@ pub fn section_name(kind: u32) -> &'static str {
         section::WORD_INDEX => "WORD_INDEX",
         section::FOLD => "FOLD",
         section::DAYS => "DAYS",
+        section::FONT_BOLD => "FONT_BOLD",
+        section::FONT_ITALIC => "FONT_ITALIC",
+        section::FONT_BOLD_ITALIC => "FONT_BOLD_ITALIC",
         _ => "unknown",
     }
 }
@@ -1015,24 +1019,52 @@ impl<S: Source> Archive<S> {
 
     /// The FONT section (spec 10), if the archive has one.
     pub fn font(&self) -> Result<Option<crate::font::Font>> {
-        let Some(s) = self.superblock.section(section::FONT) else {
+        self.styled_font(FontStyle::Regular)
+    }
+
+    /// The font section for `style` (spec 10, 10.1): FONT, FONT_BOLD,
+    /// FONT_ITALIC or FONT_BOLD_ITALIC, if the archive has it.
+    pub fn styled_font(&self, style: FontStyle) -> Result<Option<crate::font::Font>> {
+        let Some(s) = self.superblock.section(style.section()) else {
             return Ok(None);
         };
-        let len = usize::try_from(s.length).map_err(|_| corrupt("FONT too large"))?;
+        let len = usize::try_from(s.length)
+            .map_err(|_| corrupt(format!("{} too large", style.section_name())))?;
         Ok(Some(crate::font::Font::decode(
             &self.read_at(s.offset, len)?,
         )?))
     }
 
     fn verify_font(&self, r: &mut VerifyReport) -> Result<()> {
-        let font = match self.font() {
-            Ok(f) => f,
-            Err(Error::Io(e)) => return Err(Error::Io(e)),
-            Err(e) => {
-                r.problem(describe(&e));
-                return Ok(());
+        let mut fonts = Vec::new();
+        for style in FontStyle::ALL {
+            match self.styled_font(style) {
+                Ok(f) => fonts.push(f),
+                Err(Error::Io(e)) => return Err(Error::Io(e)),
+                Err(e) => {
+                    r.problem(format!("{}: {}", style.section_name(), describe(&e)));
+                    return Ok(());
+                }
             }
-        };
+        }
+        let font = fonts[0].take();
+        for (style, styled) in FontStyle::ALL.into_iter().zip(&fonts).skip(1) {
+            let Some(styled) = styled else { continue };
+            r.styled_glyphs[style as usize - 1] = styled.glyphs.len();
+            // Only FONT's code points have a styled glyph.
+            let extra: String = styled
+                .glyphs
+                .keys()
+                .filter(|c| font.as_ref().is_none_or(|f| !f.glyphs.contains_key(c)))
+                .take(24)
+                .collect();
+            if !extra.is_empty() {
+                r.problem(format!(
+                    "{} has glyphs FONT lacks: {extra}",
+                    style.section_name()
+                ));
+            }
+        }
         let glyphs = font.as_ref().map(|f| &f.glyphs);
         r.font_glyphs = glyphs.map_or(0, |g| g.len());
         r.without_glyph = r
@@ -1190,6 +1222,8 @@ pub struct VerifyReport {
     /// of the text the firmware's fonts lack that FONT has no glyph for.
     pub text_chars: crate::normalize::CharSet,
     pub font_glyphs: usize,
+    /// Glyphs in FONT_BOLD, FONT_ITALIC and FONT_BOLD_ITALIC.
+    pub styled_glyphs: [usize; 3],
     pub without_glyph: Vec<char>,
     pub text_bytes: u64,
     pub image_bytes: u64,

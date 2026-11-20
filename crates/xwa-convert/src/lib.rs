@@ -22,6 +22,7 @@ use rayon::prelude::*;
 use xwa_fetch::wikimedia::{Diagrams, FetchReport, Wanted};
 use xwa_format::Profile;
 use xwa_format::content::{Article, Formula, MathItem, Ref, anchor_hash};
+use xwa_format::font::FontStyle;
 use xwa_format::writer::{ArchiveWriter, Summary, WriterOptions, image_flags};
 use xwa_zim::Target;
 
@@ -781,11 +782,16 @@ fn convert_inner(
         Some(fonts) => {
             let text = writer.text_chars();
             let wanted = fallback::wanted(&text);
+            // FONT_BOLD: what is drawn bold, and bold italic, which the
+            // reader draws as its bold glyph sheared.
+            let mut bold = writer.styled_chars(FontStyle::Bold);
+            bold.union(&writer.styled_chars(FontStyle::BoldItalic));
+            let styled = [(FontStyle::Bold, fallback::wanted(&bold))];
             let language = zim
                 .metadata("Language")?
                 .map(|v| String::from_utf8_lossy(&v).trim().to_string());
             let order = fallback::search_order(fallback::catalogue(), language.as_deref());
-            let total = fallback::fonts_needed(&wanted, &order) as u64;
+            let total = fallback::fonts_needed(&wanted, &styled, &order) as u64;
             check(Progress {
                 stage: Stage::Fonts,
                 done: 0,
@@ -796,32 +802,35 @@ fn convert_inner(
             // Once the network fails, only fonts already kept are used, so an
             // offline conversion does not wait for every font in turn.
             let mut offline = false;
-            let (font, report) = fallback::build(&wanted, &text, &order, &mut |f| {
-                if stopped.is_some() {
-                    return Err("cancelled".to_string());
-                }
-                if offline && !fonts.is_cached(&f.sha256) {
-                    return Err("not downloaded: no connection".to_string());
-                }
-                let data = fonts.get(&f.url, &f.sha256, f.size);
-                offline |= matches!(data, Err(xwa_fetch::Error::Network(_)));
-                let data = data.map_err(|e| e.to_string());
-                done += 1;
-                if let Err(e) = check(Progress {
-                    stage: Stage::Fonts,
-                    done,
-                    total: total.max(done),
-                }) {
-                    stopped = Some(e);
-                }
-                data
-            });
+            let (sections, report) =
+                fallback::build(&wanted, &text, &styled, &order, &mut |_, f| {
+                    if stopped.is_some() {
+                        return Err("cancelled".to_string());
+                    }
+                    if offline && !fonts.is_cached(&f.sha256) {
+                        return Err("not downloaded: no connection".to_string());
+                    }
+                    let data = fonts.get(&f.url, &f.sha256, f.size);
+                    offline |= matches!(data, Err(xwa_fetch::Error::Network(_)));
+                    let data = data.map_err(|e| e.to_string());
+                    done += 1;
+                    if let Err(e) = check(Progress {
+                        stage: Stage::Fonts,
+                        done,
+                        total: total.max(done),
+                    }) {
+                        stopped = Some(e);
+                    }
+                    data
+                });
             if let Some(e) = stopped {
                 return Err(e);
             }
-            if let Some(font) = font {
-                writer.set_font(font);
+            if !sections.is_empty() {
                 writer.set_meta("license.font", fallback::LICENSE);
+            }
+            for (style, data) in sections {
+                writer.set_font(style, data);
             }
             Some(report)
         }

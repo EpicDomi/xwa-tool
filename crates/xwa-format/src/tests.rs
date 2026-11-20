@@ -6,6 +6,7 @@ use crate::content::{
     Anchor, Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, MathItem, Place,
     Style, Table, anchor_hash,
 };
+use crate::font::FontStyle;
 use crate::reader::Archive;
 use crate::records::{image_encoding, image_kind};
 use crate::title_index::{FLAG_ANCHOR, FLAG_REDIRECT};
@@ -430,7 +431,7 @@ fn the_fallback_font_covers_the_text_and_verify_says_what_it_lacks() {
             outline: Outline::default(),
         },
     );
-    w.set_font(font.encode().unwrap());
+    w.set_font(FontStyle::Regular, font.encode().unwrap());
     let (bytes, _) = finish(w);
     let a = Archive::from_source(bytes).unwrap();
     assert_eq!(a.font().unwrap().unwrap(), font);
@@ -440,6 +441,101 @@ fn the_fallback_font_covers_the_text_and_verify_says_what_it_lacks() {
     // ω from the body and → from the redirect; Cyrillic is the firmware's
     // own, and META is not checked.
     assert_eq!(r.without_glyph, ['ω', '→']);
+}
+
+#[test]
+fn styled_fonts_hold_what_is_drawn_in_their_style() {
+    use crate::font::{Font, Glyph};
+    use crate::math_glyphs::Outline;
+    let text = |t: &str| Inline::Text(t.into());
+    let styled = |s, t: &str| Inline::Styled(s, vec![text(t)]);
+    let article = Article {
+        title: "Α".into(),
+        body: vec![
+            Block::Heading {
+                level: 2,
+                content: vec![text("Β"), styled(Style::Italic, "Γ")],
+            },
+            Block::Heading {
+                level: 5,
+                content: vec![text("Δ")],
+            },
+            Block::Para(vec![
+                text("Ε"),
+                styled(Style::Italic, "Ζ"),
+                Inline::Styled(Style::Bold, vec![text("Η"), styled(Style::Italic, "Θ")]),
+                styled(Style::Subscript, "Ι"),
+            ]),
+            Block::Pre("Κ".into()),
+            Block::TableRef(0),
+            Block::InfoboxRef,
+        ],
+        tables: vec![Table {
+            rows: 2,
+            cols: 1,
+            flags: 0,
+            cells: vec![
+                Cell {
+                    header: true,
+                    rowspan: 1,
+                    colspan: 1,
+                    content: vec![text("Λ")],
+                },
+                Cell {
+                    header: false,
+                    rowspan: 1,
+                    colspan: 1,
+                    content: vec![text("Μ")],
+                },
+            ],
+            caption: vec![text("Ν")],
+        }],
+        infobox: Some(Infobox {
+            rows: vec![
+                InfoboxRow::Header(vec![text("Ξ")]),
+                InfoboxRow::Field {
+                    label: vec![text("Ο")],
+                    value: vec![text("Π")],
+                },
+            ],
+        }),
+        ..Default::default()
+    };
+    let mut w = ArchiveWriter::new(Cursor::new(Vec::new()), options(Profile::Compact)).unwrap();
+    w.add_article(0, &article, 0).unwrap();
+    let chars = |style| w.styled_chars(style).iter().collect::<String>();
+    assert_eq!(chars(FontStyle::Bold), "ΑΒΗΛΝΞΟ");
+    assert_eq!(chars(FontStyle::Italic), "Ζ");
+    assert_eq!(chars(FontStyle::BoldItalic), "ΓΔΘ");
+    assert_eq!(w.text_chars().len(), 16);
+
+    let font = |chars: &str| Font {
+        upem: 1000,
+        ascender: 1069,
+        descender: -293,
+        line_gap: 0,
+        glyphs: chars
+            .chars()
+            .map(|c| {
+                let glyph = Glyph {
+                    advance: 600,
+                    outline: Outline::default(),
+                };
+                (c, glyph)
+            })
+            .collect(),
+    };
+    w.set_font(FontStyle::Regular, font("ΑΒΓ").encode().unwrap());
+    w.set_font(FontStyle::Bold, font("ΑΒ").encode().unwrap());
+    w.set_font(FontStyle::BoldItalic, font("ΓΔ").encode().unwrap());
+    let (bytes, _) = finish(w);
+    let a = Archive::from_source(bytes).unwrap();
+    assert_eq!(a.styled_font(FontStyle::Bold).unwrap().unwrap(), font("ΑΒ"));
+    assert!(a.styled_font(FontStyle::Italic).unwrap().is_none());
+    let r = a.verify(&mut |_, _, _| {}).unwrap();
+    assert_eq!(r.styled_glyphs, [2, 0, 2]);
+    // Δ is not in FONT.
+    assert_eq!(r.problems, ["FONT_BOLD_ITALIC has glyphs FONT lacks: Δ"]);
 }
 
 #[test]
