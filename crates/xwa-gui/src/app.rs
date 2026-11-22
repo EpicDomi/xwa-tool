@@ -1801,6 +1801,12 @@ fn conversion_progress(p: xwa_convert::Progress, images: bool, sharper: bool) ->
     };
     let label = if p.stage == Stage::Fonts {
         format!("Fonts: {} of {}", group(p.done), group(p.total))
+    } else if p.stage == Stage::Scanning {
+        // Reading goes over the ZIM three times; its counts are only
+        // shares of the step, so say which pass it is on instead.
+        let pass = (p.done * 3).checked_div(p.total).unwrap_or(0).min(2) as usize;
+        let what = ["Listing entries", "Sorting pages", "Listing redirects"][pass];
+        format!("{what} ({} of 3)", pass + 1)
     } else if p.total > 0 && p.stage != Stage::Finishing {
         format!("{} of {}", group(p.done), group(p.total))
     } else {
@@ -1913,5 +1919,24 @@ mod tests {
         );
         assert_eq!(p.step, 2);
         assert!((p.fraction - (0.05 + 0.55 + 0.35 * 0.5)).abs() < 1e-6);
+        assert_eq!(p.label, "5 of 10");
+        // Reading reports shares of its three passes, not counts to show.
+        let part = 1 << 20;
+        for (done, label) in [
+            (0, "Listing entries (1 of 3)"),
+            (part + part / 2, "Sorting pages (2 of 3)"),
+            (3 * part, "Listing redirects (3 of 3)"),
+        ] {
+            let p = conversion_progress(
+                xwa_convert::Progress {
+                    stage: Stage::Scanning,
+                    done,
+                    total: 3 * part,
+                },
+                true,
+                false,
+            );
+            assert_eq!(p.label, label);
+        }
     }
 }
