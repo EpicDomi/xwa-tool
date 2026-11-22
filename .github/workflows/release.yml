@@ -1,10 +1,14 @@
 name: Release
 
 on:
+  # A tag publishes a release. Every merge into main builds one too, and a
+  # run can be started by hand for any branch (Actions, Release, Run
+  # workflow); those zips are kept as workflow artifacts instead.
   push:
     tags: ["v*"]
-  # A pull request that changes how releases are made builds them too; its
-  # zips are kept as workflow artifacts instead of being published.
+    branches: [main]
+  workflow_dispatch:
+  # A pull request that changes how releases are made builds them too.
   pull_request:
     paths:
       - ".github/workflows/release.yml"
@@ -14,7 +18,8 @@ on:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A newer build replaces one still running, except a release's.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: write
