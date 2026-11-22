@@ -623,11 +623,14 @@ fn xwa_info(path: &Path) -> CliResult {
     Ok(())
 }
 
-/// Throttled progress on stderr, only when it is a terminal.
+/// Throttled progress on stderr, only when it is a terminal. Each update
+/// rewrites the line, padding with spaces over what was there: Windows'
+/// console does not always understand terminal escape codes.
 struct Progress {
     enabled: bool,
     last: Instant,
-    shown: bool,
+    /// Characters on the progress line now.
+    shown: usize,
 }
 
 impl Progress {
@@ -635,7 +638,7 @@ impl Progress {
         Self {
             enabled: std::io::stderr().is_terminal(),
             last: Instant::now(),
-            shown: false,
+            shown: 0,
         }
     }
 
@@ -649,17 +652,25 @@ impl Progress {
         } else {
             done as f64 * 100.0 / total as f64
         };
-        eprint!("\r\x1b[2K{stage}: {pct:.0}%");
+        let line = format!("{stage}: {pct:.0}%");
+        eprint!("{}", overwrite(&line, self.shown));
         let _ = std::io::stderr().flush();
-        self.shown = true;
+        self.shown = line.chars().count();
     }
 
     fn clear(&mut self) {
-        if self.shown {
-            eprint!("\r\x1b[2K");
-            self.shown = false;
+        if self.shown > 0 {
+            eprint!("{}\r", overwrite("", self.shown));
+            self.shown = 0;
         }
     }
+}
+
+/// `line` from the start of the current line, with spaces over the rest
+/// of the `shown` characters already there.
+fn overwrite(line: &str, shown: usize) -> String {
+    let pad = shown.saturating_sub(line.chars().count());
+    format!("\r{line}{}", " ".repeat(pad))
 }
 
 fn verify(path: &Path) -> CliResult {
@@ -1019,6 +1030,18 @@ fn title_index_cmd(path: &Path, queries: &[String]) -> xwa_zim::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn progress_lines_cover_the_longer_line_before_them() {
+    assert_eq!(overwrite("images: 16%", 0), "\rimages: 16%");
+    // "reading the ZIM directory: 100%" is longer: the rest becomes spaces.
+    let before = "reading the ZIM directory: 100%".len();
+    let out = overwrite("images: 16%", before);
+    assert_eq!(out.len(), 1 + before);
+    assert!(out.ends_with("16%                    "));
+    assert!(!out.contains('\x1b'));
 }
 
 /// How a style is named in output.
