@@ -24,3 +24,4 @@ rfd.workspace = true
 
 [dev-dependencies]
 iced_test = "0.14.0"
+tempfile.workspace = true

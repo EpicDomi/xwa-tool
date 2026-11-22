@@ -42,7 +42,10 @@ Early. What works today:
   converting without the internet); `--no-fallback-font` leaves it out, and
   `--no-real-italic` (in the app: "Real italic", with pictures of the
   difference) leaves out just the italic glyphs, for the e-reader to slant
-  the regular ones.
+  the regular ones. An archive converted offline can be completed later:
+  `xwa-tool complete-font file.xwa`, or "Complete its fallback font" on
+  the app's Copy to SD card screen, downloads the glyphs it lacks and puts
+  them in the file.
 - `xwa-fetch`: the Kiwix library catalog, downloads (resumed after an
   interruption, mirrors tried in turn, checked against their SHA-256), and
   copying archives to SD cards (into the card's `wiki` folder, where the

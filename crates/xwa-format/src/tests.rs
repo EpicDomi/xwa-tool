@@ -11,7 +11,7 @@ use crate::reader::Archive;
 use crate::records::{image_encoding, image_kind};
 use crate::title_index::{FLAG_ANCHOR, FLAG_REDIRECT};
 use crate::writer::{ArchiveWriter, ImageInfo, Summary, WriterOptions};
-use crate::{Error, Profile};
+use crate::{Error, Profile, section};
 
 struct Rng(u64);
 
@@ -560,6 +560,82 @@ fn styled_fonts_hold_what_is_drawn_in_their_style() {
     assert_eq!(r.styled_glyphs, [2, 0, 2]);
     // Δ is not in FONT.
     assert_eq!(r.problems, ["FONT_BOLD_ITALIC has glyphs FONT lacks: Δ"]);
+}
+
+#[test]
+fn font_sections_can_be_replaced_in_place() {
+    use crate::font::{Font, FontChars, Glyph};
+    use crate::math_glyphs::Outline;
+    let font = |chars: &str| Font {
+        upem: 1000,
+        ascender: 1069,
+        descender: -293,
+        line_gap: 0,
+        glyphs: chars
+            .chars()
+            .map(|c| {
+                let outline = Outline::default();
+                (
+                    c,
+                    Glyph {
+                        advance: 500,
+                        outline,
+                    },
+                )
+            })
+            .collect(),
+    };
+    let mut w = ArchiveWriter::new(Cursor::new(Vec::new()), options(Profile::Compact)).unwrap();
+    let article = Article {
+        title: "Pi".into(),
+        body: vec![Block::Para(vec![
+            Inline::Text("π and ".into()),
+            Inline::Styled(Style::Bold, vec![Inline::Text("ω".into())]),
+        ])],
+        ..Default::default()
+    };
+    w.add_article(0, &article, 0).unwrap();
+    let text = w.text_chars();
+    let bold = w.styled_chars(FontStyle::Bold);
+    let none = crate::normalize::CharSet::default();
+    let chars = FontChars::new(false, [&text, &bold, &none, &none]);
+    // As after an offline conversion: FONT lacks ω, and there is no bold.
+    w.set_font(FontStyle::Regular, font("π").encode().unwrap());
+    w.set_font_chars(&chars);
+    let (bytes, _) = finish(w);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.xwa");
+    std::fs::write(&path, &bytes).unwrap();
+    let a = Archive::open(&path).unwrap();
+    assert_eq!(a.font_chars().unwrap().unwrap(), chars);
+    assert_eq!(a.scan_font_chars(&mut |_, _| {}).unwrap().sets, chars.sets);
+    assert_eq!(a.verify(&mut |_, _, _| {}).unwrap().without_glyph, ['ω']);
+    drop(a);
+
+    crate::writer::patch_sections(
+        &path,
+        &[
+            (section::FONT, Some(font("πω").encode().unwrap())),
+            (section::FONT_BOLD, Some(font("ω").encode().unwrap())),
+            (section::FONT_ITALIC, None),
+        ],
+    )
+    .unwrap();
+    let a = Archive::open(&path).unwrap();
+    assert_eq!(a.font().unwrap().unwrap(), font("πω"));
+    assert_eq!(a.styled_font(FontStyle::Bold).unwrap().unwrap(), font("ω"));
+    assert_eq!(a.font_chars().unwrap().unwrap(), chars);
+    let r = a.verify(&mut |_, _, _| {}).unwrap();
+    assert!(r.ok(), "{:?}", r.problems);
+    assert!(r.without_glyph.is_empty());
+    assert_eq!(r.styled_glyphs, [1, 0, 0]);
+    // Removing FONT clears the feature bit, and the archive still opens.
+    crate::writer::patch_sections(&path, &[(section::FONT, None), (section::FONT_BOLD, None)])
+        .unwrap();
+    let a = Archive::open(&path).unwrap();
+    assert!(a.font().unwrap().is_none());
+    assert_eq!(a.superblock().optional_features & crate::optional::FONT, 0);
+    assert!(a.verify(&mut |_, _, _| {}).unwrap().ok());
 }
 
 #[test]
