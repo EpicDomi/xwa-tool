@@ -12,7 +12,8 @@ use iced::{Alignment, Background, Element, Length, Padding, Shadow, mouse};
 use xwa_fetch::size_text;
 
 use crate::app::{
-    App, Choice, Job, Message, Popup, SEARCH_ID, Screen, ZOOMS, ZimInfo, conversion_steps, group,
+    App, ArchiveFont, Choice, Job, Message, Popup, SEARCH_ID, Screen, ZOOMS, ZimInfo,
+    conversion_steps, group,
 };
 use crate::device::{Body, Finish, Glass, Key, Model, margin};
 use crate::downloads::{Download, Fetch};
@@ -574,6 +575,11 @@ impl App {
             page.rows = vec![stop_row(&self.copy, "Stop copying", Message::CancelCopy)];
             return page;
         }
+        if self.font_work.running() {
+            page.top = COPY_TOP + progress_height(None);
+            page.rows = vec![stop_row(&self.font_work, "Stop", Message::CancelFontWork)];
+            return page;
+        }
         page.rows.push(
             Row::new(Kind::Item, "Archive")
                 .subtitle(
@@ -585,6 +591,22 @@ impl App {
                 .opens()
                 .on_press(Message::ChooseArchive),
         );
+        match &self.archive_font {
+            ArchiveFont::Missing { glyphs, .. } if self.archive.is_some() => page.rows.push(
+                Row::new(Kind::Item, "Complete its fallback font")
+                    .subtitle(format!(
+                        "{} glyphs missing · downloads Noto fonts",
+                        group(*glyphs as u64)
+                    ))
+                    .on_press(Message::CompleteFont),
+            ),
+            ArchiveFont::Unchecked if self.archive.is_some() => page.rows.push(
+                Row::new(Kind::Item, "Check its fallback font")
+                    .subtitle("Reads its text to find missing glyphs")
+                    .on_press(Message::CheckFont),
+            ),
+            _ => {}
+        }
         for d in &self.drives {
             let name = if d.name.is_empty() {
                 "Removable drive".to_string()
@@ -607,7 +629,10 @@ impl App {
             .push(Row::new(Kind::Action, "Copy").on_press_maybe(
                 (self.archive.is_some() && self.drive.is_some()).then_some(Message::CopyToCard),
             ));
-        if self.drives.is_empty() || matches!(self.copy, Job::Finished(_)) {
+        if self.drives.is_empty()
+            || matches!(self.copy, Job::Finished(_))
+            || matches!(self.font_work, Job::Finished(_))
+        {
             page.bottom = 120.0;
         }
         page
@@ -754,6 +779,14 @@ impl App {
             .on_scroll(Message::Scroll)
             .interaction(mouse::Interaction::Pointer)
             .into(),
+            Screen::Card if self.font_work.running() => {
+                let what = self.archive.as_deref().map(file_name).unwrap_or_default();
+                column![
+                    heading(&what, "Its fallback font", w),
+                    progress_view(&self.font_work, None),
+                ]
+                .into()
+            }
             Screen::Card if self.copy.running() => {
                 let what = self.archive.as_deref().map(file_name).unwrap_or_default();
                 let to = self.drive.as_ref().map(drive_line).unwrap_or_default();
@@ -774,10 +807,12 @@ impl App {
                 Job::Finished(Err(e)) => note(&format!("It did not work: {e}")),
                 _ => Space::new().into(),
             },
-            Screen::Card => match &self.copy {
-                Job::Finished(Ok(s)) => note(s),
-                Job::Finished(Err(e)) => note(&format!("The copy did not work: {e}")),
-                Job::Idle if self.drives.is_empty() => note(
+            Screen::Card => match (&self.copy, &self.font_work) {
+                (_, Job::Finished(Ok(s))) => note(s),
+                (_, Job::Finished(Err(e))) => note(e),
+                (Job::Finished(Ok(s)), _) => note(s),
+                (Job::Finished(Err(e)), _) => note(&format!("The copy did not work: {e}")),
+                (Job::Idle, _) if self.drives.is_empty() => note(
                     "No card found. Put the card in a card reader, or connect your e-reader by USB, then look again.",
                 ),
                 _ => Space::new().into(),

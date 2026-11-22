@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use ttf_parser::{Face, OutlineBuilder};
 use unicode_normalization::UnicodeNormalization;
-use xwa_format::font::{Font, FontStyle, Glyph, needs_fallback};
+use xwa_format::font::{Font, FontChars, FontStyle, Glyph, needs_fallback};
 use xwa_format::math_glyphs::{GlyphOp, Outline};
 use xwa_format::normalize::CharSet;
 
@@ -211,6 +211,48 @@ pub fn wanted(text: &CharSet) -> Vec<char> {
         out.dedup();
     }
     out
+}
+
+/// What to build for an archive's text: FONT's code points, and each other
+/// section's. FONT_BOLD is for text drawn bold or bold italic (a reader
+/// draws bold italic from the bold glyph when it has no bold italic);
+/// FONT_ITALIC and FONT_BOLD_ITALIC only when real italic is wanted.
+pub fn requests(chars: &FontChars) -> (Vec<char>, Vec<(FontStyle, Vec<char>)>) {
+    let mut bold = chars.set(FontStyle::Bold).clone();
+    bold.union(chars.set(FontStyle::BoldItalic));
+    let mut styled = vec![(FontStyle::Bold, wanted(&bold))];
+    if chars.real_italic {
+        for style in [FontStyle::Italic, FontStyle::BoldItalic] {
+            styled.push((style, wanted(chars.set(style))));
+        }
+    }
+    (wanted(chars.set(FontStyle::Regular)), styled)
+}
+
+/// Glyphs an archive's font sections lack that `fonts` could supply: how
+/// many for FONT, and how many for the other styles. `has(style, c)` says
+/// whether the archive has a glyph.
+pub fn missing(
+    chars: &FontChars,
+    fonts: &[CatalogFont],
+    has: &dyn Fn(FontStyle, char) -> bool,
+) -> (usize, usize) {
+    let (wanted, styled) = requests(chars);
+    let regular = wanted
+        .iter()
+        .filter(|&&c| !has(FontStyle::Regular, c) && source(c, fonts).is_some())
+        .count();
+    let other = styled
+        .iter()
+        .flat_map(|(style, chars)| chars.iter().map(move |&c| (*style, c)))
+        .filter(|&(style, c)| {
+            !has(style, c)
+                && source(c, fonts)
+                    .and_then(|i| fonts[i].file(style))
+                    .is_some_and(|f| f.covers(c))
+        })
+        .count();
+    (regular, other)
 }
 
 /// What building the fallback found.
@@ -662,6 +704,36 @@ mod tests {
             (report.styled[0].glyphs, report.styled[0].synthesised),
             (1, 1)
         );
+    }
+
+    #[test]
+    fn missing_counts_only_what_a_font_could_give() {
+        let fonts = search_order(catalogue(), None);
+        let mut all = CharSet::default();
+        // α is in Noto Sans (with a bold and an italic); U+0378 is
+        // unassigned, so no font has it.
+        all.insert_str("α\u{378}");
+        let mut bold = CharSet::default();
+        bold.insert('α');
+        let none = CharSet::default();
+        let chars = FontChars::new(true, [&all, &bold, &none, &none]);
+        let (wanted, styled) = requests(&chars);
+        assert_eq!(wanted, ['\u{378}', 'α']);
+        assert_eq!(
+            styled.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            FontStyle::ALL[1..]
+        );
+        let nothing = |_: FontStyle, _: char| false;
+        assert_eq!(missing(&chars, &fonts, &nothing), (1, 1));
+        let regular_only = |s: FontStyle, _: char| s == FontStyle::Regular;
+        assert_eq!(missing(&chars, &fonts, &regular_only), (0, 1));
+        let everything = |_: FontStyle, _: char| true;
+        assert_eq!(missing(&chars, &fonts, &everything), (0, 0));
+        // Without real italic, italic text asks for nothing.
+        let mut italic = CharSet::default();
+        italic.insert('α');
+        let upright = FontChars::new(false, [&all, &none, &italic, &none]);
+        assert_eq!(missing(&upright, &fonts, &regular_only), (0, 0));
     }
 
     #[test]

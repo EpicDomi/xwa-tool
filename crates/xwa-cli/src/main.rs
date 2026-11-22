@@ -120,6 +120,15 @@ enum Command {
         #[arg(long)]
         decompress: bool,
     },
+    /// Download the fallback font glyphs an XWA file lacks (after a
+    /// conversion made offline, say) and put them in the file.
+    CompleteFont {
+        /// The XWA file; it is changed in place.
+        file: PathBuf,
+        /// Where the Noto fonts are kept (default: the system's cache folder).
+        #[arg(long)]
+        font_cache: Option<PathBuf>,
+    },
     /// Check every checksum, chunk, article, link, image and title in an XWA file.
     Verify {
         /// The XWA file.
@@ -243,6 +252,7 @@ fn main() -> ExitCode {
         Command::Copy { file, to } => copy(&file, to.as_deref()),
         Command::Info { file, decompress } => info(&file, decompress),
         Command::Verify { file } => verify(&file),
+        Command::CompleteFont { file, font_cache } => complete_font(&file, font_cache),
         Command::Dump(args) => dump_cmd(&args),
         Command::TitleIndex { zim, queries } => title_index_cmd(&zim, &queries).map_err(Into::into),
     };
@@ -340,58 +350,7 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         }
     }
     if let Some(f) = &r.fallback_font {
-        println!(
-            "  fallback font: {} glyphs ({:.1} MB) from {}{}",
-            f.glyphs,
-            mb(f.bytes as u64),
-            if f.fonts.is_empty() {
-                "no font".to_string()
-            } else {
-                f.fonts.join(", ")
-            },
-            if f.missing > 0 {
-                format!("; {} characters have no glyph", f.missing)
-            } else {
-                String::new()
-            }
-        );
-        for s in f.styled.iter().filter(|s| s.glyphs + s.synthesised > 0) {
-            let word = style_word(s.style);
-            println!(
-                "  {}: {} glyphs ({} KB){}",
-                s.style.section_name(),
-                s.glyphs,
-                s.bytes.div_ceil(1000),
-                if s.synthesised > 0 {
-                    format!(
-                        "; the e-reader synthesises the {} other characters drawn {word} (no {word} font)",
-                        s.synthesised
-                    )
-                } else {
-                    String::new()
-                }
-            );
-        }
-        // One line per reason: offline, every font fails the same way.
-        let mut reasons: Vec<(&str, Vec<&str>)> = Vec::new();
-        for (family, why) in &f.failed {
-            match reasons.iter_mut().find(|(w, _)| *w == why.as_str()) {
-                Some((_, families)) => families.push(family),
-                None => reasons.push((why, vec![family])),
-            }
-        }
-        for (why, families) in reasons {
-            let names = if families.len() > 3 {
-                format!(
-                    "{} and {} more",
-                    families[..3].join(", "),
-                    families.len() - 3
-                )
-            } else {
-                families.join(", ")
-            };
-            println!("  fallback font: could not get {names}: {why}");
-        }
+        print_fallback_font(f);
     }
     println!(
         "  formulas: {} drawn as math, {} as text",
@@ -671,6 +630,111 @@ impl Progress {
 fn overwrite(line: &str, shown: usize) -> String {
     let pad = shown.saturating_sub(line.chars().count());
     format!("\r{line}{}", " ".repeat(pad))
+}
+
+/// What building the fallback font did, as `convert` reports it.
+fn print_fallback_font(f: &xwa_convert::fallback::Report) {
+    println!(
+        "  fallback font: {} glyphs ({:.1} MB) from {}{}",
+        f.glyphs,
+        mb(f.bytes as u64),
+        if f.fonts.is_empty() {
+            "no font".to_string()
+        } else {
+            f.fonts.join(", ")
+        },
+        if f.missing > 0 {
+            format!("; {} characters have no glyph", f.missing)
+        } else {
+            String::new()
+        }
+    );
+    for s in f.styled.iter().filter(|s| s.glyphs + s.synthesised > 0) {
+        let word = style_word(s.style);
+        println!(
+            "  {}: {} glyphs ({} KB){}",
+            s.style.section_name(),
+            s.glyphs,
+            s.bytes.div_ceil(1000),
+            if s.synthesised > 0 {
+                format!(
+                    "; the e-reader synthesises the {} other characters drawn {word} (no {word} font)",
+                    s.synthesised
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
+    // One line per reason: offline, every font fails the same way.
+    let mut reasons: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (family, why) in &f.failed {
+        match reasons.iter_mut().find(|(w, _)| *w == why.as_str()) {
+            Some((_, families)) => families.push(family),
+            None => reasons.push((why, vec![family])),
+        }
+    }
+    for (why, families) in reasons {
+        let names = if families.len() > 3 {
+            format!(
+                "{} and {} more",
+                families[..3].join(", "),
+                families.len() - 3
+            )
+        } else {
+            families.join(", ")
+        };
+        println!("  fallback font: could not get {names}: {why}");
+    }
+}
+
+fn complete_font(path: &Path, cache: Option<PathBuf>) -> CliResult {
+    let fonts = Fonts::new(
+        cache
+            .or_else(Fonts::default_cache)
+            .ok_or("no cache folder for fonts; pass --font-cache")?,
+    );
+    let archive = Xwa::open(path)?;
+    let chars = match archive.font_chars()? {
+        Some(chars) => chars,
+        None => {
+            // Made before archives listed their characters: read the text.
+            let mut progress = Progress::new();
+            let chars = archive.scan_font_chars(&mut |done, total| {
+                progress.update("reading the text", done, total)
+            })?;
+            progress.clear();
+            chars
+        }
+    };
+    let status = xwa_convert::font_status(&archive, &chars)?;
+    drop(archive);
+    if status.complete() {
+        println!("The fallback font has every glyph the Noto fonts can give; nothing to do.");
+        return Ok(());
+    }
+    println!(
+        "{} characters lack a glyph, and {} bold or italic glyphs; getting them",
+        status.missing, status.missing_styled
+    );
+    let mut progress = Progress::new();
+    let report = xwa_convert::rebuild_font(path, &chars, &fonts, &mut |p| {
+        progress.update("getting fonts", p.done, p.total);
+        true
+    })?;
+    progress.clear();
+    print_fallback_font(&report);
+    let after = xwa_convert::font_status(&Xwa::open(path)?, &chars)?;
+    if after.complete() {
+        println!("done: {} now has every glyph it needs", path.display());
+        Ok(())
+    } else {
+        Err(format!(
+            "{} characters and {} bold or italic glyphs are still missing",
+            after.missing, after.missing_styled
+        )
+        .into())
+    }
 }
 
 fn verify(path: &Path) -> CliResult {

@@ -12,6 +12,7 @@ use xwa_fetch::drives::Drive;
 use xwa_fetch::fonts::Fonts;
 use xwa_fetch::wikimedia::Diagrams;
 use xwa_fetch::{Book, Language, size_text};
+use xwa_format::font::FontChars;
 
 use crate::device::{Finish, Key, Model};
 use crate::downloads::{self, Download, Fetch, Queue, Rate};
@@ -285,6 +286,114 @@ pub enum Event<T> {
     Done(Result<T, String>),
 }
 
+/// What the app knows of the chosen archive's fallback font (spec 10).
+#[derive(Debug, Clone, Default)]
+pub enum ArchiveFont {
+    /// Not looked at yet.
+    #[default]
+    Unknown,
+    /// Every glyph the Noto fonts have for its text.
+    Complete,
+    /// Glyphs the Noto fonts could add, and the characters to build for.
+    Missing {
+        glyphs: usize,
+        chars: Arc<FontChars>,
+    },
+    /// Made before archives listed their characters: finding out means
+    /// reading its text.
+    Unchecked,
+    /// No fallback font, or the archive could not be read.
+    None,
+}
+
+/// How complete `archive`'s fallback font is, from its CHARS section;
+/// without one, [`ArchiveFont::Unchecked`] when it has a FONT to check.
+pub(crate) fn archive_font(path: &Path) -> ArchiveFont {
+    let look = || -> Result<ArchiveFont, xwa_format::Error> {
+        let archive = xwa_format::reader::Archive::open(path)?;
+        match archive.font_chars()? {
+            Some(chars) => Ok(font_state(&archive, chars)?),
+            None if archive.font()?.is_some() => Ok(ArchiveFont::Unchecked),
+            None => Ok(ArchiveFont::None),
+        }
+    };
+    look().unwrap_or(ArchiveFont::None)
+}
+
+/// Reads an older archive's text (spec 10.2) to see what its font lacks.
+fn check_font(
+    path: &Path,
+    send: &mut dyn FnMut(String, u64, u64) -> bool,
+) -> Result<(ArchiveFont, String), String> {
+    let archive = xwa_format::reader::Archive::open(path).map_err(|e| e.to_string())?;
+    let mut stopped = false;
+    let chars = archive
+        .scan_font_chars(&mut |done, total| {
+            let label = format!("Reading articles: {} of {}", group(done), group(total));
+            stopped |= !send(label, done, total);
+        })
+        .map_err(|e| e.to_string())?;
+    if stopped {
+        return Err("cancelled".into());
+    }
+    let state = font_state(&archive, chars).map_err(|e| e.to_string())?;
+    let said = match &state {
+        ArchiveFont::Missing { glyphs, .. } => format!(
+            "Its fallback font lacks {} glyphs the Noto fonts have.",
+            group(*glyphs as u64)
+        ),
+        _ => "Its fallback font has every glyph it needs.".into(),
+    };
+    Ok((state, said))
+}
+
+/// Gets the glyphs `path`'s font lacks and puts them in the archive.
+fn complete_font(
+    path: &Path,
+    chars: &FontChars,
+    fonts: &Fonts,
+    send: &mut dyn FnMut(String, u64, u64) -> bool,
+) -> Result<(ArchiveFont, String), String> {
+    let report = xwa_convert::rebuild_font(path, chars, fonts, &mut |p| {
+        let label = format!("Fonts: {} of {}", group(p.done), group(p.total));
+        send(label, p.done, p.total)
+    })
+    .map_err(|e| e.to_string())?;
+    let state = archive_font(path);
+    let said = match &state {
+        ArchiveFont::Complete => "Its fallback font now has every glyph it needs.".to_string(),
+        ArchiveFont::Missing { glyphs, .. } => {
+            let why = report
+                .failed
+                .first()
+                .map(|(_, why)| format!(" ({why})"))
+                .unwrap_or_default();
+            format!(
+                "{} glyphs are still missing: some Noto fonts could not be downloaded{why}.",
+                group(*glyphs as u64)
+            )
+        }
+        _ => "The archive could not be read again.".into(),
+    };
+    Ok((state, said))
+}
+
+fn font_state(
+    archive: &xwa_format::reader::Archive,
+    chars: FontChars,
+) -> Result<ArchiveFont, xwa_format::Error> {
+    let status = xwa_convert::font_status(archive, &chars)
+        .map_err(|e| xwa_format::Error::Invalid(e.to_string()))?;
+    Ok(if status.complete() {
+        ArchiveFont::Complete
+    } else {
+        ArchiveFont::Missing {
+            glyphs: status.missing + status.missing_styled,
+            chars: Arc::new(chars),
+        }
+    })
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     // The window and the device.
@@ -359,6 +468,14 @@ pub enum Message {
     CopyToCard,
     Copying(Event<PathBuf>),
     CancelCopy,
+    /// What looking at an archive's fallback font found.
+    ArchiveFontRead(PathBuf, ArchiveFont),
+    /// Read an older archive's text to find what its font lacks.
+    CheckFont,
+    /// Get the glyphs the archive's font lacks and put them in it.
+    CompleteFont,
+    FontWork(Event<(ArchiveFont, String)>),
+    CancelFontWork,
     // The Kiwix library.
     LoadLibrary,
     LanguagesLoaded(Result<Vec<Language>, String>),
@@ -442,6 +559,10 @@ pub struct App {
 
     // Copying.
     pub archive: Option<PathBuf>,
+    /// How complete the archive's fallback font is.
+    pub archive_font: ArchiveFont,
+    /// Checking or completing it.
+    pub font_work: Job,
     pub drives: Vec<Drive>,
     pub drive: Option<Drive>,
     pub copy: Job,
@@ -503,6 +624,8 @@ impl App {
             converting_images: true,
             output: None,
             archive: None,
+            archive_font: ArchiveFont::Unknown,
+            font_work: Job::Idle,
             drives: Vec::new(),
             drive: None,
             copy: Job::Idle,
@@ -561,11 +684,13 @@ impl App {
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase());
         if ext.as_deref() == Some("xwa") {
-            self.archive = Some(path);
-            self.copy = Job::Idle;
+            if self.copy.running() || self.font_work.running() {
+                return Task::none();
+            }
+            let look = self.use_archive(path);
             self.refresh_drives();
             self.go(Screen::Card);
-            Task::none()
+            look
         } else {
             self.update(Message::ZimChosen(Some(path)))
         }
@@ -1230,9 +1355,14 @@ impl App {
             Message::OutputChosen(None) => {}
             Message::Conversion(Event::Progress(p)) => self.conversion.progress(p),
             Message::Conversion(Event::Done(result)) => {
+                let mut look = Task::none();
                 if result.is_ok() {
-                    self.archive = self.output.take();
-                    self.copy = Job::Idle;
+                    if let Some(out) = self.output.take()
+                        && !self.copy.running()
+                        && !self.font_work.running()
+                    {
+                        look = self.use_archive(out);
+                    }
                     self.refresh_drives();
                 }
                 self.conversion = Job::Finished(match result {
@@ -1240,6 +1370,7 @@ impl App {
                     other => other,
                 });
                 self.focus = self.first_focusable();
+                return look;
             }
             Message::ConvertAgain => {
                 if !self.conversion.running() {
@@ -1271,9 +1402,10 @@ impl App {
                     Message::ArchiveChosen,
                 );
             }
-            Message::ArchiveChosen(Some(path)) if !self.copy.running() => {
-                self.archive = Some(path);
-                self.copy = Job::Idle;
+            Message::ArchiveChosen(Some(path))
+                if !self.copy.running() && !self.font_work.running() =>
+            {
+                return self.use_archive(path);
             }
             Message::ArchiveChosen(_) => {}
             Message::LookForCards => self.refresh_drives(),
@@ -1292,6 +1424,28 @@ impl App {
                 self.focus = self.first_focusable();
             }
             Message::CancelCopy => self.copy.cancel(),
+            Message::ArchiveFontRead(path, state) => {
+                if self.archive.as_ref() == Some(&path) && !self.font_work.running() {
+                    self.archive_font = state;
+                }
+            }
+            Message::CheckFont => return self.start_font_work(false),
+            Message::CompleteFont => return self.start_font_work(true),
+            Message::FontWork(Event::Progress(p)) => self.font_work.progress(p),
+            Message::FontWork(Event::Done(result)) => {
+                self.font_work = Job::Finished(match result {
+                    Ok((state, said)) => {
+                        self.archive_font = state;
+                        Ok(said)
+                    }
+                    Err(e) if e == "cancelled" => Err("Stopped.".into()),
+                    Err(e) => Err(format!(
+                        "The fallback font could not be checked or completed: {e}"
+                    )),
+                });
+                self.focus = self.first_focusable();
+            }
+            Message::CancelFontWork => self.font_work.cancel(),
 
             // The library.
             Message::LoadLibrary => return self.load_library(),
@@ -1562,10 +1716,76 @@ impl App {
         Task::run(rx, Message::Conversion)
     }
 
+    /// Makes `path` the archive to copy, and looks at its fallback font.
+    fn use_archive(&mut self, path: PathBuf) -> Task<Message> {
+        self.archive = Some(path.clone());
+        self.copy = Job::Idle;
+        self.font_work = Job::Idle;
+        self.archive_font = ArchiveFont::Unknown;
+        let look = path.clone();
+        Task::perform(background(move || archive_font(&look)), move |state| {
+            Message::ArchiveFontRead(path.clone(), state)
+        })
+    }
+
+    /// Reads an older archive's text to find what its font lacks or, with
+    /// `complete`, gets what it lacks and puts it in the archive.
+    fn start_font_work(&mut self, complete: bool) -> Task<Message> {
+        let Some(path) = self.archive.clone() else {
+            return Task::none();
+        };
+        if self.copy.running() || self.font_work.running() {
+            return Task::none();
+        }
+        let chars = match (&self.archive_font, complete) {
+            (ArchiveFont::Missing { chars, .. }, true) => Some(chars.clone()),
+            (ArchiveFont::Unchecked, false) => None,
+            _ => return Task::none(),
+        };
+        let Some(cache) = Fonts::default_cache() else {
+            self.font_work = Job::Finished(Err("There is no folder to keep fonts in.".into()));
+            return Task::none();
+        };
+        let (job, cancel) = Job::start();
+        self.font_work = job;
+        self.focus = 0;
+        let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            let mut throttle = Throttle::default();
+            let mut send = |label: String, done: u64, total: u64| {
+                if throttle.due(0) {
+                    let fraction = if total == 0 {
+                        0.0
+                    } else {
+                        done as f32 / total as f32
+                    };
+                    let _ = tx.unbounded_send(Event::Progress(Progress {
+                        label,
+                        fraction,
+                        step: 0,
+                        rate: None,
+                        left: None,
+                    }));
+                }
+                !cancel.load(Ordering::Relaxed)
+            };
+            let result = match chars {
+                None => check_font(&path, &mut send),
+                Some(chars) => complete_font(&path, &chars, &Fonts::new(cache), &mut send),
+            };
+            let _ = tx.unbounded_send(Event::Done(result));
+        });
+        Task::run(rx, Message::FontWork)
+    }
+
     fn start_copy(&mut self) -> Task<Message> {
         let (Some(file), Some(drive)) = (self.archive.clone(), self.drive.clone()) else {
             return Task::none();
         };
+        if self.font_work.running() {
+            return Task::none();
+        }
+        self.font_work = Job::Idle;
         let (job, cancel) = Job::start();
         self.copy = job;
         self.focus = 0;

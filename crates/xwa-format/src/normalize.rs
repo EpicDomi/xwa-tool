@@ -186,7 +186,7 @@ pub fn search_key(title: &str) -> String {
 
 /// A set of code points, as a bit per code point: the characters an
 /// index's keys use, or an archive's text.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CharSet(Vec<u64>);
 
 impl Default for CharSet {

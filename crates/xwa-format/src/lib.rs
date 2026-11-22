@@ -63,6 +63,9 @@ pub mod section {
     pub const FONT_ITALIC: u32 = 16;
     /// FONT's layout, for the code points drawn bold italic.
     pub const FONT_BOLD_ITALIC: u32 = 17;
+    /// The code points the text uses that FONT and the styled font
+    /// sections are for, so tools can check and rebuild them.
+    pub const CHARS: u32 = 18;
 }
 
 /// Days in a DAYS section: January 1 to December 31, February 29 included.

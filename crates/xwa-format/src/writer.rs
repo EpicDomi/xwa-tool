@@ -317,6 +317,12 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         self.set_extra(style.section(), data);
     }
 
+    /// Supplies the CHARS section (spec 10.2): the code points the font
+    /// sections are for.
+    pub fn set_font_chars(&mut self, chars: &crate::font::FontChars) {
+        self.set_extra(section::CHARS, chars.encode());
+    }
+
     /// Supplies the DAYS section (spec 5.3): the article for each day of
     /// the year, January 1 to December 31 with February 29, `None` where
     /// there is none.
@@ -958,4 +964,49 @@ impl Spool {
         }
         Ok(())
     }
+}
+
+/// Replaces sections of the finished archive at `path`, in place: each
+/// `(kind, Some(bytes))` is written after the end of the file and takes
+/// the place of any section of that kind, and `(kind, None)` removes it.
+/// Old bytes stay where they are, no longer referred to, and the
+/// superblock is written last, so until then the archive is as it was.
+/// Optional feature bit 0 follows whether a FONT section is left.
+pub fn patch_sections(path: &Path, changes: &[(u32, Option<Vec<u8>>)]) -> Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    let mut head = vec![0u8; Superblock::SIZE];
+    file.read_exact(&mut head)?;
+    let mut sb = Superblock::decode(&head)?;
+    let mut end = file.seek(SeekFrom::End(0))?;
+    for (kind, data) in changes {
+        sb.sections.retain(|s| s.kind != *kind);
+        let Some(data) = data else { continue };
+        let offset = end.next_multiple_of(BLOCK_SIZE as u64);
+        file.seek(SeekFrom::Start(end))?;
+        file.write_all(&vec![0u8; (offset - end) as usize])?;
+        file.write_all(data)?;
+        end = offset + data.len() as u64;
+        sb.sections.push(SectionEntry {
+            kind: *kind,
+            flags: 0,
+            offset,
+            length: data.len() as u64,
+            crc32: crate::crc::crc32(data),
+        });
+    }
+    if sb.section(section::FONT).is_some() {
+        sb.optional_features |= optional::FONT;
+    } else {
+        sb.optional_features &= !optional::FONT;
+    }
+    sb.file_size = end;
+    let head = sb.encode()?;
+    file.sync_data()?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&head)?;
+    file.sync_all()?;
+    Ok(())
 }
