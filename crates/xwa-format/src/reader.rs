@@ -104,6 +104,7 @@ pub fn section_name(kind: u32) -> &'static str {
         section::FONT_BOLD => "FONT_BOLD",
         section::FONT_ITALIC => "FONT_ITALIC",
         section::FONT_BOLD_ITALIC => "FONT_BOLD_ITALIC",
+        section::CHARS => "CHARS",
         _ => "unknown",
     }
 }
@@ -1035,7 +1036,91 @@ impl<S: Source> Archive<S> {
         )?))
     }
 
+    /// The CHARS section (spec 10.2), if the archive has one.
+    pub fn font_chars(&self) -> Result<Option<crate::font::FontChars>> {
+        let Some(s) = self.superblock.section(section::CHARS) else {
+            return Ok(None);
+        };
+        let len = usize::try_from(s.length).map_err(|_| corrupt("CHARS too large"))?;
+        Ok(Some(crate::font::FontChars::decode(
+            &self.read_at(s.offset, len)?,
+        )?))
+    }
+
+    /// What the CHARS section would hold, found by reading every article
+    /// and title, for archives made before it existed. Real italic is
+    /// taken as wanted.
+    pub fn scan_font_chars(
+        &self,
+        progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<crate::font::FontChars> {
+        let mut sets: [normalize::CharSet; 4] = Default::default();
+        for (_, v) in &self.meta {
+            sets[0].insert_str(v);
+        }
+        // Articles in a few contiguous runs, one per thread, each reading its
+        // chunks once.
+        let count = self.article_count();
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()) as u32;
+        let per = count.div_ceil(threads.max(1)).max(1);
+        let done = std::sync::atomic::AtomicU64::new(0);
+        let results: Vec<Result<[normalize::CharSet; 4]>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..count.div_ceil(per))
+                .map(|t| {
+                    let done = &done;
+                    scope.spawn(move || {
+                        let mut sets: [normalize::CharSet; 4] = Default::default();
+                        let mut cache = ChunkCache::default();
+                        for id in t * per..((t + 1) * per).min(count) {
+                            let article =
+                                content::decode_article(&self.stream_with(id, &mut cache)?)?;
+                            content::for_each_styled_text(&article, &mut |t, style| {
+                                sets[0].insert_str(t);
+                                if style != FontStyle::Regular {
+                                    sets[style as usize].insert_str(t);
+                                }
+                            });
+                            done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Ok(sets)
+                    })
+                })
+                .collect();
+            while !workers.iter().all(|w| w.is_finished()) {
+                progress(
+                    done.load(std::sync::atomic::Ordering::Relaxed),
+                    count as u64,
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            workers
+                .into_iter()
+                .map(|w| {
+                    w.join()
+                        .unwrap_or_else(|_| Err(corrupt("scan thread panicked")))
+                })
+                .collect()
+        });
+        for part in results {
+            for (set, found) in sets.iter_mut().zip(part?) {
+                set.union(&found);
+            }
+        }
+        // Titles in the index: redirects show in search too.
+        self.index()
+            .for_each_in_leaf(|_, _, hit| sets[0].insert_str(&hit.display))
+            .map_err(index_error)?;
+        progress(count as u64, count as u64);
+        let [a, b, c, d] = &sets;
+        Ok(crate::font::FontChars::new(true, [a, b, c, d]))
+    }
+
     fn verify_font(&self, r: &mut VerifyReport) -> Result<()> {
+        match self.font_chars() {
+            Err(Error::Io(e)) => return Err(Error::Io(e)),
+            Err(e) => r.problem(describe(&e)),
+            Ok(_) => {}
+        }
         let mut fonts = Vec::new();
         for style in FontStyle::ALL {
             match self.styled_font(style) {

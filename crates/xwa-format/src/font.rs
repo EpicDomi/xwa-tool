@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use crate::error::corrupt;
 use crate::math_glyphs::{Outline, decode_outline, encode_outline};
+use crate::normalize::CharSet;
 use crate::{Error, Result};
 
 /// The code points the firmware's built-in reader fonts draw (Bookerly
@@ -379,5 +380,120 @@ mod tests {
         for c in ['\u{200D}', '\u{FE0F}', '\u{7}', '\u{2066}'] {
             assert!(!needs_fallback(c), "{c:?}");
         }
+    }
+}
+
+/// The CHARS section (spec 10.2): which code points the archive's text
+/// uses that its font sections are for, by the style the text is drawn
+/// in, and whether the archive was meant to carry real italic. Tools use
+/// it to check the font sections and rebuild them without reading every
+/// article; readers have no use for it.
+///
+/// ```text
+/// u32 flags (bit 0: FONT_ITALIC and FONT_BOLD_ITALIC wanted)
+/// four times, for regular (all the text), bold, italic and bold italic:
+///     u32 range_count, then per range u32 first, u32 last (sorted)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontChars {
+    pub real_italic: bool,
+    /// By [`FontStyle`]: every code point of the text that needs the
+    /// fallback font, then those drawn bold, italic and bold italic.
+    pub sets: [CharSet; 4],
+}
+
+impl FontChars {
+    /// From the code points the text uses in each style, keeping only
+    /// those the fallback font is for ([`needs_fallback`]).
+    pub fn new(real_italic: bool, text: [&CharSet; 4]) -> Self {
+        let sets = text.map(|t| {
+            let mut s = CharSet::default();
+            t.iter()
+                .filter(|&c| needs_fallback(c))
+                .for_each(|c| s.insert(c));
+            s
+        });
+        Self { real_italic, sets }
+    }
+
+    pub fn set(&self, style: FontStyle) -> &CharSet {
+        &self.sets[style as usize]
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&u32::from(self.real_italic).to_le_bytes());
+        for set in &self.sets {
+            let mut ranges: Vec<(u32, u32)> = Vec::new();
+            for c in set.iter() {
+                let c = c as u32;
+                match ranges.last_mut() {
+                    Some(r) if r.1 + 1 == c => r.1 = c,
+                    _ => ranges.push((c, c)),
+                }
+            }
+            out.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
+            for (a, b) in ranges {
+                out.extend_from_slice(&a.to_le_bytes());
+                out.extend_from_slice(&b.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    pub fn decode(b: &[u8]) -> Result<Self> {
+        let bad = |what: &str| corrupt(format!("CHARS: {what}"));
+        let mut words = b.chunks(4).map(|w| {
+            w.try_into()
+                .map(u32::from_le_bytes)
+                .map_err(|_| bad("truncated"))
+        });
+        let mut next = || words.next().unwrap_or_else(|| Err(bad("truncated")));
+        let flags = next()?;
+        let mut sets: [CharSet; 4] = Default::default();
+        for set in &mut sets {
+            let count = next()?;
+            let mut prev = None;
+            for _ in 0..count {
+                let (a, b) = (next()?, next()?);
+                if a > b || b > 0x10FFFF || prev.is_some_and(|p| a <= p) {
+                    return Err(bad("ranges out of order"));
+                }
+                prev = Some(b);
+                (a..=b)
+                    .filter_map(char::from_u32)
+                    .for_each(|c| set.insert(c));
+            }
+        }
+        if next().is_ok() {
+            return Err(bad("bytes after the last range"));
+        }
+        Ok(Self {
+            real_italic: flags & 1 != 0,
+            sets,
+        })
+    }
+}
+
+#[cfg(test)]
+mod chars_tests {
+    use super::*;
+
+    #[test]
+    fn chars_round_trip_and_keep_only_what_the_fallback_is_for() {
+        let mut all = CharSet::default();
+        all.insert_str("Plain αβγ ж 中文 \u{200d}");
+        let mut bold = CharSet::default();
+        bold.insert_str("Bold β");
+        let none = CharSet::default();
+        let chars = FontChars::new(true, [&all, &bold, &none, &none]);
+        assert_eq!(
+            chars.set(FontStyle::Regular).iter().collect::<String>(),
+            "αβγ中文"
+        );
+        assert_eq!(chars.set(FontStyle::Bold).iter().collect::<String>(), "β");
+        let bytes = chars.encode();
+        assert_eq!(FontChars::decode(&bytes).unwrap(), chars);
+        assert!(FontChars::decode(&bytes[..bytes.len() - 2]).is_err());
     }
 }
