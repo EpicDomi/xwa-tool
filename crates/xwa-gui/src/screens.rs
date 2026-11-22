@@ -709,6 +709,7 @@ impl App {
                 Row::new(Kind::Setting, "Refresh flash")
                     .value(on_off(self.prefs.refresh_flash))
                     .on_press(Message::ToggleFlash),
+                self.fonts_row(),
                 Row::new(Kind::Item, "Download folder")
                     .icon(&icons::FOLDER)
                     .subtitle(self.download_dir().display().to_string())
@@ -723,6 +724,35 @@ impl App {
             ],
             note: None,
             hints: ["« Back", "Change", "Up", "Down"],
+        }
+    }
+
+    /// Settings: keep every Noto font the fallback font could need, for
+    /// converting offline.
+    fn fonts_row(&self) -> Row<Message> {
+        let row = Row::new(Kind::Item, "Fonts for converting offline");
+        if self.font_download.running() {
+            return row
+                .subtitle(self.font_download.label().to_string())
+                .value(percent(self.font_download.fraction().unwrap_or(0.0)))
+                .on_press(Message::DownloadFonts);
+        }
+        if let Job::Finished(Err(e)) = &self.font_download {
+            return row
+                .subtitle(format!("Stopped: {e}"))
+                .on_press(Message::DownloadFonts);
+        }
+        match self.fonts_kept {
+            Some(k) if k.all() => row.subtitle(format!("All {} Noto font files kept", k.total)),
+            Some(k) => row
+                .subtitle(format!(
+                    "{} of {} kept · download the rest ({})",
+                    k.kept,
+                    k.total,
+                    size_text(k.missing_bytes)
+                ))
+                .on_press(Message::DownloadFonts),
+            None => row.subtitle("No folder to keep them in"),
         }
     }
 
