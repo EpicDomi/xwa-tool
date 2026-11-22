@@ -23,7 +23,7 @@ use rayon::prelude::*;
 use xwa_fetch::wikimedia::{Diagrams, FetchReport, Wanted};
 use xwa_format::Profile;
 use xwa_format::content::{Article, Formula, MathItem, Place, Ref, anchor_hash};
-use xwa_format::font::FontStyle;
+use xwa_format::font::{FontChars, FontStyle};
 use xwa_format::writer::{ArchiveWriter, Summary, WriterOptions, image_flags};
 use xwa_zim::Target;
 
@@ -1234,63 +1234,20 @@ fn convert_inner(
     // Glyphs for what the firmware's own fonts cannot draw.
     let fallback_font = match &opts.fonts {
         Some(fonts) => {
-            let text = writer.text_chars();
-            let wanted = fallback::wanted(&text);
-            // FONT_BOLD: what is drawn bold, and bold italic, which the
-            // reader draws from the bold glyph when it has no bold italic.
-            let mut bold = writer.styled_chars(FontStyle::Bold);
-            bold.union(&writer.styled_chars(FontStyle::BoldItalic));
-            let mut styled = vec![(FontStyle::Bold, fallback::wanted(&bold))];
-            if opts.real_italic {
-                for style in [FontStyle::Italic, FontStyle::BoldItalic] {
-                    styled.push((style, fallback::wanted(&writer.styled_chars(style))));
-                }
-            }
+            let styled = |style| writer.styled_chars(style);
+            let [a, b, c, d] = FontStyle::ALL.map(styled);
+            let chars = FontChars::new(opts.real_italic, [&a, &b, &c, &d]);
             let language = zim
                 .metadata("Language")?
                 .map(|v| String::from_utf8_lossy(&v).trim().to_string());
-            let order = fallback::search_order(fallback::catalogue(), language.as_deref());
-            let total = fallback::fonts_needed(&wanted, &styled, &order) as u64;
-            check(Progress {
-                stage: Stage::Fonts,
-                done: 0,
-                total,
-            })?;
-            let mut done = 0u64;
-            let mut stopped = None;
-            // Once the network fails, only fonts already kept are used, so an
-            // offline conversion does not wait for every font in turn.
-            let mut offline = false;
-            let (sections, report) =
-                fallback::build(&wanted, &text, &styled, &order, &mut |_, f| {
-                    if stopped.is_some() {
-                        return Err("cancelled".to_string());
-                    }
-                    if offline && !fonts.is_cached(&f.sha256) {
-                        return Err("not downloaded: no connection".to_string());
-                    }
-                    let data = fonts.get(&f.url, &f.sha256, f.size);
-                    offline |= matches!(data, Err(xwa_fetch::Error::Network(_)));
-                    let data = data.map_err(|e| e.to_string());
-                    done += 1;
-                    if let Err(e) = check(Progress {
-                        stage: Stage::Fonts,
-                        done,
-                        total: total.max(done),
-                    }) {
-                        stopped = Some(e);
-                    }
-                    data
-                });
-            if let Some(e) = stopped {
-                return Err(e);
-            }
+            let (sections, report) = build_fonts(&chars, language.as_deref(), fonts, &mut check)?;
             if !sections.is_empty() {
                 writer.set_meta("license.font", fallback::LICENSE);
             }
             for (style, data) in sections {
                 writer.set_font(style, data);
             }
+            writer.set_font_chars(&chars);
             Some(report)
         }
         None => None,
@@ -1348,6 +1305,150 @@ fn wiki_code(zim: &xwa_zim::Archive) -> Option<String> {
 
 /// Progress through the scanning stage's three passes (the directory, the
 /// pages, the directory again for redirects) as one figure.
+/// Built font sections: each style's bytes.
+type FontSections = Vec<(FontStyle, Vec<u8>)>;
+
+/// FONT and the other font sections for `chars` (spec 10), from the Noto
+/// fonts in `fonts`, downloading what is not kept. Once the network fails
+/// only fonts already kept are used, so offline work does not wait for
+/// every font in turn.
+fn build_fonts(
+    chars: &FontChars,
+    language: Option<&str>,
+    fonts: &xwa_fetch::fonts::Fonts,
+    check: &mut dyn FnMut(Progress) -> Result<()>,
+) -> Result<(FontSections, fallback::Report)> {
+    let (wanted, styled) = fallback::requests(chars);
+    let order = fallback::search_order(fallback::catalogue(), language);
+    let total = fallback::fonts_needed(&wanted, &styled, &order) as u64;
+    check(Progress {
+        stage: Stage::Fonts,
+        done: 0,
+        total,
+    })?;
+    let mut done = 0u64;
+    let mut stopped = None;
+    let mut offline = false;
+    let text = chars.set(FontStyle::Regular);
+    let built = fallback::build(&wanted, text, &styled, &order, &mut |_, f| {
+        if stopped.is_some() {
+            return Err("cancelled".to_string());
+        }
+        if offline && !fonts.is_cached(&f.sha256) {
+            return Err("not downloaded: no connection".to_string());
+        }
+        let data = fonts.get(&f.url, &f.sha256, f.size);
+        offline |= matches!(data, Err(xwa_fetch::Error::Network(_)));
+        let data = data.map_err(|e| e.to_string());
+        done += 1;
+        if let Err(e) = check(Progress {
+            stage: Stage::Fonts,
+            done,
+            total: total.max(done),
+        }) {
+            stopped = Some(e);
+        }
+        data
+    });
+    match stopped {
+        Some(e) => Err(e),
+        None => Ok(built),
+    }
+}
+
+/// How complete an archive's font sections are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontStatus {
+    /// Code points of the text FONT has no glyph for that a Noto font has.
+    pub missing: usize,
+    /// Bold, italic and bold italic glyphs missing that the Noto fonts have.
+    pub missing_styled: usize,
+}
+
+impl FontStatus {
+    pub fn complete(&self) -> bool {
+        self.missing == 0 && self.missing_styled == 0
+    }
+}
+
+/// What an archive's font sections lack for `chars` that the Noto fonts
+/// could supply.
+pub fn font_status(archive: &xwa_format::reader::Archive, chars: &FontChars) -> Result<FontStatus> {
+    let fonts = FontStyle::ALL.map(|s| archive.styled_font(s));
+    let mut sections = Vec::with_capacity(4);
+    for f in fonts {
+        sections.push(f?);
+    }
+    let order = fallback::search_order(fallback::catalogue(), archive.meta_value("language"));
+    let has = |style: FontStyle, c: char| {
+        sections[style as usize]
+            .as_ref()
+            .is_some_and(|f| f.glyphs.contains_key(&c))
+    };
+    let (missing, missing_styled) = fallback::missing(chars, &order, &has);
+    Ok(FontStatus {
+        missing,
+        missing_styled,
+    })
+}
+
+/// Builds the font sections of the archive at `path` again for `chars` (its
+/// CHARS section, or what [`xwa_format::reader::Archive::scan_font_chars`]
+/// found), downloading the Noto fonts it needs, and puts them in the
+/// archive in place of the old ones, with a CHARS section. Nothing is
+/// written unless the new sections hold more glyphs than the old.
+pub fn rebuild_font(
+    path: &Path,
+    chars: &FontChars,
+    fonts: &xwa_fetch::fonts::Fonts,
+    progress: &mut dyn FnMut(Progress) -> bool,
+) -> Result<fallback::Report> {
+    let archive = xwa_format::reader::Archive::open(path)?;
+    let glyphs = |archive: &xwa_format::reader::Archive| -> Result<usize> {
+        let mut n = 0;
+        for style in FontStyle::ALL {
+            n += archive.styled_font(style)?.map_or(0, |f| f.glyphs.len());
+        }
+        Ok(n)
+    };
+    let before = glyphs(&archive)?;
+    let language = archive.meta_value("language").map(str::to_string);
+    let mut meta = archive.meta().to_vec();
+    drop(archive);
+    let mut check = |p: Progress| {
+        if progress(p) {
+            Ok(())
+        } else {
+            Err(Error::Cancelled)
+        }
+    };
+    let (sections, report) = build_fonts(chars, language.as_deref(), fonts, &mut check)?;
+    let after: usize = report.glyphs + report.styled.iter().map(|s| s.glyphs).sum::<usize>();
+    if after <= before {
+        return Ok(report);
+    }
+    let mut changes: Vec<(u32, Option<Vec<u8>>)> = FontStyle::ALL
+        .iter()
+        .map(|&style| {
+            let data = sections
+                .iter()
+                .find(|(s, _)| *s == style)
+                .map(|(_, d)| d.clone());
+            (style.section(), data)
+        })
+        .collect();
+    changes.push((xwa_format::section::CHARS, Some(chars.encode())));
+    if !meta.iter().any(|(k, _)| k == "license.font") {
+        meta.push(("license.font".into(), fallback::LICENSE.into()));
+        changes.push((
+            xwa_format::section::META,
+            Some(xwa_format::meta::encode(&meta)),
+        ));
+    }
+    xwa_format::writer::patch_sections(path, &changes)?;
+    Ok(report)
+}
+
 fn scanning(pass: u64, done: u64, total: u64) -> Progress {
     const PART: u64 = 1 << 20;
     Progress {

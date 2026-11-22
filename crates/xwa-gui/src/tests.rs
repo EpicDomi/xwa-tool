@@ -577,6 +577,104 @@ fn a_finished_conversion_can_be_done_again_with_other_settings() {
     assert!(app.page().rows.iter().any(|r| r.title == "Made for"));
 }
 
+/// A one-article archive at `path` whose text uses π and α: with a FONT
+/// holding `glyphs` when given, and its CHARS section when `chars`.
+fn small_archive(path: &Path, glyphs: Option<&str>, chars: bool) {
+    use xwa_format::content::{Article, Block, Inline};
+    use xwa_format::font::{Font, FontChars, FontStyle, Glyph};
+    use xwa_format::writer::{ArchiveWriter, WriterOptions};
+    let mut w =
+        ArchiveWriter::create(path, WriterOptions::new(xwa_format::Profile::Compact)).unwrap();
+    let article = Article {
+        title: "Pi".into(),
+        body: vec![Block::Para(vec![Inline::Text("π and α".into())])],
+        ..Default::default()
+    };
+    w.add_article(0, &article, 0).unwrap();
+    if let Some(glyphs) = glyphs {
+        let font = Font {
+            upem: 1000,
+            ascender: 1069,
+            descender: -293,
+            line_gap: 0,
+            glyphs: glyphs
+                .chars()
+                .map(|c| {
+                    (
+                        c,
+                        Glyph {
+                            advance: 500,
+                            outline: Default::default(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        w.set_font(FontStyle::Regular, font.encode().unwrap());
+    }
+    if chars {
+        let text = w.text_chars();
+        let none = xwa_format::normalize::CharSet::default();
+        w.set_font_chars(&FontChars::new(true, [&text, &none, &none, &none]));
+    }
+    w.finish().unwrap();
+}
+
+#[test]
+fn an_archive_missing_glyphs_offers_to_complete_its_font() {
+    use crate::app::{ArchiveFont, archive_font};
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name);
+    small_archive(&path("missing.xwa"), Some("π"), true);
+    small_archive(&path("complete.xwa"), Some("πα"), true);
+    small_archive(&path("older.xwa"), Some("π"), false);
+    small_archive(&path("plain.xwa"), None, false);
+    assert!(matches!(
+        archive_font(&path("missing.xwa")),
+        ArchiveFont::Missing { glyphs: 1, .. }
+    ));
+    assert!(matches!(
+        archive_font(&path("complete.xwa")),
+        ArchiveFont::Complete
+    ));
+    assert!(matches!(
+        archive_font(&path("older.xwa")),
+        ArchiveFont::Unchecked
+    ));
+    assert!(matches!(
+        archive_font(&path("plain.xwa")),
+        ArchiveFont::None
+    ));
+
+    let mut app = app(Model::X4);
+    let titles =
+        |app: &App| -> Vec<String> { app.page().rows.into_iter().map(|r| r.title).collect() };
+    for (name, row) in [
+        ("missing.xwa", Some("Complete its fallback font")),
+        ("older.xwa", Some("Check its fallback font")),
+        ("complete.xwa", None),
+        ("plain.xwa", None),
+    ] {
+        let _ = app.update(Message::Opened(path(name)));
+        assert_eq!(app.screen, Screen::Card);
+        let state = archive_font(&path(name));
+        let _ = app.update(Message::ArchiveFontRead(path(name), state));
+        let rows = titles(&app);
+        assert_eq!(
+            rows.get(1).map(String::as_str) == row,
+            row.is_some(),
+            "{name}: {rows:?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains("fallback font")) || row.is_some());
+    }
+    // A late answer about another archive changes nothing.
+    let _ = app.update(Message::ArchiveFontRead(
+        path("missing.xwa"),
+        archive_font(&path("missing.xwa")),
+    ));
+    assert!(!titles(&app).iter().any(|r| r.contains("fallback font")));
+}
+
 #[test]
 fn reading_the_zim_once_is_offered_only_where_there_is_room() {
     use crate::app::ZimInfo;
@@ -892,6 +990,17 @@ fn screens() {
         a.drives = vec![card()];
         a.drive = a.drives.first().cloned();
         snap(&a, &dir, &format!("{tag}-card"));
+        let none = xwa_format::normalize::CharSet::default();
+        let chars = xwa_format::font::FontChars::new(true, [&none, &none, &none, &none]);
+        a.archive_font = crate::app::ArchiveFont::Missing {
+            glyphs: 161_586,
+            chars: std::sync::Arc::new(chars),
+        };
+        snap(&a, &dir, &format!("{tag}-card-font"));
+        a.font_work = running(0.4, 0, "Fonts: 24 of 61");
+        snap(&a, &dir, &format!("{tag}-card-font-working"));
+        a.font_work = Job::Idle;
+        a.archive_font = crate::app::ArchiveFont::Unknown;
         a.copy = running(0.62, 0, "255 MB of 412 MB");
         snap(&a, &dir, &format!("{tag}-copying"));
 

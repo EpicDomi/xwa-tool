@@ -119,6 +119,7 @@ their caption (7.4).
 | 15 | FONT_BOLD | optional | FONT's layout: bold glyphs (10.1) |
 | 16 | FONT_ITALIC | optional | FONT's layout: italic glyphs (10.1) |
 | 17 | FONT_BOLD_ITALIC | optional | FONT's layout: bold italic glyphs (10.1) |
+| 18 | CHARS | optional | The characters the font sections are for, for tools (10.2) |
 
 Readers skip section types they do not know. A new optional section is
 added under a new type without changing the version; a change a reader
@@ -127,7 +128,9 @@ changes the version.
 
 BLOBS holds content chunks and image data in whatever order the writer
 produced them, so a converter can stream both into one file in a single
-pass. CHUNK_TABLE and IMAGE_TABLE offsets are relative to the start of
+pass. A tool may replace a section in place by writing the new one after
+the end of the file and then the superblock; the old bytes stay,
+unreferenced, so readers must not assume sections fill the file. CHUNK_TABLE and IMAGE_TABLE offsets are relative to the start of
 BLOBS. xwa-tool writes BLOBS first, at offset 4096, and the tables after
 it, but readers must not rely on any section order.
 
@@ -832,6 +835,30 @@ bold words in many scripts. FONT_ITALIC and FONT_BOLD_ITALIC together:
 3 KB for Simple Wiktionary, 11 KB for the top 100, 29 KB for chemistry,
 55 KB for mathematics (0.07%) and 98 KB for Swedish Wikipedia (0.01%);
 at most 0.16% (Vikidia).
+
+### 10.2 Characters (CHARS)
+
+For tools, not readers: which characters the text uses that the font
+sections are for, so a tool can tell whether they are complete and build
+them again (after a conversion made offline, say) without reading every
+article.
+
+```
+u32 flags (bit 0: FONT_ITALIC and FONT_BOLD_ITALIC wanted)
+four times, for regular (all the text), bold, italic and bold italic:
+    u32 range_count, then per range (sorted, not overlapping):
+        u32 first_code_point, u32 last_code_point
+```
+
+The regular list holds every code point FONT is for (10, "What it holds"),
+before the Arabic presentation forms are added; the others hold those the
+text draws in each style (10.1), before bold italic is added to bold.
+xwa-tool writes it whenever it writes a fallback font, and `xwa-tool
+complete-font` (or the app's "Complete its fallback font") uses it to fill
+in what is missing. For archives without it, the tool reads the articles
+and titles to find the same lists. Measured: 2.7 KB for the top 100
+articles, 23 KB for mathematics, 76 KB (0.01%) for Swedish Wikipedia,
+whose scattered Han characters take a range each.
 
 ## 11. Device I/O budget (expected)
 
