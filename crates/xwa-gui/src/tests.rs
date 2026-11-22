@@ -592,6 +592,13 @@ fn stopping_a_conversion_asks_first() {
     press(&mut app, Key::Confirm);
     assert_eq!(app.popup, None);
     assert!(matches!(app.conversion, Job::Running { ref label, .. } if label == "Stopping…"));
+    // While it stops, the row says so and asks nothing more.
+    assert!(app.conversion.stopping());
+    let rows = app.page().rows;
+    assert_eq!(rows[0].title, "Stopping…");
+    assert!(rows[0].on_press.is_none());
+    let _ = app.update(Message::AskStopConversion);
+    assert_eq!(app.popup, None);
 }
 
 #[test]

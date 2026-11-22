@@ -366,6 +366,30 @@ fn archive(opts: WriterOptions) -> (Vec<u8>, Summary) {
 }
 
 #[test]
+fn images_after_the_text_do_not_pile_up_in_memory() {
+    // A converter adds every article, then every picture. The last text
+    // chunks may still be compressing when the pictures start; the pictures
+    // queued behind them must not all wait in memory for `finish`.
+    let opts = options(Profile::Full);
+    let mut w = ArchiveWriter::new(Cursor::new(Vec::new()), opts).unwrap();
+    w.set_math_glyphs(math_glyphs());
+    for id in 0..ARTICLES {
+        w.add_article(id, &article(id), 0).unwrap();
+    }
+    let mut most = 0;
+    for id in 0..20_000 {
+        let (info, data) = image(id % IMAGES);
+        w.add_image(id, info, data).unwrap();
+        most = most.max(w.waiting());
+    }
+    assert!(most <= 3 * 64, "{most} blobs waited");
+    let (bytes, _) = finish(w);
+    let a = Archive::from_source(bytes).unwrap();
+    assert_eq!(a.image_count(), 20_000);
+    assert!(a.verify(&mut |_, _, _| {}).unwrap().ok());
+}
+
+#[test]
 fn compact_round_trip() {
     let (bytes, summary) = archive(options(Profile::Compact));
     check_archive(bytes, &summary, Profile::Compact);

@@ -135,6 +135,11 @@ impl Job {
         matches!(self, Job::Running { .. })
     }
 
+    /// Asked to stop, and finishing the work in hand.
+    pub fn stopping(&self) -> bool {
+        matches!(self, Job::Running { cancel, .. } if cancel.load(Ordering::Relaxed))
+    }
+
     pub(crate) fn cancel(&mut self) {
         if let Job::Running { cancel, label, .. } = self {
             cancel.store(true, Ordering::Relaxed);
@@ -1243,7 +1248,7 @@ impl App {
                 }
             }
             Message::AskStopConversion => {
-                if self.conversion.running() {
+                if self.conversion.running() && !self.conversion.stopping() {
                     self.popup = Some(Popup::StopConversion);
                     self.popup_focus = 0;
                 }
