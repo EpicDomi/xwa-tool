@@ -1859,6 +1859,17 @@ fn summary(r: &xwa_convert::Report, out: &Path, device: xwa_convert::Device) -> 
             done.push_str(&format!(" Some could not be downloaded: {why}."));
         }
     }
+    if let Some(f) = &r.fallback_font
+        && let Some((_, why)) = f.failed.first()
+    {
+        done.push_str(&format!(
+            " The fallback font is incomplete: {} of its Noto fonts could not be had ({why}), \
+             so {} characters the e-reader's fonts lack have no glyph. Converting again \
+             downloads what is missing.",
+            group(f.failed.len() as u64),
+            group(f.missing as u64),
+        ));
+    }
     done
 }
 
@@ -1902,6 +1913,44 @@ mod tests {
         assert_eq!(group(999), "999");
         assert_eq!(group(1000), "1,000");
         assert_eq!(group(6_912_345), "6,912,345");
+    }
+
+    #[test]
+    fn the_summary_says_when_the_fallback_font_is_incomplete() {
+        let mut r = xwa_convert::Report {
+            summary: Default::default(),
+            stats: Default::default(),
+            failed_articles: 0,
+            failed_images: 0,
+            dangling_redirects: 0,
+            pages_left_out: 0,
+            diagrams: None,
+            sharper_images: 0,
+            fallback_font: None,
+            zim_bytes: 0,
+            elapsed: Duration::ZERO,
+        };
+        r.summary.articles = 2;
+        let out = std::path::Path::new("wiki.xwa");
+        let device = xwa_convert::Device::X4;
+        assert!(!summary(&r, out, device).contains("fallback"));
+        r.fallback_font = Some(xwa_convert::fallback::Report {
+            missing: 1_234,
+            failed: vec![
+                ("Noto Sans".into(), "network: timed out".into()),
+                (
+                    "Noto Sans SC".into(),
+                    "not downloaded: no connection".into(),
+                ),
+            ],
+            ..Default::default()
+        });
+        let s = summary(&r, out, device);
+        assert!(
+            s.contains("2 of its Noto fonts could not be had (network: timed out)"),
+            "{s}"
+        );
+        assert!(s.contains("1,234 characters"), "{s}");
     }
 
     #[test]

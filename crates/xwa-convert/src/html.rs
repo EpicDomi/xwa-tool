@@ -1467,19 +1467,26 @@ fn normalize(run: &mut Vec<Inline>) {
                     *t = s;
                 }
                 Inline::Styled(style, c) => {
+                    let space_before = *prev_space;
                     walk(c, prev_space);
                     if c.is_empty() {
                         continue;
                     }
                     // A style around nothing but (non-breaking) spaces, such
-                    // as a superscript that held an icon, is just a space.
+                    // as a superscript that held an icon or a coloured key
+                    // of `&nbsp;`, is one space, and only where the text
+                    // before it does not already end in one (or the run
+                    // starts: `prev_space` begins true).
                     if c.iter()
                         .all(|i| matches!(i, Inline::Text(t) if t.chars().all(char::is_whitespace)))
                     {
-                        if !*prev_space && !out.is_empty() {
-                            out.push(Inline::Text(" ".into()));
-                            *prev_space = true;
+                        if !space_before {
+                            match out.last_mut() {
+                                Some(Inline::Text(t)) => t.push(' '),
+                                _ => out.push(Inline::Text(" ".into())),
+                            }
                         }
+                        *prev_space = true;
                         continue;
                     }
                     // Adjacent runs in the same style become one ("d" "s" -> "ds").
@@ -1754,6 +1761,40 @@ mod tests {
 
     fn text(s: &str) -> Inline {
         Inline::Text(s.to_string())
+    }
+
+    #[test]
+    fn a_style_holding_only_spaces_is_one_space_at_most() {
+        // From English Wikipedia: each made two spaces, or a leading one.
+        let cases = [
+            (
+                "<p>Iela <i>&nbsp;</i>(Latvian National Theatre)</p>",
+                "Iela (Latvian National Theatre)",
+            ),
+            ("<p>Iela<i>&nbsp;</i>(Latvian)</p>", "Iela (Latvian)"),
+            (
+                "<p>difference; <b>&nbsp;&nbsp;</b> – Qualified</p>",
+                "difference; – Qualified",
+            ),
+            (
+                "<p>Won <sup>&nbsp;</sup><sup>&nbsp;</sup>Lost</p>",
+                "Won Lost",
+            ),
+        ];
+        for (body, flat) in cases {
+            let x = run(body);
+            assert_eq!(x.article.body, [Block::Para(vec![text(flat)])], "{body}");
+        }
+        // After a break, at the start of a link, at the start of the run.
+        for body in [
+            "<p>Advanced<br><i>&nbsp;</i> Won</p>",
+            "<p><a href=\"./Mathematics\"><b>&nbsp;</b></a> U.S. Patent</p>",
+            "<p><i>&nbsp;</i>U.S. Patent</p>",
+        ] {
+            let x = run(body);
+            let problems = xwa_format::content::text_problems(&x.article);
+            assert!(problems.is_empty(), "{body}: {problems:?}");
+        }
     }
 
     #[test]
