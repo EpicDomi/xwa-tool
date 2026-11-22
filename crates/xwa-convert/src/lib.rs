@@ -37,6 +37,8 @@ pub enum Error {
     Xwa(#[from] xwa_format::Error),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Fetch(#[from] xwa_fetch::Error),
     #[error("the ZIM file has no articles")]
     NoArticles,
     #[error("cancelled")]
@@ -853,8 +855,31 @@ fn wiki_code(zim: &xwa_zim::Archive) -> Option<String> {
     (!code.is_empty()).then(|| code.to_string())
 }
 
-/// Progress through the scanning stage's three passes (the directory, the
-/// pages, the directory again for redirects) as one figure.
+/// Downloads every Noto font file the fallback font could need that
+/// `fonts` does not keep yet, for converting offline later. `progress`
+/// gets bytes done and in all, and stops it by returning false. Returns
+/// how many files were downloaded.
+pub fn download_all_fonts(
+    fonts: &xwa_fetch::fonts::Fonts,
+    progress: &mut dyn FnMut(u64, u64) -> bool,
+) -> Result<usize> {
+    let missing: Vec<_> = fallback::all_files()
+        .into_iter()
+        .filter(|f| !fonts.is_cached(&f.sha256))
+        .collect();
+    let total: u64 = missing.iter().map(|f| f.size).sum();
+    let mut done = 0u64;
+    for f in &missing {
+        if !progress(done, total) {
+            return Err(Error::Cancelled);
+        }
+        fonts.get(&f.url, &f.sha256, f.size)?;
+        done += f.size;
+    }
+    progress(total, total);
+    Ok(missing.len())
+}
+
 /// Built font sections: each style's bytes.
 type FontSections = Vec<(FontStyle, Vec<u8>)>;
 
@@ -999,6 +1024,8 @@ pub fn rebuild_font(
     Ok(report)
 }
 
+/// Progress through the scanning stage's three passes (the directory, the
+/// pages, the directory again for redirects) as one figure.
 fn scanning(pass: u64, done: u64, total: u64) -> Progress {
     const PART: u64 = 1 << 20;
     Progress {

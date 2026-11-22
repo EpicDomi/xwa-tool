@@ -120,6 +120,13 @@ enum Command {
         #[arg(long)]
         decompress: bool,
     },
+    /// Download every Noto font the fallback font could need (about 120 MB),
+    /// so conversions made offline later still get a complete one.
+    DownloadFonts {
+        /// Where to keep them (default: the system's cache folder).
+        #[arg(long)]
+        font_cache: Option<PathBuf>,
+    },
     /// Download the fallback font glyphs an XWA file lacks (after a
     /// conversion made offline, say) and put them in the file.
     CompleteFont {
@@ -252,6 +259,7 @@ fn main() -> ExitCode {
         Command::Copy { file, to } => copy(&file, to.as_deref()),
         Command::Info { file, decompress } => info(&file, decompress),
         Command::Verify { file } => verify(&file),
+        Command::DownloadFonts { font_cache } => download_fonts(font_cache),
         Command::CompleteFont { file, font_cache } => complete_font(&file, font_cache),
         Command::Dump(args) => dump_cmd(&args),
         Command::TitleIndex { zim, queries } => title_index_cmd(&zim, &queries).map_err(Into::into),
@@ -630,6 +638,23 @@ impl Progress {
 fn overwrite(line: &str, shown: usize) -> String {
     let pad = shown.saturating_sub(line.chars().count());
     format!("\r{line}{}", " ".repeat(pad))
+}
+
+fn download_fonts(cache: Option<PathBuf>) -> CliResult {
+    let cache = cache
+        .or_else(Fonts::default_cache)
+        .ok_or("no cache folder for fonts; pass --font-cache")?;
+    let mut progress = Progress::new();
+    let n = xwa_convert::download_all_fonts(&Fonts::new(cache.clone()), &mut |done, total| {
+        progress.update("downloading fonts", done, total);
+        true
+    })?;
+    progress.clear();
+    match n {
+        0 => println!("Every Noto font is already kept in {}.", cache.display()),
+        n => println!("Downloaded {n} Noto fonts to {}.", cache.display()),
+    }
+    Ok(())
 }
 
 /// What building the fallback font did, as `convert` reports it.

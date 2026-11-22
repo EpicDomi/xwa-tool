@@ -116,6 +116,15 @@ pub fn catalogue() -> Vec<CatalogFont> {
     out
 }
 
+/// Every font file the fallback font can be drawn from: each family's
+/// regular, bold, italic and bold italic, where it has them.
+pub fn all_files() -> Vec<FontFile> {
+    catalogue()
+        .into_iter()
+        .flat_map(|f| std::iter::once(f.regular).chain(f.styled.into_iter().flatten()))
+        .collect()
+}
+
 /// The CJK fonts in the order a text in `language` (ISO 639-3) wants them:
 /// Han characters look different in Japan, Korea and the Chinese regions.
 fn cjk_order(language: Option<&str>) -> [&'static str; 5] {
@@ -754,6 +763,7 @@ mod tests {
         assert!(has("Noto Sans Arabic", FontStyle::Bold));
         assert!(!has("Noto Sans Arabic", FontStyle::Italic));
         assert!(!has("Noto Sans Math", FontStyle::Bold));
+        assert_eq!(all_files().len(), fonts.len() + 63 + 2);
         // Only Noto Sans has an italic.
         let italic = fonts
             .iter()

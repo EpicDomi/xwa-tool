@@ -286,6 +286,36 @@ pub enum Event<T> {
     Done(Result<T, String>),
 }
 
+/// How many of the fallback font's Noto font files are kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontsKept {
+    pub kept: usize,
+    pub total: usize,
+    /// The size of the rest.
+    pub missing_bytes: u64,
+}
+
+impl FontsKept {
+    /// Looks in the font cache.
+    pub fn count() -> Option<FontsKept> {
+        let fonts = Fonts::new(Fonts::default_cache()?);
+        let files = xwa_convert::fallback::all_files();
+        let missing: Vec<_> = files
+            .iter()
+            .filter(|f| !fonts.is_cached(&f.sha256))
+            .collect();
+        Some(FontsKept {
+            kept: files.len() - missing.len(),
+            total: files.len(),
+            missing_bytes: missing.iter().map(|f| f.size).sum(),
+        })
+    }
+
+    pub fn all(&self) -> bool {
+        self.kept == self.total
+    }
+}
+
 /// What the app knows of the chosen archive's fallback font (spec 10).
 #[derive(Debug, Clone, Default)]
 pub enum ArchiveFont {
@@ -468,6 +498,10 @@ pub enum Message {
     CopyToCard,
     Copying(Event<PathBuf>),
     CancelCopy,
+    // Fonts.
+    /// Download every Noto font the fallback font could need, or stop.
+    DownloadFonts,
+    FontDownload(Event<String>),
     /// What looking at an archive's fallback font found.
     ArchiveFontRead(PathBuf, ArchiveFont),
     /// Read an older archive's text to find what its font lacks.
@@ -557,6 +591,10 @@ pub struct App {
     pub converting_images: bool,
     pub output: Option<PathBuf>,
 
+    /// The fallback font's Noto fonts kept for converting offline.
+    pub fonts_kept: Option<FontsKept>,
+    pub font_download: Job,
+
     // Copying.
     pub archive: Option<PathBuf>,
     /// How complete the archive's fallback font is.
@@ -623,6 +661,8 @@ impl App {
             converting_sharper: false,
             converting_images: true,
             output: None,
+            fonts_kept: None,
+            font_download: Job::Idle,
             archive: None,
             archive_font: ArchiveFont::Unknown,
             font_work: Job::Idle,
@@ -1424,6 +1464,22 @@ impl App {
                 self.focus = self.first_focusable();
             }
             Message::CancelCopy => self.copy.cancel(),
+            Message::DownloadFonts => {
+                if self.font_download.running() {
+                    self.font_download.cancel();
+                } else {
+                    return self.start_font_download();
+                }
+            }
+            Message::FontDownload(Event::Progress(p)) => self.font_download.progress(p),
+            Message::FontDownload(Event::Done(result)) => {
+                self.fonts_kept = FontsKept::count();
+                self.font_download = match result {
+                    Ok(_) => Job::Idle,
+                    Err(e) if e == "cancelled" => Job::Idle,
+                    Err(e) => Job::Finished(Err(e)),
+                };
+            }
             Message::ArchiveFontRead(path, state) => {
                 if self.archive.as_ref() == Some(&path) && !self.font_work.running() {
                     self.archive_font = state;
@@ -1620,6 +1676,12 @@ impl App {
                 self.refresh_drives();
                 Task::none()
             }
+            Screen::Settings => {
+                if !self.font_download.running() {
+                    self.fonts_kept = FontsKept::count();
+                }
+                Task::none()
+            }
             _ => Task::none(),
         }
     }
@@ -1714,6 +1776,29 @@ impl App {
             ));
         });
         Task::run(rx, Message::Conversion)
+    }
+
+    /// Downloads every Noto font file not kept yet, one at a time.
+    fn start_font_download(&mut self) -> Task<Message> {
+        let Some(cache) = Fonts::default_cache() else {
+            return Task::none();
+        };
+        let (job, cancel) = Job::start();
+        self.font_download = job;
+        let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            let mut throttle = Throttle::default();
+            let result = xwa_convert::download_all_fonts(&Fonts::new(cache), &mut |done, total| {
+                if throttle.due(0) {
+                    let _ =
+                        tx.unbounded_send(Event::Progress(Progress::bytes(done, total, None, 0)));
+                }
+                !cancel.load(Ordering::Relaxed)
+            });
+            let result = result.map(|n| n.to_string()).map_err(|e| e.to_string());
+            let _ = tx.unbounded_send(Event::Done(result));
+        });
+        Task::run(rx, Message::FontDownload)
     }
 
     /// Makes `path` the archive to copy, and looks at its fallback font.
