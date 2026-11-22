@@ -37,7 +37,9 @@ Early. What works today:
   character its text uses that the e-reader's own fonts lack (Greek, IPA,
   symbols, Arabic, Chinese...), with real bold and italic glyphs for the
   text it draws bold or italic. The Noto fonts it needs are downloaded the
-  first time and kept; `--no-fallback-font` leaves it out, and
+  first time and kept (`xwa-tool download-fonts`, or "Fonts for converting
+  offline" in the app's settings, keeps all of them, about 120 MB, for
+  converting without the internet); `--no-fallback-font` leaves it out, and
   `--no-real-italic` (in the app: "Real italic", with pictures of the
   difference) leaves out just the italic glyphs, for the e-reader to slant
   the regular ones.

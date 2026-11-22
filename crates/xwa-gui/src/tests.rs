@@ -578,6 +578,46 @@ fn a_finished_conversion_can_be_done_again_with_other_settings() {
 }
 
 #[test]
+fn settings_offer_the_fonts_for_converting_offline_until_all_are_kept() {
+    use crate::app::FontsKept;
+    let mut app = app(Model::X4);
+    let _ = app.update(Message::Open(Screen::Settings));
+    let row = |app: &App| {
+        app.page()
+            .rows
+            .into_iter()
+            .find(|r| r.title == "Fonts for converting offline")
+            .expect("the fonts row")
+    };
+    app.fonts_kept = Some(FontsKept {
+        kept: 12,
+        total: 239,
+        missing_bytes: 110_000_000,
+    });
+    let r = row(&app);
+    assert_eq!(
+        r.subtitle.as_deref(),
+        Some("12 of 239 kept · download the rest (110 MB)")
+    );
+    assert!(r.on_press.is_some());
+    app.fonts_kept = Some(FontsKept {
+        kept: 239,
+        total: 239,
+        missing_bytes: 0,
+    });
+    let r = row(&app);
+    assert_eq!(r.subtitle.as_deref(), Some("All 239 Noto font files kept"));
+    assert!(r.on_press.is_none(), "nothing left to download");
+    // While downloading, the row shows how far and stops it when chosen.
+    app.font_download = running(0.25, 0, "27 MB of 110 MB");
+    let r = row(&app);
+    assert_eq!(r.subtitle.as_deref(), Some("27 MB of 110 MB"));
+    assert_eq!(r.value.as_deref(), Some("25%"));
+    let _ = app.update(Message::DownloadFonts);
+    assert!(app.font_download.stopping());
+}
+
+#[test]
 fn stopping_a_conversion_asks_first() {
     let mut app = app(Model::X4Pro);
     let _ = app.update(Message::Opened(PathBuf::from("/nowhere/wiki.zim")));
@@ -830,6 +870,11 @@ fn screens() {
 
         let mut a = app(model);
         let _ = a.update(Message::Open(Screen::Settings));
+        a.fonts_kept = Some(crate::app::FontsKept {
+            kept: 12,
+            total: 239,
+            missing_bytes: 110_000_000,
+        });
         snap(&a, &dir, &format!("{tag}-settings"));
         press(&mut a, Key::Power);
         snap(&a, &dir, &format!("{tag}-power"));
