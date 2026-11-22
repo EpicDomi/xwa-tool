@@ -23,6 +23,8 @@ pub struct Prefs {
     pub monitor: Option<(f32, f32)>,
     /// Where downloads go; `None` is the Downloads folder.
     pub download_dir: Option<PathBuf>,
+    /// The folder an archive was last saved to; `None` is the ZIM's.
+    pub save_dir: Option<PathBuf>,
     /// The Kiwix library language last shown (ISO 639-3).
     pub language: Option<String>,
     /// Flash the screen black and white when it changes, as e-ink does on a
@@ -43,6 +45,7 @@ impl Default for Prefs {
             zoom: None,
             monitor: None,
             download_dir: None,
+            save_dir: None,
             language: None,
             refresh_flash: true,
             graphics: Graphics::Auto,
@@ -105,6 +108,7 @@ impl Prefs {
                 "downloads" if !value.is_empty() => {
                     prefs.download_dir = Some(PathBuf::from(value));
                 }
+                "saves" if !value.is_empty() => prefs.save_dir = Some(PathBuf::from(value)),
                 "language" if !value.is_empty() => prefs.language = Some(value.to_string()),
                 "refresh_flash" => prefs.refresh_flash = value != "off",
                 "graphics" => {
@@ -138,6 +142,9 @@ impl Prefs {
         }
         if let Some(d) = &self.download_dir {
             out += &format!("downloads={}\n", d.display());
+        }
+        if let Some(d) = &self.save_dir {
+            out += &format!("saves={}\n", d.display());
         }
         if let Some(l) = &self.language {
             out += &format!("language={l}\n");
@@ -185,6 +192,7 @@ mod tests {
             zoom: Some(0.85),
             monitor: Some((1563.0, 1048.0)),
             download_dir: Some(PathBuf::from("/data/zim files")),
+            save_dir: Some(PathBuf::from("/media/disk/wikis")),
             language: Some("fra".into()),
             refresh_flash: false,
             graphics: Graphics::Software,

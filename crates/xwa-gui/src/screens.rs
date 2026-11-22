@@ -472,7 +472,11 @@ impl App {
             return page;
         };
         if self.conversion.running() {
-            let steps = conversion_steps(self.converting_images, self.converting_sharper);
+            let steps = conversion_steps(
+                self.converting_images,
+                self.converting_sharper,
+                self.converting_one_read,
+            );
             page.top += progress_height(Some(steps.len()));
             page.rows = vec![stop_row(
                 &self.conversion,
@@ -517,6 +521,7 @@ impl App {
             Row::new(Kind::Item, "See the difference")
                 .opens()
                 .on_press(Message::Open(Screen::Italic)),
+            self.one_read_row(),
             Row::new(
                 Kind::Action,
                 if matches!(self.conversion, Job::Finished(Err(_))) {
@@ -531,6 +536,37 @@ impl App {
             page.bottom = 96.0;
         }
         page
+    }
+
+    /// Converting: reading the ZIM once, which needs room for a temporary
+    /// file where the archive is saved.
+    fn one_read_row(&self) -> Row<Message> {
+        let row = Row::new(Kind::Setting, "Read the ZIM once");
+        let extra = self.space_needed().map(|n| size_text(n.one_read));
+        match (self.one_read_fits(), extra) {
+            (Some(false), _) => {
+                let needs = self.space_needed().map(|n| n.archive + n.one_read);
+                let has = self.save_free.as_ref().map(|(_, f)| *f);
+                row.subtitle(match (needs, has) {
+                    (Some(n), Some(h)) => {
+                        format!(
+                            "Needs {} free where it saves; {} is",
+                            size_text(n),
+                            size_text(h)
+                        )
+                    }
+                    _ => "Not enough free space where it saves".into(),
+                })
+                .value(on_off(false))
+            }
+            (_, extra) => row
+                .subtitle(match extra {
+                    Some(e) => format!("Faster from a slow drive · {e} more space"),
+                    None => "Faster from a slow drive · needs more space".into(),
+                })
+                .value(on_off(self.one_read))
+                .on_press(Message::ToggleOneRead),
+        }
     }
 
     fn italic_page(&self) -> Page {
@@ -711,7 +747,11 @@ impl App {
             },
             Screen::Convert => match &self.zim {
                 Some(zim) if self.conversion.running() => {
-                    let steps = conversion_steps(self.converting_images, self.converting_sharper);
+                    let steps = conversion_steps(
+                self.converting_images,
+                self.converting_sharper,
+                self.converting_one_read,
+            );
                     column![
                         container(zim_tile(zim, self.zim_info.as_ref(), w)).height(TILE_TOP),
                         progress_view(&self.conversion, Some(&steps)),
@@ -809,7 +849,11 @@ impl App {
             Vec<Element<'_, Message>>,
             Screen,
         ) = if let Job::Running { step, .. } = &self.conversion {
-            let steps = conversion_steps(self.converting_images, self.converting_sharper);
+            let steps = conversion_steps(
+                self.converting_images,
+                self.converting_sharper,
+                self.converting_one_read,
+            );
             (
                 zim_cover(),
                 zim_title(),
@@ -1117,6 +1161,14 @@ impl App {
                 "Still working",
                 Some(self.status().unwrap_or_default() + ". Turning off now stops it."),
             ),
+            Popup::NoRoomToReadOnce { needs, has } => (
+                "Not enough space",
+                Some(format!(
+                    "Reading the ZIM once needs about {} free on that drive, for the archive and a temporary file; it has {}. It can read the ZIM twice instead, which needs no temporary file.",
+                    size_text(needs),
+                    size_text(has)
+                )),
+            ),
             Popup::StopConversion => (
                 "Stop converting?",
                 Some(
@@ -1342,6 +1394,10 @@ fn popup_actions(p: Popup) -> Vec<Row<Message>> {
         Popup::TurnOffBusy => vec![
             Row::new(Kind::Item, "Keep working").on_press(Message::ClosePopup),
             Row::new(Kind::Item, "Turn off anyway").on_press(Message::TurnOff),
+        ],
+        Popup::NoRoomToReadOnce { .. } => vec![
+            Row::new(Kind::Item, "Read it twice instead").on_press(Message::ConvertReadingTwice),
+            Row::new(Kind::Item, "Cancel").on_press(Message::ClosePopup),
         ],
         Popup::StopConversion => vec![
             Row::new(Kind::Item, "Keep converting").on_press(Message::ClosePopup),

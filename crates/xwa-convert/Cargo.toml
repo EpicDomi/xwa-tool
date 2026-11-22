@@ -21,5 +21,6 @@ image.workspace = true
 jpeg-encoder.workspace = true
 flate2.workspace = true
 zstd.workspace = true
+tempfile.workspace = true
 katex-native.workspace = true
 ttf-parser.workspace = true

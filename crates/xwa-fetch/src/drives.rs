@@ -58,6 +58,24 @@ impl Drive {
     }
 }
 
+/// Free space on the drive holding `path` (a folder or file, which need
+/// not exist yet), if it can be told.
+pub fn free_space(path: &Path) -> Option<u64> {
+    let disks = sysinfo::Disks::new_with_refreshed_list().ok()?;
+    let path = std::path::absolute(path).ok()?;
+    // Windows compares drive letters in any case.
+    let key = |p: &Path| {
+        let s = p.to_string_lossy().into_owned();
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    };
+    let path = PathBuf::from(key(&path));
+    disks
+        .iter()
+        .filter(|d| path.starts_with(key(d.mount_point())))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(|d| d.available_space())
+}
+
 /// Removable drives that can be written to, such as SD cards in a reader.
 pub fn removable() -> Vec<Drive> {
     let Ok(disks) = sysinfo::Disks::new_with_refreshed_list() else {

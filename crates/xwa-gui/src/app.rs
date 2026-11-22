@@ -67,6 +67,12 @@ pub enum Popup {
     TurnOffBusy,
     /// Stopping a conversion throws away the work so far.
     StopConversion,
+    /// Where the archive is to be saved lacks the space for reading the
+    /// ZIM once: what it needs and what it has.
+    NoRoomToReadOnce {
+        needs: u64,
+        has: u64,
+    },
     /// Picking one of a setting's values.
     Choose(Choice),
     /// What can be done with one of the downloads.
@@ -203,6 +209,9 @@ pub struct ZimInfo {
     pub date: String,
     pub entries: u32,
     pub size: u64,
+    /// How much of it is pages and media, for estimating the space a
+    /// conversion needs.
+    pub shares: Option<xwa_convert::ZimShares>,
     /// Its illustration in the panel's greys.
     pub cover: Option<iced::widget::image::Handle>,
 }
@@ -342,6 +351,9 @@ pub enum Message {
     ToggleImages,
     ToggleSharper,
     ToggleItalic,
+    ToggleOneRead,
+    /// Convert to the chosen place, reading the ZIM twice after all.
+    ConvertReadingTwice,
     /// The next (1) or previous (-1) picture of italic.
     ItalicPicture(isize),
     Convert,
@@ -432,11 +444,19 @@ pub struct App {
     pub sharper: bool,
     /// Real italic letters in the fallback font.
     pub real_italic: bool,
+    /// Read the ZIM once, with a temporary file of articles.
+    pub one_read: bool,
+    /// Free space where the archive would be saved by default, and where.
+    pub save_free: Option<(PathBuf, u64)>,
+    /// A place chosen for the archive, waiting on a question.
+    pub pending_output: Option<PathBuf>,
     /// Which picture the italic screen shows.
     pub italic_picture: usize,
     pub conversion: Job,
     /// Whether the running conversion fetches sharper diagrams.
     pub converting_sharper: bool,
+    /// Whether it reads the ZIM once.
+    pub converting_one_read: bool,
     pub converting_images: bool,
     pub output: Option<PathBuf>,
 
@@ -497,9 +517,13 @@ impl App {
             images: true,
             sharper: false,
             real_italic: true,
+            one_read: false,
+            save_free: None,
+            pending_output: None,
             italic_picture: 0,
             conversion: Job::Idle,
             converting_sharper: false,
+            converting_one_read: false,
             converting_images: true,
             output: None,
             archive: None,
@@ -1185,6 +1209,7 @@ impl App {
             Message::ZimRead(path, info) => {
                 if self.zim.as_ref() == Some(&path) {
                     self.zim_info = Some(info);
+                    self.refresh_save_free();
                 }
             }
             Message::ToggleImages => {
@@ -1202,6 +1227,17 @@ impl App {
                     self.real_italic = !self.real_italic;
                 }
             }
+            Message::ToggleOneRead => {
+                if !self.conversion.running() && self.one_read_fits() != Some(false) {
+                    self.one_read = !self.one_read;
+                }
+            }
+            Message::ConvertReadingTwice => {
+                self.popup = None;
+                if let Some(out) = self.pending_output.take() {
+                    return self.start_conversion(out, false);
+                }
+            }
             Message::ItalicPicture(step) => self.turn_italic(step),
             Message::Convert => {
                 let Some(zim) = self.zim.clone() else {
@@ -1212,7 +1248,7 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let dir = zim.parent().map(Path::to_path_buf);
+                let dir = self.save_dir();
                 return self.dialog(
                     async move {
                         let mut dialog = rfd::AsyncFileDialog::new()
@@ -1226,7 +1262,27 @@ impl App {
                     Message::OutputChosen,
                 );
             }
-            Message::OutputChosen(Some(out)) => return self.start_conversion(out),
+            Message::OutputChosen(Some(out)) => {
+                if let Some(dir) = out.parent() {
+                    self.prefs.save_dir = Some(dir.to_path_buf());
+                    self.prefs.save();
+                }
+                if !self.one_read {
+                    return self.start_conversion(out, false);
+                }
+                // Reading once needs room for the archive and the
+                // temporary file where the archive is saved.
+                let needs = self.space_needed().map(|n| n.archive + n.one_read);
+                let has = out.parent().and_then(xwa_fetch::drives::free_space);
+                match (needs, has) {
+                    (Some(needs), Some(has)) if has < needs => {
+                        self.pending_output = Some(out);
+                        self.popup = Some(Popup::NoRoomToReadOnce { needs, has });
+                        self.popup_focus = 0;
+                    }
+                    _ => return self.start_conversion(out, true),
+                }
+            }
             Message::OutputChosen(None) => {}
             Message::Conversion(Event::Progress(p)) => self.conversion.progress(p),
             Message::Conversion(Event::Done(result)) => {
@@ -1466,6 +1522,10 @@ impl App {
                 self.refresh_drives();
                 Task::none()
             }
+            Screen::Convert => {
+                self.refresh_save_free();
+                Task::none()
+            }
             _ => Task::none(),
         }
     }
@@ -1510,7 +1570,42 @@ impl App {
         )
     }
 
-    fn start_conversion(&mut self, out: PathBuf) -> Task<Message> {
+    /// The folder an archive is offered to be saved in: the last one used,
+    /// else the ZIM's.
+    pub fn save_dir(&self) -> Option<PathBuf> {
+        self.prefs
+            .save_dir
+            .clone()
+            .filter(|d| d.is_dir())
+            .or_else(|| self.zim.as_ref()?.parent().map(Path::to_path_buf))
+    }
+
+    /// Looks again at the free space where archives are saved.
+    pub fn refresh_save_free(&mut self) {
+        self.save_free = self
+            .save_dir()
+            .and_then(|d| xwa_fetch::drives::free_space(&d).map(|free| (d, free)));
+    }
+
+    /// What converting the chosen ZIM needs, as far as it can be told.
+    pub fn space_needed(&self) -> Option<xwa_convert::SpaceNeeded> {
+        match &self.zim_info {
+            Some(Ok(ZimInfo {
+                shares: Some(s), ..
+            })) => Some(xwa_convert::space_needed(s, self.images)),
+            _ => None,
+        }
+    }
+
+    /// Whether the default save folder has room for reading the ZIM once;
+    /// `None` when that cannot be told.
+    pub fn one_read_fits(&self) -> Option<bool> {
+        let needs = self.space_needed()?;
+        let (_, free) = self.save_free.as_ref()?;
+        Some(*free >= needs.archive + needs.one_read)
+    }
+
+    fn start_conversion(&mut self, out: PathBuf, one_read: bool) -> Task<Message> {
         let Some(zim) = self.zim.clone() else {
             return Task::none();
         };
@@ -1534,6 +1629,7 @@ impl App {
         // The fallback font, for letters and symbols the e-reader's fonts lack.
         let fonts = Fonts::default_cache().map(|cache| Arc::new(Fonts::new(cache)));
         let real_italic = self.real_italic;
+        self.converting_one_read = one_read;
         self.converting_sharper = sharper;
         self.converting_images = images;
         let (tx, rx) = iced::futures::channel::mpsc::unbounded();
@@ -1543,13 +1639,15 @@ impl App {
                 diagrams,
                 fonts,
                 real_italic,
+                one_read,
                 ..xwa_convert::Options::new(device)
             };
             let mut throttle = Throttle::default();
             let result = xwa_convert::convert(&zim, &out, &opts, &mut |p| {
                 if throttle.due(p.stage as usize) {
-                    let _ =
-                        tx.unbounded_send(Event::Progress(conversion_progress(p, images, sharper)));
+                    let _ = tx.unbounded_send(Event::Progress(conversion_progress(
+                        p, images, sharper, one_read,
+                    )));
                 }
                 !cancel.load(Ordering::Relaxed)
             });
@@ -1759,8 +1857,11 @@ fn background<T: Send + 'static>(
 }
 
 /// The steps of a conversion with these options, as shown while it runs.
-pub fn conversion_steps(images: bool, sharper: bool) -> Vec<&'static str> {
+pub fn conversion_steps(images: bool, sharper: bool, one_read: bool) -> Vec<&'static str> {
     let mut steps = vec!["Reading the ZIM file", "Converting articles"];
+    if one_read {
+        steps.push("Writing articles");
+    }
     if sharper {
         steps.push("Downloading sharper diagrams");
     }
@@ -1771,11 +1872,17 @@ pub fn conversion_steps(images: bool, sharper: bool) -> Vec<&'static str> {
     steps
 }
 
-fn conversion_progress(p: xwa_convert::Progress, images: bool, sharper: bool) -> Progress {
-    let steps = conversion_steps(images, sharper);
+fn conversion_progress(
+    p: xwa_convert::Progress,
+    images: bool,
+    sharper: bool,
+    one_read: bool,
+) -> Progress {
+    let steps = conversion_steps(images, sharper, one_read);
     let name = match p.stage {
         Stage::Scanning => "Reading the ZIM file",
         Stage::Articles => "Converting articles",
+        Stage::Writing => "Writing articles",
         Stage::Diagrams => "Downloading sharper diagrams",
         Stage::Images => "Converting pictures",
         Stage::Fonts | Stage::Finishing => "Finishing",
@@ -1789,13 +1896,17 @@ fn conversion_progress(p: xwa_convert::Progress, images: bool, sharper: bool) ->
     // Rough shares of the time: reading 5%, articles 55%, pictures 35%,
     // finishing 5%; downloading diagrams, when asked for, takes 30% from
     // articles and pictures.
+    // Reading once, writing the articles takes a tenth of their share.
     let (articles, diagrams) = if sharper { (0.35, 0.30) } else { (0.55, 0.0) };
     let pictures = 0.90 - articles - diagrams;
+    let writing = if one_read { articles / 10.0 } else { 0.0 };
+    let articles = articles - writing;
     let fraction = match p.stage {
         Stage::Scanning => 0.05 * part,
         Stage::Articles => 0.05 + articles * part,
-        Stage::Diagrams => 0.05 + articles + diagrams * part,
-        Stage::Images => 0.05 + articles + diagrams + pictures * part,
+        Stage::Writing => 0.05 + articles + writing * part,
+        Stage::Diagrams => 0.05 + articles + writing + diagrams * part,
+        Stage::Images => 0.05 + articles + writing + diagrams + pictures * part,
         Stage::Fonts => 0.95 + 0.025 * part,
         Stage::Finishing => 0.975 + 0.025 * part,
     };
@@ -1899,6 +2010,7 @@ pub(crate) fn describe(path: &Path) -> Result<ZimInfo, String> {
         date: text("Date"),
         entries: zim.entry_count(),
         size,
+        shares: xwa_convert::zim_shares(path).ok(),
         cover,
     })
 }
@@ -1927,6 +2039,7 @@ mod tests {
             diagrams: None,
             sharper_images: 0,
             fallback_font: None,
+            temp_bytes: None,
             zim_bytes: 0,
             elapsed: Duration::ZERO,
         };
@@ -1955,8 +2068,9 @@ mod tests {
 
     #[test]
     fn conversion_steps_follow_the_options() {
-        assert_eq!(conversion_steps(false, false).len(), 3);
-        assert_eq!(conversion_steps(true, true).len(), 5);
+        assert_eq!(conversion_steps(false, false, false).len(), 3);
+        assert_eq!(conversion_steps(true, true, false).len(), 5);
+        assert_eq!(conversion_steps(true, false, true).len(), 5);
         let p = conversion_progress(
             xwa_convert::Progress {
                 stage: Stage::Images,
@@ -1964,6 +2078,7 @@ mod tests {
                 total: 10,
             },
             true,
+            false,
             false,
         );
         assert_eq!(p.step, 2);
@@ -1983,6 +2098,7 @@ mod tests {
                     total: 3 * part,
                 },
                 true,
+                false,
                 false,
             );
             assert_eq!(p.label, label);

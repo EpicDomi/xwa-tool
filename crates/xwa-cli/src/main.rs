@@ -75,6 +75,11 @@ enum Command {
         /// slants the regular ones instead (a little smaller archive).
         #[arg(long, conflicts_with = "no_fallback_font")]
         no_real_italic: bool,
+        /// Read the ZIM once instead of twice, keeping converted articles in
+        /// a temporary file beside the archive meanwhile: faster when the
+        /// ZIM is on a slow drive, but needs that much more free space.
+        #[arg(long)]
+        one_read: bool,
     },
     /// List the ZIM files in the Kiwix library.
     Catalog {
@@ -203,6 +208,7 @@ fn main() -> ExitCode {
             no_fallback_font,
             font_cache,
             no_real_italic,
+            one_read,
         } => {
             let device = match device {
                 DeviceArg::X4Pro => Device::X4Pro,
@@ -227,6 +233,7 @@ fn main() -> ExitCode {
                         diagrams,
                         fonts,
                         real_italic: !no_real_italic,
+                        one_read,
                     };
                     convert(&zim, out, &opts)
                 }
@@ -283,6 +290,7 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         let stage = match p.stage {
             Stage::Scanning => "reading the ZIM directory",
             Stage::Articles => "converting articles",
+            Stage::Writing => "writing articles",
             Stage::Diagrams => "downloading sharper diagrams",
             Stage::Images => "converting pictures",
             Stage::Fonts => "getting fonts for the fallback font",
@@ -392,6 +400,12 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
             };
             println!("  fallback font: could not get {names}: {why}");
         }
+    }
+    if let Some(t) = r.temp_bytes {
+        println!(
+            "  read the ZIM once; its temporary file of articles reached {:.1} MB",
+            mb(t)
+        );
     }
     println!(
         "  formulas: {} drawn as math, {} as text",

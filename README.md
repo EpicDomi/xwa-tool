@@ -108,6 +108,15 @@ cannot get keep the ZIM's picture. Downloads are kept in `xwa-tool/diagrams`
 in the system's cache folder (or `--hd-cache DIR`), so converting again
 downloads nothing; delete that folder to free the space.
 
+`--one-read` (in the app: "Read the ZIM once", off by default) reads the
+ZIM's pages once instead of twice, which saves time when the ZIM is on a
+slow drive such as an SD card. Until the archive is written, it keeps the
+converted articles in a temporary file in the output's folder. That file
+holds about a third to three quarters of the ZIM's compressed text. The
+archive is the same either way. The app estimates the archive's size plus
+that file's, and offers the option only when they fit in the free space
+where the archive is saved.
+
 Measured on English Wikipedia ZIMs (4 cores), with pictures and drawn
 formulas:
 

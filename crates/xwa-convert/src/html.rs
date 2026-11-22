@@ -107,6 +107,25 @@ fn is_named_place(id: &str) -> bool {
     !(id.is_empty() || id.starts_with("mw") || id.starts_with("cite_") || id.starts_with("CITEREF"))
 }
 
+/// The section of `a` a named place `hash` is in, as [`extract`] finds it
+/// for links to the article itself: a heading by its own anchor, then the
+/// places it lists; 0, the top, when there is none.
+pub(crate) fn section_of(a: &Article, hash: u32) -> u32 {
+    let headings = a.body.iter().filter_map(|b| match b {
+        Block::Heading { content, .. } => Some(content),
+        _ => None,
+    });
+    for (n, content) in headings.enumerate() {
+        if heading_anchor_hash(&plain_text(content)) == hash {
+            return n as u32 + 1;
+        }
+    }
+    a.anchors
+        .iter()
+        .find(|x| x.hash == hash)
+        .map_or(0, |x| x.section)
+}
+
 /// Extracts article `self_id`, whose archive path is `path`.
 pub fn extract(
     html: &str,

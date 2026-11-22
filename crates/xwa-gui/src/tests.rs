@@ -578,6 +578,73 @@ fn a_finished_conversion_can_be_done_again_with_other_settings() {
 }
 
 #[test]
+fn reading_the_zim_once_is_offered_only_where_there_is_room() {
+    use crate::app::ZimInfo;
+    let mut app = app(Model::X4);
+    let zim = PathBuf::from("/nowhere/wiki.zim");
+    let _ = app.update(Message::Opened(zim.clone()));
+    app.zim_info = Some(Ok(ZimInfo {
+        title: "Wiki".into(),
+        language: "eng".into(),
+        flavour: "maxi".into(),
+        date: "2026-08-01".into(),
+        entries: 10,
+        size: 12_000_000_000,
+        shares: Some(xwa_convert::ZimShares {
+            text_bytes: 2_000_000_000,
+            media_bytes: 10_000_000_000,
+        }),
+        cover: None,
+    }));
+    let row = |app: &App| {
+        app.page()
+            .rows
+            .into_iter()
+            .find(|r| r.title == "Read the ZIM once")
+            .expect("the row")
+    };
+    let needs = app.space_needed().unwrap();
+    assert!(needs.archive >= 11_000_000_000 && needs.one_read >= 1_000_000_000);
+    // Room enough: offered, off until chosen, saying what it costs.
+    app.save_free = Some((PathBuf::from("/data"), 100_000_000_000));
+    let r = row(&app);
+    assert_eq!(r.value.as_deref(), Some("OFF"));
+    assert!(
+        r.subtitle
+            .as_deref()
+            .unwrap()
+            .starts_with("Faster from a slow drive")
+    );
+    let _ = app.update(Message::ToggleOneRead);
+    assert!(app.one_read);
+    // Too little: cannot be chosen, and says why.
+    app.one_read = false;
+    app.save_free = Some((PathBuf::from("/data"), 5_000_000_000));
+    let r = row(&app);
+    assert!(r.on_press.is_none());
+    assert!(
+        r.subtitle.as_deref().unwrap().starts_with("Needs "),
+        "{:?}",
+        r.subtitle
+    );
+    let _ = app.update(Message::ToggleOneRead);
+    assert!(!app.one_read);
+    // Saving somewhere without room asks first; reading twice goes ahead.
+    app.pending_output = Some(PathBuf::from("/data/wiki.xwa"));
+    app.popup = Some(Popup::NoRoomToReadOnce {
+        needs: 14_000_000_000,
+        has: 5_000_000_000,
+    });
+    let rows = app.popup_rows(app.popup.unwrap());
+    assert_eq!(rows[0].title, "Read it twice instead");
+    let _ = app.update(Message::ConvertReadingTwice);
+    assert_eq!(app.popup, None);
+    assert!(app.pending_output.is_none());
+    assert!(app.conversion.running());
+    assert!(!app.converting_one_read);
+}
+
+#[test]
 fn stopping_a_conversion_asks_first() {
     let mut app = app(Model::X4Pro);
     let _ = app.update(Message::Opened(PathBuf::from("/nowhere/wiki.zim")));
