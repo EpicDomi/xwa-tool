@@ -16,7 +16,7 @@ xwa-zim = { path = "crates/xwa-zim" }
 xwa-format = { path = "crates/xwa-format" }
 xwa-convert = { path = "crates/xwa-convert" }
 xwa-fetch = { path = "crates/xwa-fetch" }
-zstd = "0.14"
+zstd = { version = "0.14", features = ["experimental"] }
 lzma-rs = "0.3"
 thiserror = "2"
 clap = { version = "4.6", features = ["derive"] }

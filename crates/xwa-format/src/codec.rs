@@ -19,6 +19,29 @@ pub struct ChunkCodec {
     pub dict: Option<Vec<u8>>,
 }
 
+/// Sets a zstd context up for chunks: chunks carry their own CRC-32 and
+/// the archive has one dictionary, so no checksum or dictionary ID.
+///
+/// The dictionary is always attached (searched where it lies) rather than
+/// copied into the context: a copied dictionary is a prefix to the chunk,
+/// and zstd finds different matches when the chunk happens to start in
+/// memory where the dictionary ends, so the same text could compress
+/// differently from run to run. Attached, it never can.
+fn configure(ctx: &mut zstd::zstd_safe::CCtx, level: i32) -> Result<()> {
+    let zstd =
+        |code: usize| Error::Invalid(format!("zstd: {}", zstd::zstd_safe::get_error_name(code)));
+    for p in [
+        CParameter::CompressionLevel(level),
+        CParameter::ChecksumFlag(false),
+        CParameter::DictIdFlag(false),
+        CParameter::ContentSizeFlag(true),
+        CParameter::ForceAttachDict(zstd::zstd_safe::DictAttachPref::ForceAttach),
+    ] {
+        ctx.set_parameter(p).map_err(zstd)?;
+    }
+    Ok(())
+}
+
 /// A compressor for one thread.
 pub enum Encoder {
     Deflate(libdeflater::Compressor),
@@ -38,10 +61,7 @@ impl ChunkCodec {
                     Some(d) => zstd::bulk::Compressor::with_dictionary(self.level, d)?,
                     None => zstd::bulk::Compressor::new(self.level)?,
                 };
-                // Chunks carry their own CRC-32 and the archive has one dictionary.
-                c.set_parameter(CParameter::ChecksumFlag(false))?;
-                c.set_parameter(CParameter::DictIdFlag(false))?;
-                c.set_parameter(CParameter::ContentSizeFlag(true))?;
+                configure(c.context_mut(), self.level)?;
                 Ok(Encoder::Zstd(Box::new(c)))
             }
         }
@@ -174,6 +194,34 @@ mod tests {
                     assert!(dec.decompress(&packed, data.len() + 1).is_err());
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_chunk_compresses_the_same_wherever_it_lies_in_memory() {
+        // zstd treats data that starts where the dictionary ends as one
+        // with it, and finds different matches, so a chunk that happened
+        // to be allocated right after a worker's copy of the dictionary
+        // (as macOS's allocator can place it) came out differently. Put
+        // one there on purpose.
+        use zstd::zstd_safe::{CCtx, CDict};
+        let samples: Vec<Vec<u8>> = (0..64).map(|i| text(4000 + i * 37)).collect();
+        let dict = train_dictionary(&samples, 16 << 10).unwrap();
+        let chunk = text(MAX_CHUNK);
+        let mut joined = dict.clone();
+        joined.extend_from_slice(&chunk);
+        let (in_place, after) = joined.split_at(dict.len());
+        for level in [3, 19] {
+            let cdict = CDict::create_by_reference(in_place, level);
+            let compress = |data: &[u8]| {
+                let mut ctx = CCtx::create();
+                configure(&mut ctx, level).unwrap();
+                ctx.ref_cdict(&cdict).unwrap();
+                let mut out = Vec::with_capacity(zstd::zstd_safe::compress_bound(data.len()));
+                ctx.compress2(&mut out, data).unwrap();
+                out
+            };
+            assert_eq!(compress(after), compress(&chunk), "level {level}");
         }
     }
 
