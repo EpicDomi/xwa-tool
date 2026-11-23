@@ -829,6 +829,16 @@ fn a_minimised_window_keeps_the_device_size() {
     let _ = app.update(Message::Resized(iced::Size::new(0.0, 0.0)));
     assert_eq!(app.zoom, zoom);
     assert!(app.settle_at.is_none(), "nothing to settle");
+    // Minimised from the taskbar it can report the small size Windows
+    // keeps for minimised windows; once the system says the window is
+    // minimised, that size is not taken for the device's.
+    let small = iced::Size::new(160.0, 28.0);
+    let _ = app.update(Message::ResizedUnlessMinimized(small, true));
+    assert_eq!(app.zoom, zoom);
+    assert!(app.settle_at.is_none());
+    // Not minimised, the same size is the user's, and the device fits it.
+    let _ = app.update(Message::ResizedUnlessMinimized(small, false));
+    assert_eq!(app.zoom, crate::app::MIN_ZOOM);
 }
 
 #[test]
@@ -841,8 +851,12 @@ fn a_size_the_system_gives_just_after_the_apps_own_is_asked_again() {
     // KWin, after a drag, answers the app's fitted size with the drag's.
     app.own_resize_until = Some(Instant::now() + Duration::from_secs(5));
     let stale = iced::Size::new(window.width, window.height * 0.75);
+    // With a window, a size the user is not dragging to first asks whether
+    // the window is minimised, and changes nothing yet.
+    assert!(app.update(Message::Resized(stale)).units() > 0);
+    assert_eq!(app.zoom, zoom);
     for asked in [true, true, false] {
-        let task = app.update(Message::Resized(stale));
+        let task = app.update(Message::ResizedUnlessMinimized(stale, false));
         assert_eq!(task.units() > 0, asked, "asked again twice at most");
         assert_eq!(app.zoom, zoom, "the device keeps its size");
     }

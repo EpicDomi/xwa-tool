@@ -432,6 +432,9 @@ pub enum Message {
     Placed(Option<Point>),
     /// The window's new size, in this window's units.
     Resized(Size),
+    /// A size the window took that the user was not dragging it to, once
+    /// the system has said whether the window is minimised.
+    ResizedUnlessMinimized(Size, bool),
     /// A resize handle was pressed: the system takes over the drag.
     ResizeFrom(window::Direction),
     Settle,
@@ -764,6 +767,37 @@ impl App {
 
     /// Goes back to the screen before, and does the work it needs, such as
     /// putting the cursor back in its search field.
+    /// Scales the device to a size the window took.
+    fn resized(&mut self, size: Size) -> Task<Message> {
+        let window = self.spec().window();
+        let (w, h) = (size.width * self.zoom, size.height * self.zoom);
+        if self.resizing.is_none() && self.own_resize_until.is_some_and(|t| Instant::now() < t) {
+            // Just after the app sized the window, another size is
+            // the system catching up with something earlier: KWin
+            // sends the size a drag ended at after the app has fitted
+            // the window round the device. The device's size is
+            // asked for again, twice at most.
+            if self.insisted < 2 {
+                self.insisted += 1;
+                return self.size_window();
+            }
+            return Task::none();
+        }
+        let (across, down) = (w / window.width, h / window.height);
+        use window::Direction::{East, North, South, West};
+        // The device follows the edge being dragged; anything else
+        // scales it to fit.
+        let zoom = match self.resizing {
+            Some(East | West) => across,
+            Some(North | South) => down,
+            Some(_) => across.max(down),
+            None => across.min(down),
+        };
+        self.zoom = zoom.clamp(MIN_ZOOM, self.fit_zoom());
+        self.settle_at = Some(Instant::now() + SETTLE);
+        Task::none()
+    }
+
     fn back(&mut self) -> Task<Message> {
         match self.history.pop() {
             Some((screen, focus)) => self.show(screen, focus),
@@ -1111,32 +1145,25 @@ impl App {
                 {
                     return Task::none();
                 }
+                // Minimising from the Windows taskbar can give the small
+                // size Windows keeps for minimised windows rather than
+                // 0 × 0; scaling to that left the device at the smallest
+                // zoom when it came back. A size the user is not dragging
+                // to waits until the system says the window is not
+                // minimised.
                 if self.resizing.is_none()
-                    && self.own_resize_until.is_some_and(|t| Instant::now() < t)
+                    && let Some(id) = self.window
                 {
-                    // Just after the app sized the window, another size is
-                    // the system catching up with something earlier: KWin
-                    // sends the size a drag ended at after the app has fitted
-                    // the window round the device. The device's size is
-                    // asked for again, twice at most.
-                    if self.insisted < 2 {
-                        self.insisted += 1;
-                        return self.size_window();
-                    }
-                    return Task::none();
+                    return window::is_minimized(id).map(move |minimized| {
+                        Message::ResizedUnlessMinimized(size, minimized == Some(true))
+                    });
                 }
-                let (across, down) = (w / window.width, h / window.height);
-                use window::Direction::{East, North, South, West};
-                // The device follows the edge being dragged; anything else
-                // scales it to fit.
-                let zoom = match self.resizing {
-                    Some(East | West) => across,
-                    Some(North | South) => down,
-                    Some(_) => across.max(down),
-                    None => across.min(down),
-                };
-                self.zoom = zoom.clamp(MIN_ZOOM, self.fit_zoom());
-                self.settle_at = Some(Instant::now() + SETTLE);
+                return self.resized(size);
+            }
+            Message::ResizedUnlessMinimized(size, minimized) => {
+                if !minimized && self.shown {
+                    return self.resized(size);
+                }
             }
             Message::Settle => {
                 if self.settle_at.is_some_and(|t| Instant::now() >= t) {
