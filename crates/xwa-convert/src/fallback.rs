@@ -264,6 +264,60 @@ pub fn missing(
     (regular, other)
 }
 
+/// Characters an archive's FONT has no glyph for, sorted by why.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lacking {
+    /// A Noto font has them: completing the font would add them.
+    pub in_noto: Vec<char>,
+    /// Characters no Noto font has.
+    pub not_in_noto: Vec<char>,
+    /// How many of those are CJK ideographs of planes 2 and 3 (Unicode's
+    /// extensions B to I), of which Noto has only the commonest.
+    pub rare_ideographs: usize,
+    /// Code points no font has: not assigned in Unicode, private use, or
+    /// controls.
+    pub no_character: Vec<char>,
+}
+
+/// Code points no font draws (Unicode's general categories Cn, Co, Cs
+/// and Cc), as sorted inclusive ranges; `cargo xtask unicode` makes the
+/// table.
+fn no_character() -> &'static [(u32, u32)] {
+    static TABLE: std::sync::OnceLock<Vec<(u32, u32)>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        include_str!("../data/no-character.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| {
+                let (a, b) = l.split_once('-').unwrap_or((l, l));
+                Some((
+                    u32::from_str_radix(a, 16).ok()?,
+                    u32::from_str_radix(b, 16).ok()?,
+                ))
+            })
+            .collect()
+    })
+}
+
+/// Sorts `chars`, the characters an archive's FONT lacks, by why.
+pub fn lacking(chars: &[char], fonts: &[CatalogFont]) -> Lacking {
+    let none = no_character();
+    let mut out = Lacking::default();
+    for &c in chars {
+        // A font's private-use glyphs are its own, not the text's.
+        let i = none.partition_point(|&(_, hi)| hi < c as u32);
+        if none.get(i).is_some_and(|&(lo, _)| lo <= c as u32) {
+            out.no_character.push(c);
+        } else if source(c, fonts).is_some() {
+            out.in_noto.push(c);
+        } else {
+            out.rare_ideographs += usize::from((0x20000..0x40000).contains(&(c as u32)));
+            out.not_in_noto.push(c);
+        }
+    }
+    out
+}
+
 /// What building the fallback found.
 #[derive(Debug, Clone, Default)]
 pub struct Report {
@@ -713,6 +767,24 @@ mod tests {
             (report.styled[0].glyphs, report.styled[0].synthesised),
             (1, 1)
         );
+    }
+
+    #[test]
+    fn lacking_characters_are_sorted_by_why() {
+        let fonts = search_order(catalogue(), None);
+        // α is in Noto Sans; U+20000 is an Extension B ideograph Noto
+        // lacks, and U+2B96 a symbol of Unicode 17 none has; U+0378 is
+        // unassigned, and U+E000 private use (whatever a font may put
+        // there).
+        let l = lacking(
+            &['α', '\u{2B96}', '\u{20000}', '\u{378}', '\u{E000}'],
+            &fonts,
+        );
+        assert_eq!(l.in_noto, ['α']);
+        assert_eq!(l.not_in_noto, ['\u{2B96}', '\u{20000}']);
+        assert_eq!(l.rare_ideographs, 1);
+        assert_eq!(l.no_character, ['\u{378}', '\u{E000}']);
+        assert_eq!(no_character().len(), 735, "the whole table is read");
     }
 
     #[test]

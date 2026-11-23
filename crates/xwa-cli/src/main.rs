@@ -762,6 +762,56 @@ fn complete_font(path: &Path, cache: Option<PathBuf>) -> CliResult {
     }
 }
 
+/// Why the characters FONT lacks are missing, for `verify`.
+fn print_lacking(chars: &[char]) {
+    if chars.is_empty() {
+        println!("  every character of the text has a glyph");
+        return;
+    }
+    let l = xwa_convert::fallback::lacking(chars, &xwa_convert::fallback::catalogue());
+    let sample = |chars: &[char]| -> String {
+        let shown: String = chars.iter().take(24).collect();
+        if shown.is_empty() {
+            String::new()
+        } else {
+            format!(": {shown}")
+        }
+    };
+    println!(
+        "  {} characters of the text that the e-reader's fonts lack have no glyph in it:",
+        chars.len()
+    );
+    if !l.in_noto.is_empty() {
+        println!(
+            "    {} are in a Noto font; `xwa-tool complete-font` adds them{}",
+            l.in_noto.len(),
+            sample(&l.in_noto)
+        );
+    }
+    if !l.not_in_noto.is_empty() {
+        let ideographs = if l.rare_ideographs > 0 {
+            format!(
+                " ({} of them rare CJK ideographs, of Unicode's extensions B to I)",
+                l.rare_ideographs
+            )
+        } else {
+            String::new()
+        };
+        println!(
+            "    {} are in no Noto font{ideographs}{}",
+            l.not_in_noto.len(),
+            sample(&l.not_in_noto)
+        );
+    }
+    if !l.no_character.is_empty() {
+        println!(
+            "    {} are code points no font draws (not assigned in Unicode, private use, or controls){}",
+            l.no_character.len(),
+            sample(&l.no_character)
+        );
+    }
+}
+
 fn verify(path: &Path) -> CliResult {
     let t = Instant::now();
     let a = Xwa::open(path)?;
@@ -786,23 +836,14 @@ fn verify(path: &Path) -> CliResult {
         );
     }
     if r.font_glyphs > 0 || !r.without_glyph.is_empty() {
-        let sample: String = r.without_glyph.iter().take(24).collect();
         let styled: String = FontStyle::ALL[1..]
             .iter()
             .zip(r.styled_glyphs)
             .filter(|&(_, n)| n > 0)
             .map(|(s, n)| format!(", {n} {}", style_word(*s)))
             .collect();
-        println!(
-            "fallback font: {} glyphs{styled}; {} characters of the text the e-reader's fonts lack have none{}",
-            r.font_glyphs,
-            r.without_glyph.len(),
-            if sample.is_empty() {
-                String::new()
-            } else {
-                format!(" ({sample})")
-            }
-        );
+        println!("fallback font: {} glyphs{styled}", r.font_glyphs);
+        print_lacking(&r.without_glyph);
     }
     if r.listed_places > 0 {
         println!(
