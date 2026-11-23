@@ -711,7 +711,7 @@ fn reading_the_zim_once_is_offered_only_where_there_is_room() {
         r.subtitle
             .as_deref()
             .unwrap()
-            .starts_with("Faster from a slow drive")
+            .starts_with("Quicker from an SD card")
     );
     let _ = app.update(Message::ToggleOneRead);
     assert!(app.one_read);

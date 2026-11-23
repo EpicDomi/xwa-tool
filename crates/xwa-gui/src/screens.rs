@@ -562,8 +562,8 @@ impl App {
             }
             (_, extra) => row
                 .subtitle(match extra {
-                    Some(e) => format!("Faster from a slow drive · {e} more space"),
-                    None => "Faster from a slow drive · needs more space".into(),
+                    Some(e) => format!("Quicker from an SD card · {e} temp file"),
+                    None => "Quicker from an SD card · needs a temp file".into(),
                 })
                 .value(on_off(self.one_read))
                 .on_press(Message::ToggleOneRead),
