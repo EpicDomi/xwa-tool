@@ -68,6 +68,14 @@ pub enum Popup {
     TurnOffBusy,
     /// Stopping a conversion throws away the work so far.
     StopConversion,
+    /// An archive of the same name is already where this one would go.
+    ReplaceArchive,
+    /// Where the archive goes may lack the room for it: about how much it
+    /// needs, and what is free.
+    LowSpace {
+        needs: u64,
+        has: u64,
+    },
     /// Picking one of a setting's values.
     Choose(Choice),
     /// What can be done with one of the downloads.
@@ -484,7 +492,17 @@ pub enum Message {
     /// The next (1) or previous (-1) picture of italic.
     ItalicPicture(isize),
     Convert,
-    OutputChosen(Option<PathBuf>),
+    /// What sampling the ZIM found it holds, for the archive's size.
+    ZimShares(PathBuf, Option<xwa_convert::ZimShares>),
+    /// Choose the folder the archive is saved in.
+    ChooseSaveDir,
+    SaveDirChosen(Option<PathBuf>),
+    /// The low-space popup's way to choose another folder.
+    ChooseSaveDirFromPopup,
+    /// Convert, replacing an archive of the same name.
+    ConvertReplacing,
+    /// Convert though the drive may be too full.
+    ConvertAnyway,
     Conversion(Event<String>),
     AskStopConversion,
     CancelConversion,
@@ -590,6 +608,10 @@ pub struct App {
     pub converting_sharper: bool,
     pub converting_images: bool,
     pub output: Option<PathBuf>,
+    /// What the ZIM holds, sampled, for the archive's likely size.
+    pub zim_shares: Option<xwa_convert::ZimShares>,
+    /// The free space where the archive is saved, and that folder.
+    pub save_free: Option<(PathBuf, u64)>,
 
     /// The fallback font's Noto fonts kept for converting offline.
     pub fonts_kept: Option<FontsKept>,
@@ -661,6 +683,8 @@ impl App {
             converting_sharper: false,
             converting_images: true,
             output: None,
+            zim_shares: None,
+            save_free: None,
             fonts_kept: None,
             font_download: Job::Idle,
             archive: None,
@@ -1368,31 +1392,46 @@ impl App {
                 }
             }
             Message::ItalicPicture(step) => self.turn_italic(step),
-            Message::Convert => {
-                let Some(zim) = self.zim.clone() else {
-                    return Task::none();
+            Message::Convert => return self.convert(true),
+            Message::ConvertReplacing => {
+                self.popup = None;
+                return self.convert(false);
+            }
+            Message::ConvertAnyway => {
+                self.popup = None;
+                return match self.output_path() {
+                    Some(out) => self.start_conversion(out),
+                    None => Task::none(),
                 };
-                let name = zim
-                    .with_extension("xwa")
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let dir = zim.parent().map(Path::to_path_buf);
+            }
+            Message::ZimShares(path, shares) => {
+                if self.zim.as_ref() == Some(&path) {
+                    self.zim_shares = shares;
+                }
+            }
+            Message::ChooseSaveDir => {
+                let dir = self.save_dir();
                 return self.dialog(
                     async move {
-                        let mut dialog = rfd::AsyncFileDialog::new()
-                            .add_filter("XWA archive", &["xwa"])
-                            .set_file_name(name);
+                        let mut dialog = rfd::AsyncFileDialog::new();
                         if let Some(dir) = dir {
                             dialog = dialog.set_directory(dir);
                         }
-                        dialog.save_file().await.map(|f| f.path().to_path_buf())
+                        dialog.pick_folder().await.map(|f| f.path().to_path_buf())
                     },
-                    Message::OutputChosen,
+                    Message::SaveDirChosen,
                 );
             }
-            Message::OutputChosen(Some(out)) => return self.start_conversion(out),
-            Message::OutputChosen(None) => {}
+            Message::SaveDirChosen(Some(dir)) => {
+                self.prefs.save_dir = Some(dir);
+                self.prefs.save();
+                self.refresh_save_free();
+            }
+            Message::SaveDirChosen(None) => {}
+            Message::ChooseSaveDirFromPopup => {
+                self.popup = None;
+                return self.update(Message::ChooseSaveDir);
+            }
             Message::Conversion(Event::Progress(p)) => self.conversion.progress(p),
             Message::Conversion(Event::Done(result)) => {
                 let mut look = Task::none();
@@ -1676,6 +1715,10 @@ impl App {
                 self.refresh_drives();
                 Task::none()
             }
+            Screen::Convert => {
+                self.refresh_save_free();
+                Task::none()
+            }
             Screen::Settings => {
                 if !self.font_download.running() {
                     self.fonts_kept = FontsKept::count();
@@ -1684,6 +1727,79 @@ impl App {
             }
             _ => Task::none(),
         }
+    }
+
+    /// The folder the archive is saved in: the one chosen last, while it
+    /// is there, else the ZIM's.
+    pub(crate) fn save_dir(&self) -> Option<PathBuf> {
+        self.prefs
+            .save_dir
+            .clone()
+            .filter(|d| d.is_dir())
+            .or_else(|| self.zim.as_deref()?.parent().map(Path::to_path_buf))
+    }
+
+    /// Where the archive is written: the save folder, under the ZIM's name.
+    pub(crate) fn output_path(&self) -> Option<PathBuf> {
+        let name = self.zim.as_deref()?.with_extension("xwa");
+        Some(self.save_dir()?.join(name.file_name()?))
+    }
+
+    /// The largest the archive is likely to be, once the ZIM is sampled.
+    pub(crate) fn archive_estimate(&self) -> Option<u64> {
+        self.zim_shares.map(|s| {
+            xwa_convert::archive_size_estimate(&s, self.images, self.prefs.model.converter())
+        })
+    }
+
+    /// Room for the archive where it goes: free space, and what an archive
+    /// of the same name there, which it replaces, frees.
+    fn room_for_archive(&self) -> Option<u64> {
+        let (dir, free) = self.save_free.as_ref()?;
+        if Some(dir) != self.save_dir().as_ref() {
+            return None;
+        }
+        let replaced = self
+            .output_path()
+            .and_then(|o| std::fs::metadata(o).ok())
+            .map_or(0, |m| m.len());
+        Some(free + replaced)
+    }
+
+    /// Whether the archive likely fits where it goes; `None` until both
+    /// are known.
+    pub(crate) fn archive_fits(&self) -> Option<bool> {
+        Some(self.archive_estimate()? <= self.room_for_archive()?)
+    }
+
+    pub(crate) fn refresh_save_free(&mut self) {
+        self.save_free = self.save_dir().and_then(|dir| {
+            let free = xwa_fetch::drives::free_space(&dir)?;
+            Some((dir, free))
+        });
+    }
+
+    /// Starts converting, asking first when that would replace an archive
+    /// (with `ask_replace`) or the drive may be too full.
+    fn convert(&mut self, ask_replace: bool) -> Task<Message> {
+        let Some(out) = self.output_path() else {
+            return Task::none();
+        };
+        if ask_replace && out.exists() {
+            self.popup = Some(Popup::ReplaceArchive);
+            self.popup_focus = 0;
+            return Task::none();
+        }
+        self.refresh_save_free();
+        if self.archive_fits() == Some(false) {
+            self.popup = Some(Popup::LowSpace {
+                needs: self.archive_estimate().unwrap_or(0),
+                has: self.room_for_archive().unwrap_or(0),
+            });
+            self.popup_focus = 0;
+            return Task::none();
+        }
+        self.start_conversion(out)
     }
 
     fn refresh_drives(&mut self) {
@@ -1897,11 +2013,22 @@ impl App {
     fn use_zim(&mut self, path: PathBuf) -> Task<Message> {
         self.zim = Some(path.clone());
         self.zim_info = None;
+        self.zim_shares = None;
         self.conversion = Job::Idle;
+        self.refresh_save_free();
         let read = path.clone();
-        Task::perform(background(move || describe(&read)), move |info| {
-            Message::ZimRead(path.clone(), info)
-        })
+        let describe = Task::perform(background(move || describe(&read)), {
+            let path = path.clone();
+            move |info| Message::ZimRead(path.clone(), info)
+        });
+        // Sampling reads a few thousand places in the file: seconds from a
+        // slow card, so after the rest.
+        let sample = path.clone();
+        let shares = Task::perform(
+            background(move || xwa_convert::zim_shares(&sample).ok()),
+            move |shares| Message::ZimShares(path.clone(), shares),
+        );
+        Task::batch([describe, shares])
     }
 
     /// Starts the next waiting download, if nothing is downloading. Its

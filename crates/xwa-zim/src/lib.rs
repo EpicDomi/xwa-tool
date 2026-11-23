@@ -307,6 +307,11 @@ impl Archive {
         Ok((start, end))
     }
 
+    /// Where each cluster starts in the file, in cluster order.
+    pub fn cluster_positions(&self) -> &[u64] {
+        &self.cluster_ptrs
+    }
+
     /// Reads a cluster's info byte and, for zstd, its frame header.
     pub fn cluster_info(&self, cluster: u32) -> Result<ClusterInfo> {
         let (start, end) = self.cluster_span(cluster)?;

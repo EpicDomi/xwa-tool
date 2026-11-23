@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 use iced::border::{self, Border};
 use iced::widget::{
     Space, button, canvas, column, container, image, mouse_area, progress_bar, row, space, stack,
-    text, text_input,
+    text, text_input, tooltip,
 };
 use iced::{Alignment, Background, Color, Element, Font, Length, Padding, Shadow, font};
 
@@ -142,6 +142,26 @@ pub fn fit(s: &str, face: Face, size: f32, max: f32) -> Cow<'_, str> {
     Cow::Owned(format!("{}…", s[..end].trim_end()))
 }
 
+/// `s`, cut short at its start to fit in `max`: for paths, whose end says
+/// most.
+pub fn fit_start(s: &str, face: Face, size: f32, max: f32) -> Cow<'_, str> {
+    if width(s, face, size) <= max {
+        return Cow::Borrowed(s);
+    }
+    let room = max - width("…", face, size);
+    let mut used = 0.0;
+    let mut start = s.len();
+    for (i, c) in s.char_indices().rev() {
+        let w = width(c.encode_utf8(&mut [0; 4]), face, size);
+        if used + w > room {
+            break;
+        }
+        used += w;
+        start = i;
+    }
+    Cow::Owned(format!("…{}", s[start..].trim_start()))
+}
+
 /// A line of text in the screen's fonts.
 pub fn label<'a>(s: impl text::IntoFragment<'a>, face: Face, size: f32) -> text::Text<'a> {
     text(s)
@@ -158,6 +178,39 @@ pub fn paragraph<'a>(s: impl text::IntoFragment<'a>, face: Face, size: f32) -> t
         .size(size)
         .line_height(text::LineHeight::Relative(1.3))
         .wrapping(text::Wrapping::WordOrGlyph)
+}
+
+/// How long the pointer rests on something before its tip shows.
+/// (None in tests, whose pictures cannot wait.)
+const TIP_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(if cfg!(test) { 0 } else { 600 });
+/// The widest a tip grows before its words wrap.
+const TIP_WIDTH: f32 = 340.0;
+
+/// `content` with `words` in a box beside it when the pointer rests on it.
+pub fn tip<'a, M: 'a>(
+    content: impl Into<Element<'a, M>>,
+    words: &str,
+    position: tooltip::Position,
+) -> Element<'a, M> {
+    let words = container(paragraph(words.to_string(), Face::Small, SMALL))
+        .max_width(TIP_WIDTH)
+        .padding([4.0, 8.0])
+        .style(|_| container::Style {
+            background: Some(Background::Color(PAPER)),
+            text_color: Some(INK),
+            border: Border {
+                color: INK,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..container::Style::default()
+        });
+    tooltip(content, words, position)
+        .gap(2)
+        .delay(TIP_DELAY)
+        .snap_within_viewport(true)
+        .into()
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +371,10 @@ pub struct Row<M> {
     pub chevron: bool,
     /// `None` shows it greyed out.
     pub on_press: Option<M>,
+    /// What it is for, shown when the pointer rests on it.
+    pub tip: Option<String>,
+    /// The subtitle is cut short at its start, not its end (a path).
+    pub keep_end: bool,
 }
 
 impl<M> Row<M> {
@@ -330,7 +387,20 @@ impl<M> Row<M> {
             value: None,
             chevron: false,
             on_press: None,
+            tip: None,
+            keep_end: false,
         }
+    }
+
+    /// Cuts a subtitle too long for the row at its start (for a path).
+    pub fn keep_end(mut self) -> Self {
+        self.keep_end = true;
+        self
+    }
+
+    pub fn tip(mut self, s: impl Into<String>) -> Self {
+        self.tip = Some(s.into());
+        self
     }
 
     pub fn icon(mut self, icon: &'static Icon) -> Self {
@@ -439,12 +509,16 @@ pub fn row_view<'a, M: Clone + 'a>(
     } else {
         body.into()
     };
-    if r.focusable() {
+    let body = if r.focusable() {
         // Only a moving pointer takes the selection, so a pointer resting
         // where a new screen puts a row does not steal it from the keys.
         mouse_area(body).on_move(move |_| on_hover.clone()).into()
     } else {
         body
+    };
+    match &r.tip {
+        Some(t) => tip(body, t, tooltip::Position::Bottom),
+        None => body,
     }
 }
 
@@ -506,7 +580,11 @@ fn list_content<'a, M: 'a>(r: &Row<M>, width: f32) -> Element<'a, M> {
     let title = fit(&r.title, Face::Ui, BODY, room).into_owned();
     let words: Element<'a, M> = match &r.subtitle {
         Some(s) => {
-            let s = fit(s, Face::Small, SMALL, room).into_owned();
+            let s = if r.keep_end {
+                fit_start(s, Face::Small, SMALL, room).into_owned()
+            } else {
+                fit(s, Face::Small, SMALL, room).into_owned()
+            };
             column![label(title, Face::Ui, BODY), label(s, Face::Small, SMALL)]
                 .spacing(1)
                 .into()

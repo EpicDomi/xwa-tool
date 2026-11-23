@@ -215,6 +215,88 @@ impl Resolver for Tables {
     }
 }
 
+/// What a ZIM holds, by the kind of cluster: compressed clusters hold its
+/// pages, uncompressed ones its pictures and other media. Its search
+/// indexes (Xapian), which are not converted, are left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZimShares {
+    pub text_bytes: u64,
+    pub media_bytes: u64,
+}
+
+/// Measures [`ZimShares`] from the clusters found at 2,048 places spread
+/// evenly through the file (so each cluster counts by its size): a few
+/// seconds even from a slow card.
+pub fn zim_shares(zim_path: &Path) -> Result<ZimShares> {
+    const SAMPLES: u64 = 2048;
+    let zim = xwa_zim::Archive::open(zim_path)?;
+    let starts = zim.cluster_positions();
+    let (Some(&first), Some(_)) = (starts.first(), starts.last()) else {
+        return Ok(ZimShares {
+            text_bytes: 0,
+            media_bytes: 0,
+        });
+    };
+    let last = zim.cluster_count() - 1;
+    let end = first + zim.cluster_info(last).map_or(0, |i| i.stored_size + 1);
+    let end = end.max(starts[last as usize] + 1);
+    let span = end - first;
+    let mut compressed = 0u64;
+    let mut known = 0u64;
+    let mut cache: HashMap<usize, bool> = HashMap::new();
+    for k in 0..SAMPLES {
+        let at = first + span * (2 * k + 1) / (2 * SAMPLES);
+        let c = starts.partition_point(|&s| s <= at).saturating_sub(1);
+        let is_text = match cache.get(&c) {
+            Some(&t) => t,
+            None => match zim.cluster_info(c as u32) {
+                Ok(info) => {
+                    let t = info.compression != xwa_zim::Compression::None;
+                    cache.insert(c, t);
+                    t
+                }
+                Err(_) => continue,
+            },
+        };
+        known += 1;
+        compressed += is_text as u64;
+    }
+    let text = span * compressed / known.max(1);
+    // The full-text and title search indexes are large, uncompressed and
+    // not converted.
+    let mut index = 0u64;
+    for path in ["fulltext/xapian", "title/xapian"] {
+        if let Ok(Some(e)) = zim.find(b'X', path)
+            && let xwa_zim::Target::Blob { cluster, .. } = e.target
+            && let Ok(info) = zim.cluster_info(cluster)
+            && info.compression == xwa_zim::Compression::None
+        {
+            index += info.stored_size;
+        }
+    }
+    Ok(ZimShares {
+        text_bytes: text,
+        media_bytes: (span - text).saturating_sub(index),
+    })
+}
+
+/// The largest the archive of a ZIM for `device` is likely to be, from
+/// [`ZimShares`]. On the test ZIMs, an archive's text (with its titles and
+/// tables) came to 26-49% of the ZIM's compressed pages for the X4 Pro,
+/// and 32-59% with the X4's and X3's weaker compression, and its pictures
+/// to 12-96% of the ZIM's media (English Wikipedia's 72 GB of pictures came
+/// from about 75 GB). So this counts 55% or 65% of the pages, all the
+/// media, and 64 MB for fonts and tables.
+pub fn archive_size_estimate(shares: &ZimShares, images: bool, device: Device) -> u64 {
+    const MARGIN: u64 = 64 << 20;
+    let text_share = match device.profile() {
+        Profile::Full => 0.55,
+        Profile::Compact => 0.65,
+    };
+    let pictures = if images { shares.media_bytes } else { 0 };
+    (shares.text_bytes as f64 * text_share) as u64 + pictures + MARGIN
+}
+
 /// Raster formats the image pipeline decodes.
 fn is_raster(mime: &str) -> bool {
     matches!(

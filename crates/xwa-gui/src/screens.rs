@@ -146,6 +146,11 @@ impl App {
                     Row::new(Kind::Menu, "Get Wikis")
                         .icon(&icons::LIBRARY)
                         .subtitle("Wikipedia and more, from Kiwix")
+                        .tip(
+                            "Find Wikipedia, Wiktionary and other wikis in your language and \
+                             download them. Kiwix packs each one in a single ZIM file, which \
+                             Convert then turns into an archive for the e-reader.",
+                        )
                         .on_press(Message::Open(Screen::Library)),
                 ),
                 // Only while there are downloads to see.
@@ -159,12 +164,21 @@ impl App {
                     Row::new(Kind::Menu, "Convert")
                         .icon(&icons::CONVERT)
                         .subtitle(convert)
+                        .tip(
+                            "Turn a ZIM file into an archive (an .xwa file) that the e-reader \
+                             can open. A large wiki takes from minutes to a few hours.",
+                        )
                         .on_press(Message::Open(Screen::Convert)),
                 ),
                 Some(
                     Row::new(Kind::Menu, "Copy to SD card")
                         .icon(&icons::TRANSFER)
                         .subtitle(copy)
+                        .tip(
+                            "Put an archive on the e-reader's SD card, in the folder the \
+                             e-reader looks in. Put the card in this computer, or connect the \
+                             e-reader to it, first.",
+                        )
                         .on_press(Message::Open(Screen::Card)),
                 ),
                 Some(
@@ -188,6 +202,12 @@ impl App {
         let mut rows = vec![
             Row::new(Kind::Setting, "Wiki")
                 .value(wiki.name())
+                .tip(
+                    "Which wiki to list: Wikipedia (the encyclopedia), Wiktionary (a \
+                     dictionary), Wikivoyage (travel guides), Wikibooks (textbooks), \
+                     Wikiquote (quotations), Wikisource (texts), Wikiversity (courses) or \
+                     Vikidia (an encyclopedia for children).",
+                )
                 .on_press(Message::Choose(Choice::Wiki)),
             Row::new(Kind::Setting, "Language")
                 .value(
@@ -255,12 +275,24 @@ impl App {
             rows: vec![
                 Row::new(Kind::Setting, "Pictures")
                     .value(view.pictures.name())
+                    .tip(
+                        "Files without pictures are many times smaller and keep all the \
+                         text, tables and formulas.",
+                    )
                     .on_press(Message::Choose(Choice::Pictures)),
                 Row::new(Kind::Setting, "Selection")
                     .value(view.selection.name())
+                    .tip(
+                        "Topic selections are small collections from the whole wiki, such \
+                         as chemistry, medicine or football.",
+                    )
                     .on_press(Message::Choose(Choice::Selection)),
                 Row::new(Kind::Setting, "Articles")
                     .value(view.articles.name())
+                    .tip(
+                        "\"Introductions only\" keeps the start of each article, before its \
+                         first heading: a fraction of the size, and enough to look things up.",
+                    )
                     .on_press(Message::Choose(Choice::Articles)),
                 Row::new(Kind::Setting, "Sort by")
                     .value(view.sort.name())
@@ -371,6 +403,10 @@ impl App {
                 Row::new(Kind::Item, "Save in")
                     .icon(&icons::FOLDER)
                     .subtitle(self.download_dir().display().to_string())
+                    .tip(
+                        "Where the ZIM file is downloaded. Once it is converted it can be \
+                         deleted, unless you want to convert it again.",
+                    )
                     .opens()
                     .on_press(Message::ChooseDownloadDir),
                 Row::new(Kind::Action, "Download").on_press(Message::Download),
@@ -499,23 +535,49 @@ impl App {
         page.rows = vec![
             Row::new(Kind::Item, "File")
                 .subtitle(file_name(zim))
+                .tip(format!(
+                    "The ZIM file to convert: {}. Choose this to pick another.",
+                    zim.display()
+                ))
                 .opens()
                 .on_press(Message::ChooseZim),
+            self.save_row(),
             Row::new(Kind::Setting, "Made for")
                 .value(short)
+                .tip(
+                    "The e-reader the archive is for. The X4 Pro's archives use stronger \
+                     compression, which the X4 and X3 cannot read, so convert again for \
+                     another model.",
+                )
                 .on_press(Message::Choose(Choice::Device)),
             Row::new(Kind::Setting, "Pictures")
                 .value(on_off(self.images))
+                .tip(
+                    "Off leaves the pictures out: a far smaller archive, with all the text, \
+                     tables and formulas. Useful when the SD card is short of space.",
+                )
                 .on_press(Message::ToggleImages),
             Row::new(Kind::Setting, "Sharper diagrams")
                 .subtitle("From Wikipedia, over the internet")
+                .tip(
+                    "Replaces the ZIM's small pictures of diagrams, maps and charts with \
+                     sharper ones from Wikipedia, so their labels can be read. Needs the \
+                     internet and takes longer the first time; they are kept, so converting \
+                     again downloads nothing.",
+                )
                 .value(on_off(self.images && self.sharper))
                 .on_press_maybe(self.images.then_some(Message::ToggleSharper)),
             Row::new(Kind::Setting, "Real italic")
                 .subtitle("For letters the e-reader's fonts lack")
+                .tip(
+                    "For Greek, Cyrillic, symbols and other letters the e-reader's own fonts \
+                     do not have, the archive carries their real italic shapes rather than \
+                     slanted upright ones. It adds very little to the archive.",
+                )
                 .value(on_off(self.real_italic))
                 .on_press(Message::ToggleItalic),
             Row::new(Kind::Item, "See the difference")
+                .tip("Pictures of the e-reader's screen with real and slanted italic.")
                 .opens()
                 .on_press(Message::Open(Screen::Italic)),
             Row::new(
@@ -532,6 +594,48 @@ impl App {
             page.bottom = 96.0;
         }
         page
+    }
+
+    /// Convert: where the archive is saved, and whether it likely fits.
+    fn save_row(&self) -> Row<Message> {
+        let row = Row::new(Kind::Item, "Save to")
+            .opens()
+            .on_press(Message::ChooseSaveDir);
+        let Some(dir) = self.save_dir() else {
+            return row.subtitle("Choose a folder");
+        };
+        let free = self
+            .save_free
+            .as_ref()
+            .filter(|(d, _)| *d == dir)
+            .map(|(_, f)| *f);
+        let estimate = self.archive_estimate();
+        let mut tip = format!("The archive is saved in {}", dir.display());
+        match (estimate, free) {
+            (Some(e), Some(f)) => {
+                tip += &format!(
+                    ". It will be up to about {} ({} is free there).",
+                    size_text(e),
+                    size_text(f)
+                )
+            }
+            (Some(e), None) => tip += &format!(". It will be up to about {}.", size_text(e)),
+            (None, Some(f)) => tip += &format!(" ({} is free there).", size_text(f)),
+            (None, None) => tip += ".",
+        }
+        tip += " Choose this to save it somewhere else.";
+        let row = row.tip(tip);
+        match (self.archive_fits(), estimate, free) {
+            (Some(false), Some(e), Some(f)) => row.subtitle(format!(
+                "Needs up to about {} · {} free",
+                size_text(e),
+                size_text(f)
+            )),
+            (_, _, Some(f)) => row
+                .subtitle(format!("{} · {} free", dir.display(), size_text(f)))
+                .keep_end(),
+            _ => row.subtitle(dir.display().to_string()).keep_end(),
+        }
     }
 
     fn italic_page(&self) -> Page {
@@ -588,6 +692,7 @@ impl App {
                         .map(file_name)
                         .unwrap_or_else(|| "Choose an .xwa file".into()),
                 )
+                .tip("The converted archive (.xwa file) to put on the card.")
                 .opens()
                 .on_press(Message::ChooseArchive),
         );
@@ -598,11 +703,22 @@ impl App {
                         "{} glyphs missing · downloads Noto fonts",
                         group(*glyphs as u64)
                     ))
+                    .tip(
+                        "Some letters in this archive have no shape to draw, because their \
+                         fonts could not be downloaded when it was converted (offline, say). \
+                         This downloads them and adds them to the archive, without \
+                         converting again.",
+                    )
                     .on_press(Message::CompleteFont),
             ),
             ArchiveFont::Unchecked if self.archive.is_some() => page.rows.push(
                 Row::new(Kind::Item, "Check its fallback font")
                     .subtitle("Reads its text to find missing glyphs")
+                    .tip(
+                        "Archives made by older versions do not list the letters they use. \
+                         This reads the archive's text once to find letters it has no shape \
+                         for, which can then be added.",
+                    )
                     .on_press(Message::CheckFont),
             ),
             _ => {}
@@ -623,8 +739,14 @@ impl App {
                 row
             });
         }
-        page.rows
-            .push(Row::new(Kind::Item, "Look for cards again").on_press(Message::LookForCards));
+        page.rows.push(
+            Row::new(Kind::Item, "Look for cards again")
+                .tip(
+                    "Put the e-reader's SD card in this computer, or connect the e-reader, then \
+                 choose this if the card is not listed.",
+                )
+                .on_press(Message::LookForCards),
+        );
         page.rows
             .push(Row::new(Kind::Action, "Copy").on_press_maybe(
                 (self.archive.is_some() && self.drive.is_some()).then_some(Message::CopyToCard),
@@ -649,12 +771,14 @@ impl App {
             rows: vec![
                 Row::new(Kind::Setting, "Device")
                     .value(self.prefs.model.short_name())
+                    .tip("The e-reader this app shows, and converts for unless you choose another.")
                     .on_press_maybe((!converting).then_some(Message::Choose(Choice::Device))),
                 Row::new(Kind::Setting, "Case")
                     .value(self.prefs.finish().name())
                     .on_press(Message::Choose(Choice::Case)),
                 Row::new(Kind::Setting, "Display size")
                     .value(format!("{:.0}%", self.zoom * 100.0))
+                    .tip("How large the e-reader is drawn. Dragging the window's edges does the same.")
                     .on_press(Message::Choose(Choice::Size)),
                 {
                     let row = Row::new(Kind::Setting, "Graphics")
@@ -662,6 +786,11 @@ impl App {
                             Graphics::Auto => self.graphics.name().to_string(),
                             g => g.name().to_string(),
                         })
+                        .tip(
+                            "How the app draws itself. Leave it on Automatic; if the window is \
+                             blank, black or flickers, try another. It takes effect the next \
+                             time the app starts.",
+                        )
                         .on_press(Message::Choose(Choice::Graphics));
                     if self.prefs.graphics != Graphics::Auto && self.prefs.graphics != self.graphics
                     {
@@ -672,15 +801,23 @@ impl App {
                 },
                 Row::new(Kind::Setting, "Refresh flash")
                     .value(on_off(self.prefs.refresh_flash))
+                    .tip(
+                        "Flashes the screen black and white when it changes, as e-ink screens \
+                         do. Turn it off if you find it distracting.",
+                    )
                     .on_press(Message::ToggleFlash),
                 self.fonts_row(),
                 Row::new(Kind::Item, "Download folder")
                     .icon(&icons::FOLDER)
+                    .tip("Where downloaded ZIM files are saved.")
                     .subtitle(self.download_dir().display().to_string())
                     .opens()
                     .on_press(Message::ChooseDownloadDir),
                 Row::new(Kind::Info, "Version").value(env!("CARGO_PKG_VERSION")),
-                Row::new(Kind::Info, "Archive format").value(format!(
+                Row::new(Kind::Info, "Archive format").tip(
+                    "The version of the archive format this app writes. The e-reader's \
+                     firmware must support it to open the archives.",
+                ).value(format!(
                     "XWA {}.{}",
                     xwa_format::VERSION_MAJOR,
                     xwa_format::VERSION_MINOR
@@ -694,7 +831,11 @@ impl App {
     /// Settings: keep every Noto font the fallback font could need, for
     /// converting offline.
     fn fonts_row(&self) -> Row<Message> {
-        let row = Row::new(Kind::Item, "Fonts for converting offline");
+        let row = Row::new(Kind::Item, "Fonts for converting offline").tip(
+            "Downloads every font (about 120 MB) a conversion might need for letters the \
+             e-reader's own fonts lack, so that converting without the internet still gives \
+             archives that can show every letter.",
+        );
         if self.font_download.running() {
             return row
                 .subtitle(self.font_download.label().to_string())
@@ -1189,6 +1330,28 @@ impl App {
                         .to_string(),
                 ),
             ),
+            Popup::ReplaceArchive => (
+                "Replace the archive?",
+                Some(format!(
+                    "{} is already in {}. Converting replaces it.",
+                    self.output_path()
+                        .as_deref()
+                        .map(file_name)
+                        .unwrap_or_default(),
+                    self.save_dir()
+                        .map(|d| d.display().to_string())
+                        .unwrap_or_default(),
+                )),
+            ),
+            Popup::LowSpace { needs, has } => (
+                "Not enough space?",
+                Some(format!(
+                    "The archive may need up to about {}, and {} is free where it is saved. \
+                     The estimate errs on the large side.",
+                    size_text(needs),
+                    size_text(has)
+                )),
+            ),
             Popup::Choose(Choice::Device) => ("Device", None),
             Popup::Choose(Choice::Case) => ("Case", None),
             Popup::Choose(Choice::Size) => ("Display size", None),
@@ -1407,6 +1570,15 @@ fn popup_actions(p: Popup) -> Vec<Row<Message>> {
         Popup::TurnOffBusy => vec![
             Row::new(Kind::Item, "Keep working").on_press(Message::ClosePopup),
             Row::new(Kind::Item, "Turn off anyway").on_press(Message::TurnOff),
+        ],
+        Popup::ReplaceArchive => vec![
+            Row::new(Kind::Item, "Replace it").on_press(Message::ConvertReplacing),
+            Row::new(Kind::Item, "Cancel").on_press(Message::ClosePopup),
+        ],
+        Popup::LowSpace { .. } => vec![
+            Row::new(Kind::Item, "Convert anyway").on_press(Message::ConvertAnyway),
+            Row::new(Kind::Item, "Save somewhere else").on_press(Message::ChooseSaveDirFromPopup),
+            Row::new(Kind::Item, "Cancel").on_press(Message::ClosePopup),
         ],
         Popup::StopConversion => vec![
             Row::new(Kind::Item, "Keep converting").on_press(Message::ClosePopup),
