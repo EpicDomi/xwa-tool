@@ -947,8 +947,18 @@ fn screens() {
         if let Some(zim) = &zim {
             a.zim = Some(zim.clone());
             a.zim_info = Some(crate::app::describe(zim));
+            a.zim_shares = xwa_convert::zim_shares(zim).ok();
+            a.refresh_save_free();
             a.focus = 2;
             snap(&a, &dir, &format!("{tag}-convert"));
+            // The Save to row's tip, the pointer on its title.
+            let screen = a.spec().screen;
+            snap_pointing(
+                &a,
+                &dir,
+                &format!("{tag}-convert-tip"),
+                Some(iced::Point::new(screen.x + 80.0, screen.y + 312.0)),
+            );
             a.conversion = running(0.46, 1, "18,422 of 41,204");
             a.converting_images = true;
             snap(&a, &dir, &format!("{tag}-converting"));
@@ -1005,6 +1015,11 @@ fn screens() {
 }
 
 fn snap(app: &App, dir: &Path, name: &str) {
+    snap_pointing(app, dir, name, None);
+}
+
+/// `snap` with the pointer resting at `at`, to show a tip.
+fn snap_pointing(app: &App, dir: &Path, name: &str, at: Option<iced::Point>) {
     // `XWA_GUI_ONLY` draws just the screens whose names contain it.
     if let Some(only) = std::env::var_os("XWA_GUI_ONLY")
         && !name.contains(only.to_string_lossy().as_ref())
@@ -1021,6 +1036,12 @@ fn snap(app: &App, dir: &Path, name: &str) {
         ..iced::Settings::default()
     };
     let mut sim = iced_test::Simulator::with_size(settings, app.spec().window(), app.view());
+    if let Some(at) = at {
+        sim.point_at(at);
+        let _ = sim.simulate([iced::Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+    }
     let snapshot = sim.snapshot(&crate::eink_theme()).expect("drawn");
     // The snapshot is written only where none is; clear the old one first.
     for renderer in ["tiny-skia", "wgpu"] {
@@ -1032,4 +1053,111 @@ fn snap(app: &App, dir: &Path, name: &str) {
             .matches_image(dir.join(format!("{name}.png")))
             .unwrap()
     );
+}
+
+#[test]
+fn the_archive_is_saved_where_chosen_and_converting_asks_first_when_it_may_not_fit() {
+    let zims = tempfile::tempdir().unwrap();
+    let mut app = app(Model::X4);
+    let zim = zims.path().join("wiki.zim");
+    let _ = app.update(Message::Opened(zim.clone()));
+    let row = |app: &App| {
+        app.page()
+            .rows
+            .into_iter()
+            .find(|r| r.title == "Save to")
+            .expect("the row")
+    };
+    // At first, beside the ZIM, under its name.
+    assert_eq!(app.save_dir().as_deref(), Some(zims.path()));
+    assert_eq!(app.output_path(), Some(zims.path().join("wiki.xwa")));
+    let r = row(&app);
+    assert!(r.keep_end, "a long path keeps its end");
+    // With the ZIM sampled: the size goes in the tip, and the free space in
+    // the subtitle while it is enough.
+    app.zim_shares = Some(xwa_convert::ZimShares {
+        text_bytes: 2_000_000_000,
+        media_bytes: 10_000_000_000,
+    });
+    app.save_free = Some((zims.path().to_path_buf(), 100_000_000_000));
+    let r = row(&app);
+    assert!(
+        r.subtitle.as_deref().unwrap().ends_with("100.0 GB free"),
+        "{:?}",
+        r.subtitle
+    );
+    assert!(
+        r.tip.as_deref().unwrap().contains("up to about 11."),
+        "{:?}",
+        r.tip
+    );
+    app.save_free = Some((zims.path().to_path_buf(), 5_000_000_000));
+    let r = row(&app);
+    assert!(
+        r.subtitle
+            .as_deref()
+            .unwrap()
+            .starts_with("Needs up to about 11.")
+    );
+    // Converting over an archive of the same name asks first; then, with
+    // more to write than the drive can have free, asks again.
+    std::fs::write(zims.path().join("wiki.xwa"), b"old").unwrap();
+    app.zim_shares = Some(xwa_convert::ZimShares {
+        text_bytes: 0,
+        media_bytes: u64::MAX / 4,
+    });
+    let _ = app.update(Message::Convert);
+    assert_eq!(app.popup, Some(Popup::ReplaceArchive));
+    assert!(!app.conversion.running());
+    let _ = app.update(Message::ConvertReplacing);
+    assert!(
+        matches!(app.popup, Some(Popup::LowSpace { .. })),
+        "{:?}",
+        app.popup
+    );
+    assert!(!app.conversion.running());
+    let _ = app.update(Message::ConvertAnyway);
+    assert_eq!(app.popup, None);
+    assert!(app.conversion.running() || matches!(app.conversion, Job::Finished(_)));
+    assert_eq!(app.output, Some(zims.path().join("wiki.xwa")));
+    // A folder chosen is kept for next time.
+    let saves = tempfile::tempdir().unwrap();
+    app.conversion = Job::Idle;
+    let _ = app.update(Message::SaveDirChosen(Some(saves.path().to_path_buf())));
+    assert_eq!(app.prefs.save_dir.as_deref(), Some(saves.path()));
+    assert_eq!(app.output_path(), Some(saves.path().join("wiki.xwa")));
+    assert!(
+        app.save_free
+            .as_ref()
+            .is_some_and(|(d, _)| d == saves.path())
+    );
+}
+
+#[test]
+fn settings_and_choices_a_newcomer_may_not_know_have_tips() {
+    let mut app = app(Model::X4Pro);
+    let _ = app.update(Message::Opened(PathBuf::from("/nowhere/wiki.zim")));
+    let tipped = |app: &App, title: &str| {
+        app.page()
+            .rows
+            .iter()
+            .find(|r| r.title == title)
+            .unwrap_or_else(|| panic!("{title}"))
+            .tip
+            .is_some()
+    };
+    for title in [
+        "File",
+        "Save to",
+        "Made for",
+        "Pictures",
+        "Sharper diagrams",
+        "Real italic",
+    ] {
+        assert!(tipped(&app, title), "{title}");
+    }
+    let _ = app.update(Message::Open(Screen::Settings));
+    for title in ["Graphics", "Refresh flash", "Fonts for converting offline"] {
+        assert!(tipped(&app, title), "{title}");
+    }
 }

@@ -63,7 +63,12 @@ Early. What works today:
   show their speed and the time left, and can be paused, resumed or taken
   off the list; "Downloads" on the home screen shows them. "Convert" takes
   a ZIM (downloaded, chosen, or dropped onto the device) and converts it
-  for your e-reader; "Copy to SD card" puts the archive on the card.
+  for your e-reader, into the folder "Save to" shows (the one used last,
+  else the ZIM's), with the space free there; it asks before replacing an
+  archive, or when the archive may not fit (it estimates the largest it is
+  likely to be from a sample of the ZIM). "Copy to SD card" puts the
+  archive on the card. Resting the pointer on a setting or choice whose
+  purpose may not be plain shows what it does.
 
   Everything can be clicked, and the device's keys work too: the page keys
   turn pages, the X4's and X3's front keys do what the labels above them
