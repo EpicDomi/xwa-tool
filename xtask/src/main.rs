@@ -16,10 +16,15 @@
 //! `cargo xtask fonts` writes `crates/xwa-convert/data/fonts.tsv.zst`, the
 //! Noto fonts the converter draws the fallback FONT from, with their
 //! files' addresses, checksums and coverage.
+//!
+//! `cargo xtask unicode` writes `crates/xwa-convert/data/no-character.txt`,
+//! the code points no font draws (unassigned, private use, surrogates and
+//! controls), from the Unicode Character Database.
 
 mod days;
 mod fonts;
 mod spdx;
+mod unicode;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -74,8 +79,9 @@ fn main() -> ExitCode {
         Some("licenses") => licenses(&args[1..]),
         Some("days") if args.len() == 1 => days::write(&workspace_root()),
         Some("fonts") if args.len() == 1 => fonts::write(&workspace_root()),
+        Some("unicode") if args.len() == 1 => unicode::write(&workspace_root()),
         _ => Err(
-            "usage: cargo xtask licenses [--target TRIPLE]... [--out FILE]\n       cargo xtask days\n       cargo xtask fonts"
+            "usage: cargo xtask licenses [--target TRIPLE]... [--out FILE]\n       cargo xtask days\n       cargo xtask fonts\n       cargo xtask unicode"
                 .into(),
         ),
     };
