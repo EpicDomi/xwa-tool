@@ -251,6 +251,73 @@ fn has_class(e: &Element, class: &str) -> bool {
     e.classes().any(|c| c == class)
 }
 
+/// A tick or cross drawn as a small picture ({{tick}}, {{cross}}, {{Yes
+/// check}}, the marks in comparison tables), as the character it stands
+/// for: sharp at any size, and there even in ZIMs without pictures, which
+/// keep only the picture's alt text. Known by that text (or its title), on
+/// a picture no taller than a line.
+fn symbol_image(node: NodeRef<'_, Node>) -> Option<&'static str> {
+    let img = node
+        .descendants()
+        .find_map(|d| element(&d).filter(|e| e.name() == "img"))?;
+    let small = |name: &str| {
+        img.attr(name)
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .is_none_or(|v| v <= 24)
+    };
+    if !small("height") || !small("width") {
+        return None;
+    }
+    let title = node
+        .descendants()
+        .find_map(|d| element(&d).and_then(|e| e.attr("title")));
+    [img.attr("alt"), title]
+        .into_iter()
+        .flatten()
+        .find_map(|t| symbol_word(t.trim()))
+}
+
+fn symbol_word(t: &str) -> Option<&'static str> {
+    const YES: &[&str] = &[
+        "yes",
+        "tick",
+        "check",
+        "checked",
+        "check mark",
+        "checkmark",
+        "done",
+        "✓",
+        "✔",
+        "yes check",
+        "green tick",
+        "support",
+        "included",
+    ];
+    const NO: &[&str] = &[
+        "no", "cross", "x mark", "✗", "✘", "red x", "oppose", "excluded",
+    ];
+    let t = t.to_lowercase();
+    if YES.contains(&t.as_str()) {
+        Some("✓")
+    } else if NO.contains(&t.as_str()) {
+        Some("✗")
+    } else {
+        None
+    }
+}
+
+/// The mark a comparison-table cell's class stands for (Wikipedia's
+/// `table-yes`, `table-no` and their variants).
+fn verdict_class(e: &Element) -> Option<&'static str> {
+    if e.classes().any(|c| matches!(c, "table-yes" | "table-yes2")) {
+        Some("✓")
+    } else if e.classes().any(|c| matches!(c, "table-no" | "table-no2")) {
+        Some("✗")
+    } else {
+        None
+    }
+}
+
 /// Elements that never carry article text.
 fn is_chrome(e: &Element) -> bool {
     const TAGS: &[&str] = &[
@@ -535,7 +602,9 @@ impl Cx<'_> {
                 || e.attr("typeof").is_some_and(|t| t.starts_with("mw:File")) =>
             {
                 // An image on its own in running text: an icon if small, else a figure.
-                if let Some((image, height)) = self.image(node, true) {
+                if let Some(sym) = symbol_image(node) {
+                    flow.run.push(Inline::Text(sym.into()));
+                } else if let Some((image, height)) = self.image(node, true) {
                     if self.images[image as usize].kind == Kind::Icon {
                         flow.run.push(Inline::Icon { image, height });
                     } else {
@@ -1095,7 +1164,13 @@ impl Cx<'_> {
                 }
                 cols = cols.max(c + colspan);
                 c += colspan;
-                let content = self.cell_inlines(cell);
+                let mut content = self.cell_inlines(cell);
+                if content.is_empty()
+                    && let Some(sym) = verdict_class(ce)
+                {
+                    // A yes/no cell whose mark was a picture this ZIM lacks.
+                    content.push(Inline::Text(sym.into()));
+                }
                 cells.push(Cell {
                     header: ce.name() == "th",
                     rowspan: rowspan as u32,
@@ -1271,7 +1346,9 @@ impl Cx<'_> {
             "br" => {}
             "a" => self.link(node, e, out),
             "img" | "figure" => {
-                if let Some((image, height)) = self.image(node, true) {
+                if let Some(sym) = symbol_image(node) {
+                    out.push(Inline::Text(sym.into()));
+                } else if let Some((image, height)) = self.image(node, true) {
                     out.push(Inline::Icon { image, height });
                 }
             }
@@ -2560,6 +2637,34 @@ mod image_tests {
         );
         assert_eq!(x.stats.trees, 5);
         assert_eq!(x.stats.tables, 0);
+    }
+
+    #[test]
+    fn tick_and_cross_pictures_become_marks() {
+        // As a ZIM without pictures has {{Yes check}} and {{No}} (alt text
+        // only), as one with pictures has them, a picture too big to be a
+        // mark, an empty yes cell, and a cell with only a colour.
+        let x = run(
+            r#"<table class="wikitable"><tr><th>Gene</th><th>A</th><th>B</th><th>C</th><th>D</th><th>E</th></tr>
+            <tr><td>ATM</td>
+            <td class="table-yes2 skin-invert"><span typeof="mw:File"><span title="Yes"><img alt="Yes" src="data:image/svg+xml;charset=UTF-8,x" width="13" height="13"></span></span></td>
+            <td class="table-no2"><span typeof="mw:File"><img alt="No" src="./_assets_/h/Flag.png" width="13" height="13"></span></td>
+            <td><span typeof="mw:File"><img alt="Yes" src="./_assets_/h/Photo.jpg" width="120" height="90"></span></td>
+            <td class="table-yes"></td>
+            <td style="background:#ace1af"></td></tr></table>"#,
+        );
+        let cells: Vec<Vec<Inline>> = x.article.tables[0]
+            .cells
+            .iter()
+            .skip(6)
+            .map(|c| c.content.clone())
+            .collect();
+        assert_eq!(cells[0], vec![text("ATM")]);
+        assert_eq!(cells[1], vec![text("✓")]);
+        assert_eq!(cells[2], vec![text("✗")]);
+        assert!(!cells[3].contains(&text("✓")), "too big to be a mark");
+        assert_eq!(cells[4], vec![text("✓")]);
+        assert!(cells[5].is_empty(), "a colour alone says nothing for sure");
     }
 
     #[test]
