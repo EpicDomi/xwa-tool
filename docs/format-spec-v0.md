@@ -96,7 +96,8 @@ stateless (7.2), gave icons a size (7.3) and formula records a length
 (8.1), wrote down what readers may rely on in text (7.3), added DAYS (5.3),
 and changed the checksums from CRC32C to CRC-32. Version 0.4 made FONT
 outline glyphs that one rasteriser draws at any size (10), and gave tables
-their caption (7.4). Version 0.5 added trees (7.3, TREE), for cladograms.
+their caption (7.4). Version 0.5 added trees (7.3, TREE), for cladograms,
+and sidebars (7.5).
 
 ### 3.2 Section types
 
@@ -405,9 +406,11 @@ varint toc_count, then per heading: u8 level, string text, varint pos
 varint table_count, then per table: varint pos
 varint infobox_pos_plus_one   (0 = no infobox)
 varint anchor_count, then per anchor: u32 hash, varint section
+varint sidebar_count, then per sidebar: string title, varint pos
 body                   block stream (7.3), body_size bytes
 tables                 table records (7.4), one per table
 infobox                infobox record (7.4), if any
+sidebars               sidebar records (7.5), one per sidebar
 ```
 
 Every `pos` is a byte position measured from the first byte of the body, so
@@ -591,6 +594,44 @@ INFOBOX: varint row_count, per row: u8 kind, then by kind:
 The caption belongs to the table, not to the text around it, so a reader
 that shows tables in a viewer of their own can title them there, and show
 the table in the text as a line ("Table: caption") that opens it.
+
+### 7.5 Sidebars
+
+A sidebar is a series' navigation box ("Part of a series on Evolution"):
+on Wikipedia, a box of links beside the opening paragraphs, which the
+mobile site and apps hide. Its place in the page means nothing, so it is
+not in the text: readers list an article's sidebars in its menu and open
+one as a list of links. The header gives each one's title, so the menu
+and a hint near the top of the article ("Part of a series on Evolution
+›") need nothing else; the record holds the links:
+
+```
+SIDEBAR: varint group_count, per group:
+           string heading        (empty for links before the first heading)
+           varint link_count, per link:
+             string label, varint target article id,
+             u8 place: 0 section (varint section, 0 = top) | 1 anchor (u32 hash, 7.2)
+```
+
+The title, headings and labels are tidy lines (7.3); titles and labels
+are never empty. Groups are never empty, and a sidebar has at least two
+links.
+
+xwa-tool keeps a sidebar's links to other articles in the archive, in
+order, each once, grouped under its headings (`sidebar-heading`,
+`sidebar-list-title`); its title joins the pretitle and title ("Part of a
+series on" + "Evolution"), and a link in the title comes first. Plain
+text (articles not in the ZIM), links to the article itself, the
+sidebar's pictures and its view/talk/edit links are left out, and so is
+a sidebar left with fewer than two links, or the second copy of one a
+page places twice. Navigation boxes at the foot of pages are still left
+out.
+
+Measured: in the chemistry ZIM, 352 of 396 sidebars are kept, with 9,429
+links; they add 0.2 MB (0.3%) to the 78.5 MB of text, 0.1 MB stored.
+Molecular and Cell Biology keeps 164 of 193, with 2,656 links (0.1 MB). In
+the Top 100, whose sidebars link mostly to articles outside it, 2 of 36
+are kept.
 
 ## 8. Math
 
