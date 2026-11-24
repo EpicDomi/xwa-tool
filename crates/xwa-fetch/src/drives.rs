@@ -98,8 +98,9 @@ pub fn removable() -> Vec<Drive> {
 }
 
 /// Copies `file` into `dir` (a folder on `drive`, if known), checking free
-/// space and FAT32's 4 GB limit first. The copy is written under a
-/// temporary name, flushed to the card, and renamed when complete.
+/// space and FAT32's 4 GB limit first. Its space is set aside before
+/// writing, so the card can give it one unbroken run. The copy is written
+/// under a temporary name, flushed to the card, and renamed when complete.
 pub fn copy(
     file: &Path,
     dir: &Path,
@@ -129,6 +130,8 @@ pub fn copy(
     let result = (|| -> Result<()> {
         let mut src = File::open(file)?;
         let mut dst = File::create(&part)?;
+        // One unbroken run on the card where there is one.
+        crate::reserve::reserve(&dst, size);
         let mut buf = vec![0u8; 8 << 20];
         let mut done = 0u64;
         loop {
