@@ -273,6 +273,8 @@ pub struct ZimInfo {
     pub date: String,
     pub entries: u32,
     pub size: u64,
+    /// False for a ZIM made without pictures ("nopic" or "mini").
+    pub pictures: bool,
     /// Its illustration in the panel's greys.
     pub cover: Option<iced::widget::image::Handle>,
 }
@@ -870,6 +872,18 @@ impl App {
             let n = r.laid.pages.len().max(1) as isize;
             r.page = (r.page as isize + step).clamp(0, n - 1) as usize;
         }
+    }
+
+    /// Whether the chosen ZIM has pictures to convert: false once it is
+    /// known to be made without them, true until then.
+    pub(crate) fn zim_has_pictures(&self) -> bool {
+        !matches!(&self.zim_info, Some(Ok(info)) if !info.pictures)
+    }
+
+    /// Whether the conversion includes pictures: the setting, unless the
+    /// ZIM has none.
+    pub(crate) fn pictures(&self) -> bool {
+        self.images && self.zim_has_pictures()
     }
 
     pub fn new(
@@ -1843,12 +1857,12 @@ impl App {
                 }
             }
             Message::ToggleImages => {
-                if !self.conversion.running() {
+                if !self.conversion.running() && self.zim_has_pictures() {
                     self.images = !self.images;
                 }
             }
             Message::ToggleSharper => {
-                if !self.conversion.running() && self.images {
+                if !self.conversion.running() && self.pictures() {
                     self.sharper = !self.sharper;
                 }
             }
@@ -2222,7 +2236,7 @@ impl App {
     /// The largest the archive is likely to be, once the ZIM is sampled.
     pub(crate) fn archive_estimate(&self) -> Option<u64> {
         self.zim_shares.map(|s| {
-            xwa_convert::archive_size_estimate(&s, self.images, self.prefs.model.converter())
+            xwa_convert::archive_size_estimate(&s, self.pictures(), self.prefs.model.converter())
         })
     }
 
@@ -2454,8 +2468,8 @@ impl App {
         self.output = Some(out.clone());
         self.focus = 0;
         let device = self.prefs.model.converter();
-        let images = self.images;
-        let diagrams = (self.images && self.sharper)
+        let images = self.pictures();
+        let diagrams = (images && self.sharper)
             .then(Diagrams::default_cache)
             .flatten()
             .map(|cache| Arc::new(Diagrams::new(cache)));
@@ -2932,6 +2946,7 @@ pub(crate) fn describe(path: &Path) -> Result<ZimInfo, String> {
         date: text("Date"),
         entries: zim.entry_count(),
         size,
+        pictures: zim.has_pictures(),
         cover,
     })
 }
@@ -2960,6 +2975,7 @@ mod tests {
             diagrams: None,
             sharper_images: 0,
             fallback_font: None,
+            zim_has_pictures: true,
             zim_bytes: 0,
             elapsed: Duration::ZERO,
         };

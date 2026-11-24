@@ -154,6 +154,8 @@ pub struct Report {
     pub sharper_images: u64,
     /// What building the fallback FONT found, when it was asked for.
     pub fallback_font: Option<fallback::Report>,
+    /// False for a ZIM made without pictures, converted without them.
+    pub zim_has_pictures: bool,
     pub zim_bytes: u64,
     pub elapsed: Duration,
 }
@@ -338,6 +340,9 @@ fn convert_inner(
     let zim = xwa_zim::Archive::open(zim_path)?;
     let zim_bytes = std::fs::metadata(zim_path)?.len();
     let entry_count = zim.entry_count();
+    // A ZIM without pictures has only a few logos to find.
+    let zim_has_pictures = zim.has_pictures();
+    let images = opts.images && zim_has_pictures;
     let threads = match opts.threads {
         0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
         n => n,
@@ -366,7 +371,7 @@ fn convert_inner(
             return Ok(());
         }
         if let Target::Blob { cluster, blob } = e.target
-            && opts.images
+            && images
             && zim.mime_type(&e).is_some_and(is_raster)
         {
             image_paths.push((links::path_hash(&e.path), image_entries.len() as u32));
@@ -527,7 +532,7 @@ fn convert_inner(
     let table = Tables {
         links,
         link_anchors: PathTable::from_hashed(link_anchors),
-        images: opts.images.then(|| PathTable::from_hashed(image_paths)),
+        images: images.then(|| PathTable::from_hashed(image_paths)),
         math: opts.math.then(math::MathEngine::new),
     };
     let main_article = zim.header().main_page.and_then(follow).map(|(id, _)| id);
@@ -923,6 +928,7 @@ fn convert_inner(
         diagrams: diagram_report,
         sharper_images,
         fallback_font,
+        zim_has_pictures,
         zim_bytes,
         elapsed: started.elapsed(),
     })

@@ -818,13 +818,23 @@ impl App {
                      another model.",
                 )
                 .on_press(Message::Choose(Choice::Device)),
-            Row::new(Kind::Setting, "Pictures")
-                .value(on_off(self.images))
-                .tip(
-                    "Off leaves the pictures out: a far smaller archive, with all the text, \
-                     tables and formulas. Useful when the SD card is short of space.",
-                )
-                .on_press(Message::ToggleImages),
+            if self.zim_has_pictures() {
+                Row::new(Kind::Setting, "Pictures")
+                    .value(on_off(self.images))
+                    .tip(
+                        "Off leaves the pictures out: a far smaller archive, with all the text, \
+                         tables and formulas. Useful when the SD card is short of space.",
+                    )
+                    .on_press(Message::ToggleImages)
+            } else {
+                Row::new(Kind::Setting, "Pictures")
+                    .value("None in this ZIM")
+                    .tip(
+                        "This ZIM was made without pictures (Kiwix's \"no pictures\" or \
+                         \"mini\" version), so the archive has none either. Get the full \
+                         version of the wiki for its pictures.",
+                    )
+            },
             Row::new(Kind::Setting, "Sharper diagrams")
                 .subtitle("From Wikipedia, over the internet")
                 .tip(
@@ -833,8 +843,8 @@ impl App {
                      internet and takes longer the first time; they are kept, so converting \
                      again downloads nothing.",
                 )
-                .value(on_off(self.images && self.sharper))
-                .on_press_maybe(self.images.then_some(Message::ToggleSharper)),
+                .value(on_off(self.pictures() && self.sharper))
+                .on_press_maybe(self.pictures().then_some(Message::ToggleSharper)),
             Row::new(Kind::Setting, "Real italic")
                 .subtitle("For letters the e-reader's fonts lack")
                 .tip(
