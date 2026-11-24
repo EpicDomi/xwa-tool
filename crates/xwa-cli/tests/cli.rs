@@ -101,7 +101,7 @@ fn info_verify_and_dump() {
     let (ok, out) = tool(&["info", file]);
     assert!(ok, "{out}");
     assert!(
-        out.contains("XWA 0.4") && out.contains("2 articles") && out.contains("title: CLI test"),
+        out.contains("XWA 0.5") && out.contains("2 articles") && out.contains("title: CLI test"),
         "{out}"
     );
 

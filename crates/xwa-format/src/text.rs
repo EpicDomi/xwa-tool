@@ -5,6 +5,7 @@ use std::fmt::Write;
 
 use crate::content::{
     Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Place, Style, Table,
+    Tree, TreeNode,
 };
 
 /// Renders `a` as Markdown-like text. `title_of` names link targets.
@@ -109,7 +110,77 @@ impl Renderer<'_> {
                 }
                 self.line(indent, "");
             }
+            Block::Tree(t) => self.tree(t, indent),
         }
+    }
+
+    /// A tree drawn with box-drawing characters, one leaf or label to a
+    /// line, as a reader might lay it out.
+    fn tree(&mut self, t: &Tree, indent: &str) {
+        let caption = self.inlines(&t.caption);
+        if caption.is_empty() {
+            self.line(indent, "[tree]");
+        } else {
+            self.line(indent, &format!("[tree: {caption}]"));
+        }
+        // A stem with nothing on it leads to the tree proper.
+        let mut root = &t.root;
+        while root.label.is_empty() && root.sublabel.is_empty() && root.children.len() == 1 {
+            root = &root.children[0];
+        }
+        for l in self.tree_lines(root) {
+            self.line(indent, &l);
+        }
+        self.line(indent, "");
+    }
+
+    fn tree_lines(&self, n: &TreeNode) -> Vec<String> {
+        let mut head = self.inlines(if n.children.is_empty() {
+            &n.leaf
+        } else {
+            &n.label
+        });
+        let sub = self.inlines(&n.sublabel);
+        if !sub.is_empty() {
+            head = format!("{head} [{sub}]").trim_start().to_string();
+        }
+        if n.children.is_empty() {
+            return vec![head];
+        }
+        let mut out = Vec::new();
+        if !head.is_empty() {
+            out.push(head.clone());
+        }
+        let count = n.children.len();
+        for (i, c) in n.children.iter().enumerate() {
+            let last = i + 1 == count;
+            for (j, l) in self.tree_lines(c).into_iter().enumerate() {
+                let lead = match (j, last) {
+                    (0, false) => "├─",
+                    (0, true) => "└─",
+                    (_, false) => "│ ",
+                    (_, true) => "  ",
+                };
+                let sep = if j == 0 && !l.starts_with(['├', '└', '┬', '─']) {
+                    " "
+                } else {
+                    ""
+                };
+                out.push(format!("{lead}{sep}{l}"));
+            }
+        }
+        if head.is_empty() {
+            // An unnamed branching point: its first branch goes on from
+            // the line that leads to it.
+            let first = &mut out[0];
+            let joined = match first.chars().next() {
+                Some('├') => first.replacen('├', "┬", 1),
+                Some('└') => first.replacen('└', "─", 1),
+                _ => first.clone(),
+            };
+            *first = joined;
+        }
+        out
     }
 
     fn table(&mut self, t: &Table, indent: &str) {

@@ -361,8 +361,8 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         }
     );
     println!(
-        "  links: {} ({} to pages not in this ZIM, kept as text); tables: {}",
-        r.stats.links, r.stats.unresolved_links, r.stats.tables
+        "  links: {} ({} to pages not in this ZIM, kept as text); tables: {}; cladograms: {}",
+        r.stats.links, r.stats.unresolved_links, r.stats.tables, r.stats.trees
     );
     println!(
         "  pictures: {} stored ({:.1} MB) for {} places in articles; {} left out",
