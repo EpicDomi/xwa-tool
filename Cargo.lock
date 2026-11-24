@@ -5732,6 +5732,7 @@ name = "xwa-fetch"
 version = "0.1.0"
 dependencies = [
  "dirs",
+ "libc",
  "md-5 0.11.0",
  "percent-encoding",
  "quick-xml 0.42.0",
@@ -5739,6 +5740,7 @@ dependencies = [
  "sysinfo",
  "thiserror 2.0.21",
  "ureq",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

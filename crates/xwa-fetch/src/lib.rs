@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod drives;
 pub mod fonts;
 pub mod metalink;
+pub mod reserve;
 pub mod wikimedia;
 mod xml;
 
