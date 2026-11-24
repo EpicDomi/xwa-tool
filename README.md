@@ -160,7 +160,7 @@ It keeps whichever way works, and Settings can pick one. On Windows the window i
 
 An XWA archive holds a whole wiki in one file, laid out so the reader can open any article and search millions of titles quickly. The [format specification](docs/format-spec-v0.md) describes every byte.
 
-- **Articles:** paragraphs, headings, lists, tables with captions, infoboxes, and cladograms (family trees of species, with their links and pictures). Navigation boxes, citation markers, reference lists and external-link lists are left out.
+- **Articles:** paragraphs, headings, lists, tables with captions, infoboxes, cladograms (family trees of species, with their links and pictures), and the links of "Part of a series" sidebars, for the reader's article menu. Navigation boxes, citation markers, reference lists and external-link lists are left out.
 - **Links:** links lead to the right article, and to the right section of it. Redirects become searchable alternative titles, including redirects to a section.
 - **Search:** title search ignores case and accents in every language, and ranks results by popularity.
 - **Pictures:** photos are stored as greyscale JPEG. Diagrams, line art and icons are stored as lossless four-grey line art. Each picture is stored once, however often it's used.
