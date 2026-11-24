@@ -578,6 +578,39 @@ fn a_finished_conversion_can_be_done_again_with_other_settings() {
     assert!(app.page().rows.iter().any(|r| r.title == "Made for"));
 }
 
+#[test]
+fn a_zim_without_pictures_turns_pictures_off_and_says_why() {
+    let mut app = app(Model::X4);
+    let zim = PathBuf::from("/nowhere/wikipedia_en_molcell_nopic.zim");
+    let _ = app.update(Message::Opened(zim.clone()));
+    let info = |pictures| crate::app::ZimInfo {
+        title: "Molecular & Cell Biology".into(),
+        language: "eng".into(),
+        flavour: if pictures { "maxi" } else { "nopic" }.into(),
+        date: "2026-10-14".into(),
+        entries: 118_381,
+        size: 355_000_000,
+        pictures,
+        cover: None,
+    };
+    let value = |app: &App| {
+        app.page()
+            .rows
+            .iter()
+            .find(|r| r.title == "Pictures")
+            .and_then(|r| r.value.clone())
+    };
+    let _ = app.update(Message::ZimRead(zim.clone(), Ok(info(false))));
+    assert_eq!(value(&app).as_deref(), Some("None in this ZIM"));
+    assert!(!app.pictures());
+    // Nothing to switch on, and the setting is kept for the next ZIM.
+    let _ = app.update(Message::ToggleImages);
+    assert!(app.images && !app.pictures());
+    let _ = app.update(Message::ZimRead(zim, Ok(info(true))));
+    assert_eq!(value(&app).as_deref(), Some("ON"));
+    assert!(app.pictures());
+}
+
 /// A one-article archive at `path` whose text uses π and α: with a FONT
 /// holding `glyphs` when given, and its CHARS section when `chars`.
 fn small_archive(path: &Path, glyphs: Option<&str>, chars: bool) {

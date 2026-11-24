@@ -364,13 +364,17 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         "  links: {} ({} to pages not in this ZIM, kept as text); tables: {}; cladograms: {}",
         r.stats.links, r.stats.unresolved_links, r.stats.tables, r.stats.trees
     );
-    println!(
-        "  pictures: {} stored ({:.1} MB) for {} places in articles; {} left out",
-        s.images,
-        mb(s.image_bytes),
-        r.stats.images,
-        r.stats.images_skipped
-    );
+    if r.zim_has_pictures {
+        println!(
+            "  pictures: {} stored ({:.1} MB) for {} places in articles; {} left out",
+            s.images,
+            mb(s.image_bytes),
+            r.stats.images,
+            r.stats.images_skipped
+        );
+    } else {
+        println!("  pictures: none (this ZIM was made without them)");
+    }
     if let Some(d) = &r.diagrams {
         println!(
             "  sharper diagrams: {} of {} pictures drawn from SVG; {} downloaded ({:.1} MB), {} not on Wikimedia, {} failed",
