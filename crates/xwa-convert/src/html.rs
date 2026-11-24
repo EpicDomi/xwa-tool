@@ -15,7 +15,8 @@ use scraper::{Html, Node};
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 use xwa_format::content::{
     Anchor, Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Place, Style,
-    Table, anchor_hash, heading_anchor_hash, is_no_break_space, plain_text, tidy_pre,
+    Table, Tree, TreeNode, anchor_hash, heading_anchor_hash, is_no_break_space, plain_text,
+    tidy_pre,
 };
 use xwa_format::records::article_flags;
 
@@ -69,8 +70,8 @@ pub struct Stats {
     pub images: u64,
     pub images_skipped: u64,
     pub tables: u64,
-    /// Tables that only make sense as drawings (cladograms).
-    pub tables_dropped: u64,
+    /// Cladograms, kept as trees.
+    pub trees: u64,
     pub citations_dropped: u64,
 }
 
@@ -83,7 +84,7 @@ impl std::ops::AddAssign for Stats {
         self.images += o.images;
         self.images_skipped += o.images_skipped;
         self.tables += o.tables;
-        self.tables_dropped += o.tables_dropped;
+        self.trees += o.trees;
         self.citations_dropped += o.citations_dropped;
     }
 }
@@ -576,7 +577,25 @@ impl Cx<'_> {
                 let caption = node
                     .descendants()
                     .find(|d| element(d).is_some_and(|de| has_class(de, "thumbcaption")));
-                self.figure(node, caption, flow);
+                let clades = clades_in(node);
+                if clades.is_empty() {
+                    self.figure(node, caption, flow);
+                } else {
+                    // A cladogram framed as a figure.
+                    let mut run = Vec::new();
+                    if let Some(c) = caption {
+                        self.inline_children(c, &mut run);
+                        normalize(&mut run);
+                    }
+                    for (i, clade) in clades.into_iter().enumerate() {
+                        let caption = if i == 0 {
+                            std::mem::take(&mut run)
+                        } else {
+                            Vec::new()
+                        };
+                        self.cladogram(clade, caption, flow);
+                    }
+                }
             }
             name if is_block_tag(name) => self.flow_children(node, flow),
             // Inline wrappers that hold blocks (a transclusion span around a
@@ -817,8 +836,7 @@ impl Cx<'_> {
 
     fn table(&mut self, node: NodeRef<'_, Node>, e: &Element, flow: &mut Flow) {
         if has_class(e, "clade") {
-            // A cladogram draws a tree with nested tables; as text it is noise.
-            self.stats.tables_dropped += 1;
+            self.cladogram(node, Vec::new(), flow);
             return;
         }
         if has_class(e, "infobox") && self.infobox.is_none() && self.in_cell == 0 {
@@ -842,6 +860,9 @@ impl Cx<'_> {
                     self.flow_children(cell, flow);
                 }
             }
+            return;
+        }
+        if self.in_cell == 0 && !clades_in(node).is_empty() && self.cladogram_table(node, flow) {
             return;
         }
         let caption = child_elements(node)
@@ -879,6 +900,160 @@ impl Cx<'_> {
             ..table
         });
         flow.block(Block::TableRef(self.tables.len() as u32 - 1));
+    }
+
+    /// A cladogram (Template:Clade's nested `table.clade`s) as a tree in
+    /// the text, or, inside a table cell or infobox, its leaves as a line.
+    fn cladogram(&mut self, clade: NodeRef<'_, Node>, caption: Vec<Inline>, flow: &mut Flow) {
+        let root = collapse_stems(self.clade_node(clade, 1));
+        let tree = Tree { caption, root };
+        if tree.root.children.is_empty() {
+            return;
+        }
+        if self.in_cell > 0 {
+            flow.run.extend(tree_as_line(tree));
+            return;
+        }
+        self.stats.trees += 1;
+        flow.block(Block::Tree(tree));
+    }
+
+    /// One `table.clade`: each branch is a row with the branch's label and
+    /// the leaf or inner clade it leads to (spanning two rows), then a row
+    /// with the text under the branch. Bars (`clade-bar`, labels placed
+    /// beside groups of rows by position) are left out.
+    fn clade_node(&mut self, clade: NodeRef<'_, Node>, depth: usize) -> TreeNode {
+        let mut node = TreeNode::default();
+        if depth >= MAX_TREE_DEPTH {
+            // Deeper than readers draw: its leaves, on one line.
+            let mut f = Flow::default();
+            self.in_cell += 1;
+            self.cladogram(clade, Vec::new(), &mut f);
+            self.in_cell -= 1;
+            flatten(f.finish(), &mut node.leaf);
+            normalize(&mut node.leaf);
+            return node;
+        }
+        for row in rows(clade) {
+            if let Some(re) = element(&row) {
+                self.note_place(re);
+            }
+            let mut label = None;
+            for (cell, ce) in child_elements(row) {
+                if !matches!(ce.name(), "td" | "th") {
+                    continue;
+                }
+                self.note_place(ce);
+                if has_class(ce, "clade-label") {
+                    label = Some(self.clade_text(cell));
+                } else if has_class(ce, "clade-leaf") || has_class(ce, "clade-leafR") {
+                    let mut child = match clades_in(cell).first() {
+                        Some(&sub) => self.clade_node(sub, depth + 1),
+                        None => TreeNode {
+                            leaf: self.clade_text(cell),
+                            ..TreeNode::default()
+                        },
+                    };
+                    child.label = label.take().unwrap_or_default();
+                    node.children.push(collapse_stems(child));
+                } else if has_class(ce, "clade-slabel") {
+                    let sub = self.clade_text(cell);
+                    if let Some(last) = node.children.last_mut()
+                        && !sub.is_empty()
+                    {
+                        last.sublabel = sub;
+                    }
+                }
+            }
+        }
+        node
+    }
+
+    fn clade_text(&mut self, cell: NodeRef<'_, Node>) -> Vec<Inline> {
+        let mut run = Vec::new();
+        self.in_cell += 1;
+        self.inline_children(cell, &mut run);
+        self.in_cell -= 1;
+        normalize(&mut run);
+        run
+    }
+
+    /// A table that frames cladograms (Template:Cladogram, a clade gallery,
+    /// a collapsible box): each becomes a tree, and the table's other rows
+    /// their caption. Where one row has a cell over each cell of
+    /// cladograms, each captions the one under it. False, with nothing
+    /// done, if no row holds a cladogram.
+    fn cladogram_table(&mut self, node: NodeRef<'_, Node>, flow: &mut Flow) -> bool {
+        // The cells holding cladograms, each with its own and the cells
+        // beside it.
+        let mut clade_cells: Vec<(Nodes, Nodes)> = Vec::new();
+        let mut text_rows = Vec::new();
+        for row in rows(node) {
+            let cells: Vec<NodeRef<Node>> = child_elements(row)
+                .filter(|(_, ce)| matches!(ce.name(), "td" | "th") && !is_chrome(ce))
+                .map(|(c, _)| c)
+                .collect();
+            let here: Vec<Vec<NodeRef<Node>>> = cells.iter().map(|&c| clades_in(c)).collect();
+            if here.iter().all(Vec::is_empty) {
+                text_rows.push(cells);
+            } else {
+                // Text beside a cladogram (names of groups of its rows)
+                // goes with it, in its caption.
+                let beside: Vec<NodeRef<Node>> = cells
+                    .iter()
+                    .zip(&here)
+                    .filter(|(_, clades)| clades.is_empty())
+                    .map(|(&c, _)| c)
+                    .collect();
+                for (i, clades) in here.into_iter().filter(|c| !c.is_empty()).enumerate() {
+                    let side = if i == 0 { beside.clone() } else { Vec::new() };
+                    clade_cells.push((clades, side));
+                }
+            }
+        }
+        if clade_cells.is_empty() {
+            return false;
+        }
+        let per_cell = clade_cells.len() > 1
+            && text_rows.len() == 1
+            && text_rows[0].len() == clade_cells.len();
+        let mut captions: Vec<Vec<Inline>> = vec![Vec::new(); clade_cells.len()];
+        if per_cell {
+            for (i, &cell) in text_rows[0].iter().enumerate() {
+                captions[i] = self.cell_inlines(cell);
+            }
+        } else {
+            let mut run = Vec::new();
+            for &cell in text_rows.iter().flatten() {
+                let c = self.cell_inlines(cell);
+                if c.is_empty() {
+                    continue;
+                }
+                if !run.is_empty() {
+                    run.push(Inline::Break);
+                }
+                run.extend(c);
+            }
+            normalize(&mut run);
+            captions[0] = run;
+        }
+        for ((clades, beside), mut caption) in clade_cells.into_iter().zip(captions) {
+            for cell in beside {
+                let c = self.cell_inlines(cell);
+                if c.is_empty() {
+                    continue;
+                }
+                if !caption.is_empty() {
+                    caption.push(Inline::Break);
+                }
+                caption.extend(c);
+            }
+            let mut caption = Some(caption);
+            for clade in clades {
+                self.cladogram(clade, caption.take().unwrap_or_default(), flow);
+            }
+        }
+        true
     }
 
     fn data_table(&mut self, node: NodeRef<'_, Node>) -> Table {
@@ -1282,6 +1457,34 @@ fn trim_trailing(run: &mut Vec<Inline>, c: char) {
 }
 
 /// Table rows that belong to this table (not to tables nested in its cells).
+type Nodes<'a> = Vec<NodeRef<'a, Node>>;
+
+/// Trees deeper than this become a line of their leaves at that depth
+/// (the format allows 64 levels; Wikipedia's deepest seen is 24).
+const MAX_TREE_DEPTH: usize = 48;
+
+/// The outermost cladograms (`table.clade`) inside `node`, but not inside
+/// another table of its own: those belong to that table.
+fn clades_in(node: NodeRef<'_, Node>) -> Vec<NodeRef<'_, Node>> {
+    let mut out = Vec::new();
+    fn walk<'a>(n: NodeRef<'a, Node>, out: &mut Vec<NodeRef<'a, Node>>) {
+        for c in n.children() {
+            match element(&c) {
+                Some(e) if e.name() == "table" => {
+                    if has_class(e, "clade") {
+                        out.push(c);
+                    }
+                }
+                Some(e) if is_chrome(e) => {}
+                Some(_) => walk(c, out),
+                None => {}
+            }
+        }
+    }
+    walk(node, &mut out);
+    out
+}
+
 fn rows(table: NodeRef<'_, Node>) -> Vec<NodeRef<'_, Node>> {
     let mut out = Vec::new();
     for (c, ce) in child_elements(table) {
@@ -1376,6 +1579,49 @@ fn table_rows(t: &Table) -> Vec<Vec<&Cell>> {
     rows
 }
 
+/// A node that only leads on to one other, with no text under its branch,
+/// draws the same as that one with their labels together: merged, so
+/// readers draw no bare stems. Labels are kept: two stay apart.
+fn collapse_stems(mut n: TreeNode) -> TreeNode {
+    while n.sublabel.is_empty()
+        && n.children.len() == 1
+        && (n.label.is_empty() || n.children[0].label.is_empty())
+    {
+        let mut only = n.children.pop().unwrap();
+        if only.label.is_empty() {
+            only.label = std::mem::take(&mut n.label);
+        }
+        n = only;
+    }
+    n
+}
+
+/// A tree where only a line of text can go: its caption, then its
+/// leaves.
+fn tree_as_line(tree: Tree) -> Vec<Inline> {
+    fn leaves(n: TreeNode, out: &mut Vec<Vec<Inline>>) {
+        if n.children.is_empty() {
+            if !n.leaf.is_empty() {
+                out.push(n.leaf);
+            }
+        } else {
+            n.children.into_iter().for_each(|c| leaves(c, out));
+        }
+    }
+    let mut list = Vec::new();
+    leaves(tree.root, &mut list);
+    let mut run = tree.caption;
+    for (i, leaf) in list.into_iter().enumerate() {
+        if i > 0 {
+            run.push(Inline::Text(" · ".into()));
+        } else if !run.is_empty() {
+            run.push(Inline::Break);
+        }
+        run.extend(leaf);
+    }
+    run
+}
+
 /// Blocks as one inline run, for table cells and infobox values.
 fn flatten(blocks: Vec<Block>, out: &mut Vec<Inline>) {
     for b in blocks {
@@ -1421,6 +1667,10 @@ fn flatten(blocks: Vec<Block>, out: &mut Vec<Inline>) {
             Block::MathBlock(f) => {
                 sep(out);
                 out.push(Inline::Math(f));
+            }
+            Block::Tree(t) => {
+                sep(out);
+                out.extend(tree_as_line(t));
             }
             Block::Rule | Block::TableRef(_) | Block::InfoboxRef | Block::Gallery(_) => {}
         }
@@ -1635,6 +1885,7 @@ pub fn for_each_formula_mut(a: &mut Article, f: &mut impl FnMut(&mut Formula)) {
                 | Block::Heading { content: c, .. }
                 | Block::Figure { caption: c, .. } => inlines(c, f),
                 Block::Gallery(items) => items.iter_mut().for_each(|(_, c)| inlines(c, f)),
+                Block::Tree(t) => t.for_each_run_mut(&mut |c| inlines(c, f)),
                 Block::List { items, .. } => items.iter_mut().for_each(|i| blocks(i, f)),
                 Block::Quote(inner) => blocks(inner, f),
                 Block::MathBlock(x) => f(x),
@@ -1693,6 +1944,7 @@ pub fn for_each_image_mut(a: &mut Article, f: &mut impl FnMut(&mut u32)) {
                         inlines(caption, f);
                     }
                 }
+                Block::Tree(t) => t.for_each_run_mut(&mut |c| inlines(c, f)),
                 Block::List { items, .. } => items.iter_mut().for_each(|i| blocks(i, f)),
                 Block::Quote(inner) => blocks(inner, f),
                 Block::MathBlock(x) => formula(x, f),
@@ -2182,7 +2434,10 @@ mod more_tests {
                 },
             ]
         );
-        assert_eq!(x.stats.tables_dropped, 1);
+        assert_eq!(
+            x.stats.trees, 0,
+            "a clade table without branches is no tree"
+        );
         assert_eq!(x.article.body[1], Block::TableRef(0));
         assert_eq!(
             x.article.tables[0].caption,
@@ -2224,6 +2479,87 @@ mod image_tests {
 
     fn text(s: &str) -> Inline {
         Inline::Text(s.to_string())
+    }
+
+    /// Template:Clade's markup for one clade: each branch is a label and
+    /// a leaf or inner clade, then the text under the branch.
+    fn clade(branches: &[(&str, &str, &str)]) -> String {
+        let mut out = String::from(r#"<table class="clade"><tbody>"#);
+        for (i, (label, content, sub)) in branches.iter().enumerate() {
+            let first = if i == 0 { " first" } else { "" };
+            out.push_str(&format!(
+                r#"<tr><td class="clade-label{first}">{label}</td><td rowspan="2" class="clade-leaf"><div><span class="mw-empty-elt"><style>.x{{}}</style></span>{content}</div></td><td class="clade-bar" rowspan="2"><div style="position:absolute">Bar</div></td></tr><tr><td class="clade-slabel">{sub}</td></tr>"#
+            ));
+        }
+        out.push_str("</tbody></table>");
+        out
+    }
+
+    fn tree_text(x: &Extracted) -> String {
+        xwa_format::text::article_text(&x.article, &|id| Some(format!("#{id}")))
+    }
+
+    #[test]
+    fn cladograms_become_trees() {
+        let pair = clade(&[
+            (
+                "",
+                r#"<p><a rel="mw:WikiLink" href="A">Tiger</a> <span typeof="mw:File"><img src="./_assets_/h/Photo.jpg" width="70" height="32"></span></p>"#,
+                "",
+            ),
+            ("", "<p>Snow leopard</p>", "2 Ma"),
+        ]);
+        // A bare stem (an unlabelled clade of one) leads to the pair.
+        let stem = clade(&[("", &pair, "")]);
+        let genus = clade(&[(
+            "<i>Panthera</i>",
+            &clade(&[("", &stem, ""), ("", "<p><b>Lion</b></p>", "")]),
+            "",
+        )]);
+        let x = run(&format!(
+            r#"<table class="infobox"><tr><th>Groups</th><td>{small}</td></tr></table>
+               <table style="float:right"><tbody>
+                 <tr><td style="padding:5px"><div class="clade">{genus}</div></td></tr>
+                 <tr><td style="font-size:88%">Phylogeny of <i>Panthera</i><sup class="mw-ref reference"><a>[1]</a></sup></td></tr>
+               </tbody></table>
+               <div class="thumb tright"><div class="thumbinner"><div class="thumbimage">{small}</div><div class="thumbcaption">Framed</div></div></div>
+               <table class="wikitable"><tr><th>Nuclear</th><th>Mitochondrial</th></tr>
+                 <tr><td>{small}</td><td>{small}</td></tr></table>
+               <table class="wikitable"><tr><td>Cell</td><td>{small}</td></tr></table>"#,
+            small = clade(&[("", "<p>a</p>", ""), ("", "<p>b</p>", "")]),
+        ));
+        assert_eq!(
+            tree_text(&x),
+            "# T
+[infobox]
+  Groups: a · b
+
+[tree: Phylogeny of *Panthera*]
+*Panthera*
+├─┬─ [Tiger](#1 #1) [icon: image 0, 32/16 em]
+│ └─ Snow leopard [2 Ma]
+└─ **Lion**
+
+[tree: Framed]
+┬─ a
+└─ b
+
+[tree: Nuclear]
+┬─ a
+└─ b
+
+[tree: Mitochondrial]
+┬─ a
+└─ b
+
+[tree: Cell]
+┬─ a
+└─ b
+
+"
+        );
+        assert_eq!(x.stats.trees, 5);
+        assert_eq!(x.stats.tables, 0);
     }
 
     #[test]

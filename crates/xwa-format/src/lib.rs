@@ -37,7 +37,7 @@ pub const MAGIC: [u8; 8] = *b"XWA\0\r\n\x1a\n";
 /// 0, each minor version may change the layout, so readers take only their
 /// own (spec 3.1).
 pub const VERSION_MAJOR: u16 = 0;
-pub const VERSION_MINOR: u16 = 4;
+pub const VERSION_MINOR: u16 = 5;
 
 /// Section type codes (spec 3.2).
 pub mod section {

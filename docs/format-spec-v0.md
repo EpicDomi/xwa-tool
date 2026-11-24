@@ -1,7 +1,7 @@
 # Offline wiki archive format, draft v0
 
 Status: draft for review. The format is XWA (`.xwa` files); the converter
-is xwa-tool. This text describes version 0.4. Everything here is open to
+is xwa-tool. This text describes version 0.5. Everything here is open to
 change until the first reader and writer agree on it.
 
 ## 1. Goals
@@ -63,7 +63,7 @@ offset 0      Superblock (4096 bytes)
 |---|---|---|
 | 0 | u8[8] | magic `XWA\0\r\n\x1a\n` |
 | 8 | u16 | version_major (0 = draft) |
-| 10 | u16 | version_minor (4 = this text) |
+| 10 | u16 | version_minor (5 = this text) |
 | 12 | u32 | superblock_size (4096) |
 | 16 | u64 | file_size |
 | 24 | u32 | required_features (bitset, see 3.3) |
@@ -96,7 +96,7 @@ stateless (7.2), gave icons a size (7.3) and formula records a length
 (8.1), wrote down what readers may rely on in text (7.3), added DAYS (5.3),
 and changed the checksums from CRC32C to CRC-32. Version 0.4 made FONT
 outline glyphs that one rasteriser draws at any size (10), and gave tables
-their caption (7.4).
+their caption (7.4). Version 0.5 added trees (7.3, TREE), for cladograms.
 
 ### 3.2 Section types
 
@@ -468,7 +468,53 @@ Block opcodes:
 | 0x0C | TABLE_REF | varint table index (into the header's table list) |
 | 0x0D | INFOBOX_REF | |
 | 0x0E | GALLERY | varint n, n × (varint image_id, inline run) |
+| 0x0F | TREE | inline run (caption), node (below) |
 | 0x7F | BLOCK_EXT | varint length, payload (skippable) |
+
+**Trees.** A TREE is a tree diagram drawn in the text: on Wikipedia, a
+cladogram (Template:Clade), with each species or group at the end of a
+branch and the branches joining where they share an ancestor. Its root
+node follows the caption, and each node is
+
+```
+varint child_count, inline run label, inline run sublabel,
+[inline run leaf]          only when child_count is 0
+child_count nodes          the node's children, in order, each the same way
+```
+
+A node with no children is a leaf, whose text (a name, often a link, with
+a small picture as an ICON) is `leaf`. `label` is the text on the branch
+that leads to the node, above it (the name of a group: *Panthera*,
+Mammalia), and `sublabel` the text under that branch (a date, a support
+value); either may be empty, and the root's are its own name and note. A
+leaf may be empty too: a branch drawn with nothing at its end. Trees nest
+at most 64 levels deep (the root is level 1); xwa-tool writes no node with
+a single child unless both carry labels, so a reader draws no bare stems.
+
+Readers draw a tree as Wikipedia does, turned into rows: each leaf on its
+own row (or rows, when its text wraps), each inner node at the left of its
+children, joined to them by a line down its side and a short line across to
+each, with a labelled node's label on the row above its children. In text:
+
+```
+Panthera
+├─┬─ Snow leopard
+│ └─ Tiger
+└─┬─ Jaguar
+  └─┬─ Leopard
+    └─ Lion
+```
+
+A reader with little width draws the lines a few pixels apart rather than
+a character's width apart (Wikipedia's deepest trees are 24 levels; a
+step of 8 px leaves 290 px for text on a 480 px wide screen), and may make
+the step smaller still for deep trees. `xwa-tool dump` prints trees as
+above.
+
+Measured: the Top 100 ZIM has 48 cladograms, with up to 64 leaves and 24
+levels (half have 10 leaves or fewer, and 7 levels or fewer); they take 31
+KB, 0.5% of its text, and their pictures 0.3 MB. Molecular and Cell
+Biology has 37, in 18.6 KB (0.01%).
 
 An inline run is `varint length` followed by inline opcodes:
 

@@ -29,6 +29,7 @@ mod op {
     pub const TABLE_REF: u8 = 0x0C;
     pub const INFOBOX_REF: u8 = 0x0D;
     pub const GALLERY: u8 = 0x0E;
+    pub const TREE: u8 = 0x0F;
     pub const BLOCK_EXT: u8 = 0x7F;
 
     pub const TEXT_LONG: u8 = 0x80;
@@ -136,6 +137,62 @@ pub enum Block {
     TableRef(u32),
     InfoboxRef,
     Gallery(Vec<(u32, Vec<Inline>)>),
+    Tree(Tree),
+}
+
+/// A tree diagram drawn in the text: a cladogram (spec 7.3, TREE).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Tree {
+    pub caption: Vec<Inline>,
+    pub root: TreeNode,
+}
+
+/// A node of a [`Tree`]: a leaf, with its text in `leaf`, or a branching
+/// point, with children.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TreeNode {
+    /// Text on the branch that leads to the node, above it (a clade's
+    /// name).
+    pub label: Vec<Inline>,
+    /// Text under that branch (a date, a support value).
+    pub sublabel: Vec<Inline>,
+    /// A leaf's text; always empty when the node has children.
+    pub leaf: Vec<Inline>,
+    pub children: Vec<TreeNode>,
+}
+
+impl Tree {
+    /// Every inline run in the tree: the caption, then each node's label,
+    /// sublabel and leaf, in the order they are stored.
+    pub fn runs(&self) -> Vec<&Vec<Inline>> {
+        fn walk<'a>(n: &'a TreeNode, out: &mut Vec<&'a Vec<Inline>>) {
+            out.extend([&n.label, &n.sublabel, &n.leaf]);
+            n.children.iter().for_each(|c| walk(c, out));
+        }
+        let mut out = vec![&self.caption];
+        walk(&self.root, &mut out);
+        out
+    }
+
+    /// [`Tree::runs`], to change.
+    pub fn for_each_run_mut(&mut self, f: &mut impl FnMut(&mut Vec<Inline>)) {
+        fn walk(n: &mut TreeNode, f: &mut impl FnMut(&mut Vec<Inline>)) {
+            f(&mut n.label);
+            f(&mut n.sublabel);
+            f(&mut n.leaf);
+            n.children.iter_mut().for_each(|c| walk(c, f));
+        }
+        f(&mut self.caption);
+        walk(&mut self.root, f);
+    }
+
+    /// How many levels deep it goes: 1 for a root without children.
+    pub fn depth(&self) -> usize {
+        fn d(n: &TreeNode) -> usize {
+            1 + n.children.iter().map(d).max().unwrap_or(0)
+        }
+        d(&self.root)
+    }
 }
 
 /// A typeset formula: glyph placements and rules (spec 8.1).
@@ -459,6 +516,7 @@ pub fn text_problems(a: &Article) -> Vec<String> {
                 Block::Para(c) | Block::Heading { content: c, .. } => run(c, p),
                 Block::Figure { caption, .. } => run(caption, p),
                 Block::Gallery(items) => items.iter().for_each(|(_, c)| run(c, p)),
+                Block::Tree(t) => t.runs().into_iter().for_each(|c| run(c, p)),
                 Block::List { items, .. } => items.iter().for_each(|i| blocks(i, p)),
                 Block::Quote(inner) => blocks(inner, p),
                 Block::Pre(t) if !is_tidy_pre(t) => {
@@ -761,6 +819,20 @@ fn encode_block(out: &mut Vec<u8>, block: &Block) {
                 varint::put(out, *image as u64);
                 encode_run(out, caption);
             }
+        }
+        Block::Tree(t) => {
+            fn node(out: &mut Vec<u8>, n: &TreeNode) {
+                varint::put(out, n.children.len() as u64);
+                encode_run(out, &n.label);
+                encode_run(out, &n.sublabel);
+                if n.children.is_empty() {
+                    encode_run(out, &n.leaf);
+                }
+                n.children.iter().for_each(|c| node(out, c));
+            }
+            out.push(op::TREE);
+            encode_run(out, &t.caption);
+            node(out, &t.root);
         }
     }
 }
@@ -1177,6 +1249,31 @@ fn decode_blocks(c: &mut Cursor, end: Option<u8>, depth: usize) -> Result<Vec<Bl
                 }
                 Block::Gallery(items)
             }
+            op::TREE => {
+                fn tree_node(c: &mut Cursor, depth: usize) -> Result<TreeNode> {
+                    if depth > MAX_DEPTH {
+                        return Err(corrupt("tree too deep"));
+                    }
+                    let n = c.count()?;
+                    let mut node = TreeNode {
+                        label: decode_run(c)?,
+                        sublabel: decode_run(c)?,
+                        ..TreeNode::default()
+                    };
+                    if n == 0 {
+                        node.leaf = decode_run(c)?;
+                    }
+                    for _ in 0..n {
+                        node.children.push(tree_node(c, depth + 1)?);
+                    }
+                    Ok(node)
+                }
+                let caption = decode_run(c)?;
+                Block::Tree(Tree {
+                    caption,
+                    root: tree_node(c, 1)?,
+                })
+            }
             op::BLOCK_EXT => {
                 let n = c.varint()? as usize;
                 c.bytes(n)?;
@@ -1345,6 +1442,7 @@ pub fn for_each_link_mut(a: &mut Article, f: &mut impl FnMut(u32, &mut Place)) {
                 Block::List { items, .. } => items.iter_mut().for_each(|i| blocks(i, f)),
                 Block::Quote(inner) => blocks(inner, f),
                 Block::Gallery(items) => items.iter_mut().for_each(|(_, c)| inlines(c, f)),
+                Block::Tree(t) => t.for_each_run_mut(&mut |c| inlines(c, f)),
                 Block::Pre(_)
                 | Block::Rule
                 | Block::MathBlock(_)
@@ -1426,6 +1524,10 @@ pub fn for_each_styled_text<'a>(a: &'a Article, f: &mut impl FnMut(&'a str, Font
                 Block::Gallery(items) => items
                     .iter()
                     .for_each(|(_, c)| inlines(c, FontStyle::Regular, f)),
+                Block::Tree(t) => t
+                    .runs()
+                    .into_iter()
+                    .for_each(|c| inlines(c, FontStyle::Regular, f)),
                 Block::List { items, .. } => items.iter().for_each(|i| blocks(i, f)),
                 Block::Quote(inner) => blocks(inner, f),
                 Block::Pre(t) => f(t, FontStyle::Regular),
@@ -1496,6 +1598,7 @@ pub fn walk_refs<'a>(a: &'a Article, f: &mut impl FnMut(Ref<'a>)) {
                 }
                 Block::List { items, .. } => items.iter().for_each(|i| blocks(i, f)),
                 Block::Quote(inner) => blocks(inner, f),
+                Block::Tree(t) => t.runs().into_iter().for_each(|c| inlines(c, f)),
                 Block::MathBlock(x) => formula(x, f),
                 Block::TableRef(t) => f(Ref::Table(*t)),
                 Block::InfoboxRef => f(Ref::Infobox),
@@ -1635,6 +1738,43 @@ mod tests {
                 Block::TableRef(0),
                 Block::InfoboxRef,
                 Block::Gallery(vec![(5, vec![text("g1")]), (6, vec![])]),
+                Block::Tree(Tree {
+                    caption: vec![text("Phylogeny")],
+                    root: TreeNode {
+                        children: vec![
+                            TreeNode {
+                                leaf: vec![
+                                    text("Snow leopard "),
+                                    Inline::Icon {
+                                        image: 8,
+                                        height: 27,
+                                    },
+                                ],
+                                ..TreeNode::default()
+                            },
+                            TreeNode {
+                                label: vec![Inline::Styled(Style::Italic, vec![text("Panthera")])],
+                                sublabel: vec![text("2 Ma")],
+                                children: vec![
+                                    TreeNode {
+                                        leaf: vec![Inline::Link {
+                                            article: 44,
+                                            place: Place::TOP,
+                                            content: vec![text("Tiger")],
+                                        }],
+                                        ..TreeNode::default()
+                                    },
+                                    TreeNode {
+                                        leaf: vec![text("Lion")],
+                                        ..TreeNode::default()
+                                    },
+                                ],
+                                ..TreeNode::default()
+                            },
+                        ],
+                        ..TreeNode::default()
+                    },
+                }),
                 Block::Heading {
                     level: 3,
                     content: vec![
@@ -1759,10 +1899,10 @@ mod tests {
             Ref::Table(t) => tables.push(t),
             Ref::Infobox => infoboxes += 1,
         });
-        assert_eq!(images, vec![4, 2, 1, 4, 5, 6, 7]);
+        assert_eq!(images, vec![4, 2, 1, 4, 5, 6, 8, 7]);
         assert_eq!(
             (links, formulas, tables, infoboxes),
-            (vec![12, 70_000, 3], 2, vec![0], 1)
+            (vec![12, 70_000, 3, 44], 2, vec![0], 1)
         );
     }
 
