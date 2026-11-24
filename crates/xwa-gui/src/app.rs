@@ -62,6 +62,16 @@ pub enum Screen {
     Italic,
     /// Installing firmware on the e-reader over USB.
     Firmware,
+    /// An archive opened for reading: its search, and ways in.
+    Read,
+    /// An article, a page at a time, as the e-reader shows it.
+    Article,
+    /// The open article's contents.
+    Contents,
+    /// A table too wide for the article's pages, on its own.
+    Table,
+    /// One of the open article's sidebars: its links, under its headings.
+    Sidebar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +238,31 @@ pub enum FirmwareChoice {
     /// A file, when other firmware is allowed.
     File(PathBuf),
 }
+
+/// An article laid out in pages, and the page shown.
+#[derive(Debug)]
+pub struct Reading {
+    pub article: u32,
+    pub title: String,
+    pub laid: crate::read::layout::Laid,
+    pub page: usize,
+    /// Its contents: each heading's level and text.
+    pub toc: Vec<(u8, String)>,
+    /// Its sidebars ("Part of a series on ..."), listed in Contents.
+    pub sidebars: Vec<xwa_format::content::Sidebar>,
+}
+
+/// A table on its own: laid out as wide as it needs, and its size.
+#[derive(Debug)]
+pub struct TableView {
+    pub title: String,
+    pub laid: crate::read::layout::Laid,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The scrolling view of a table.
+pub const TABLE_ID: &str = "table";
 
 /// What a ZIM file says about itself.
 #[derive(Debug, Clone)]
@@ -530,6 +565,21 @@ pub enum Message {
     // Converting.
     ChooseZim,
     ZimChosen(Option<PathBuf>),
+    /// Reading archives.
+    ChooseWiki,
+    WikiChosen(Option<PathBuf>),
+    WikiSearch(String),
+    /// An article, at a section (0 for the top).
+    WikiOpen(u32, u32),
+    WikiLink(crate::read::layout::Link),
+    /// A link or a table's line, clicked on a page.
+    WikiTarget(crate::read::layout::Target),
+    WikiRandom,
+    WikiSection(usize),
+    /// One of the open article's sidebars, by its place in the list.
+    WikiSidebar(usize),
+    /// A sidebar's link: back to the article, then on to the link.
+    WikiSidebarLink(crate::read::layout::Link),
     ZimRead(PathBuf, Result<ZimInfo, String>),
     ToggleImages,
     ToggleSharper,
@@ -642,6 +692,22 @@ pub struct App {
     // Converting.
     pub zim: Option<PathBuf>,
     pub zim_info: Option<Result<ZimInfo, String>>,
+    /// The archive open for reading.
+    pub wiki: Option<crate::read::Wiki>,
+    pub wiki_search: String,
+    /// What the search finds, the most popular first.
+    pub wiki_hits: Vec<xwa_format::title_index::Hit>,
+    /// Why the last archive or article would not open.
+    pub wiki_error: Option<String>,
+    /// The article being read.
+    pub reading: Option<Reading>,
+    /// Articles read before it, and the page each was on.
+    pub reading_trail: Vec<(u32, usize)>,
+    /// A table opened from the article, and whether it shows its right end.
+    pub reading_table: Option<TableView>,
+    /// The sidebar shown, by its place in the article's list.
+    pub reading_sidebar: usize,
+    pub table_right: bool,
     pub images: bool,
     pub sharper: bool,
     /// Real italic letters in the fallback font.
@@ -693,6 +759,121 @@ pub struct App {
 }
 
 impl App {
+    /// Opens an archive to read, in place of any open before.
+    pub(crate) fn open_wiki(&mut self, path: &Path) {
+        self.reading = None;
+        self.reading_trail.clear();
+        self.wiki_search.clear();
+        self.wiki_hits.clear();
+        match crate::read::Wiki::open(path) {
+            Ok(w) => {
+                self.wiki = Some(w);
+                self.wiki_error = None;
+            }
+            Err(e) => {
+                self.wiki = None;
+                self.wiki_error = Some(e);
+            }
+        }
+    }
+
+    /// The size of the page an article is laid out in: the screen less its
+    /// header, the key hints and margins.
+    pub(crate) fn reading_size(&self) -> (f32, f32) {
+        let spec = self.spec();
+        let hints = if spec.hints.is_some() {
+            eink::HINTS
+        } else {
+            0.0
+        };
+        (
+            spec.screen.width - 2.0 * eink::SIDE,
+            spec.screen.height - eink::HEADER - hints - 20.0,
+        )
+    }
+
+    /// Opens an article at a section (0 for its top), laid out for the
+    /// screen; `trail` keeps the one before for Back.
+    pub(crate) fn read_article(&mut self, id: u32, section: u32, trail: bool) {
+        let Some(wiki) = &self.wiki else {
+            return;
+        };
+        let article = match wiki.article(id) {
+            Ok(a) => a,
+            Err(e) => {
+                self.wiki_error = Some(e);
+                return;
+            }
+        };
+        let (w, h) = self.reading_size();
+        let laid = crate::read::layout::lay_out(wiki, &article, w, h);
+        let page = match section {
+            0 => 0,
+            s => laid.section_pages.get(s as usize - 1).copied().unwrap_or(0),
+        };
+        let toc = article
+            .body
+            .iter()
+            .filter_map(|b| match b {
+                xwa_format::content::Block::Heading { level, content } => {
+                    Some((*level, xwa_format::content::plain_text(content)))
+                }
+                _ => None,
+            })
+            .collect();
+        if trail && let Some(r) = &self.reading {
+            self.reading_trail.push((r.article, r.page));
+        }
+        self.reading = Some(Reading {
+            article: id,
+            title: article.title,
+            laid,
+            page,
+            toc,
+            sidebars: article.sidebars,
+        });
+        self.wiki_error = None;
+        if self.screen != Screen::Article {
+            self.go(Screen::Article);
+        }
+    }
+
+    /// Opens one of the article's tables in a view of its own.
+    pub(crate) fn open_table(&mut self, index: u32) {
+        let (Some(wiki), Some(r)) = (&self.wiki, &self.reading) else {
+            return;
+        };
+        let Ok(article) = wiki.article(r.article) else {
+            return;
+        };
+        let Some(t) = article.tables.get(index as usize) else {
+            return;
+        };
+        let (w, _) = self.reading_size();
+        let (laid, width, height) = crate::read::layout::lay_out_table(wiki, t, w);
+        let caption = xwa_format::content::plain_text(&t.caption);
+        self.reading_table = Some(TableView {
+            title: if caption.is_empty() {
+                format!("Table in {}", r.title)
+            } else {
+                caption
+            },
+            laid,
+            width,
+            height,
+        });
+        self.table_right = false;
+        self.go(Screen::Table);
+    }
+
+    /// Turns the article's page by `step`, within the article.
+    pub(crate) fn turn_reading(&mut self, step: isize) {
+        if let Some(r) = &mut self.reading {
+            let n = r.laid.pages.len().max(1) as isize;
+            r.page = (r.page as isize + step).clamp(0, n - 1) as usize;
+        }
+    }
+
     /// Whether the chosen ZIM has pictures to convert: false once it is
     /// known to be made without them, true until then.
     pub(crate) fn zim_has_pictures(&self) -> bool {
@@ -740,6 +921,15 @@ impl App {
             clock: clock(),
             zim: None,
             zim_info: None,
+            wiki: None,
+            wiki_search: String::new(),
+            wiki_hits: Vec::new(),
+            wiki_error: None,
+            reading: None,
+            reading_trail: Vec::new(),
+            reading_table: None,
+            reading_sidebar: 0,
+            table_right: false,
             images: true,
             sharper: false,
             real_italic: true,
@@ -895,6 +1085,16 @@ impl App {
     }
 
     fn back(&mut self) -> Task<Message> {
+        // Back in an article goes to the one read before it.
+        if self.screen == Screen::Article
+            && let Some((article, page)) = self.reading_trail.pop()
+        {
+            self.read_article(article, 0, false);
+            if let Some(r) = &mut self.reading {
+                r.page = page.min(r.laid.pages.len().saturating_sub(1));
+            }
+            return Task::none();
+        }
         match self.history.pop() {
             Some((screen, focus)) => self.show(screen, focus),
             None if self.screen != Screen::Home => self.show(Screen::Home, 0),
@@ -945,6 +1145,10 @@ impl App {
 
     /// Shows the next or previous page of the list.
     fn turn_page(&mut self, step: isize) {
+        if self.screen == Screen::Article {
+            self.turn_reading(step);
+            return;
+        }
         if self.screen == Screen::Italic {
             self.turn_italic(step);
             return;
@@ -1007,6 +1211,39 @@ impl App {
             }
             Key::Home => self.go(Screen::Home),
             Key::Back => return self.back(),
+            // An article's pages turn with any of the four keys round
+            // Select, which opens its contents.
+            Key::Left | Key::Up if self.screen == Screen::Article => self.turn_reading(-1),
+            Key::Right | Key::Down if self.screen == Screen::Article => self.turn_reading(1),
+            // A table scrolls a screen at a time; Select goes to its other
+            // side.
+            Key::Left | Key::Up | Key::Right | Key::Down if self.screen == Screen::Table => {
+                let (_, h) = self.reading_size();
+                let step = if matches!(key, Key::Left | Key::Up) {
+                    -0.85
+                } else {
+                    0.85
+                } * h;
+                return operation::scroll_by(
+                    TABLE_ID,
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: step },
+                );
+            }
+            Key::Confirm if self.screen == Screen::Table => {
+                self.table_right = !self.table_right;
+                return operation::snap_to(
+                    TABLE_ID,
+                    iced::widget::scrollable::RelativeOffset {
+                        x: if self.table_right { 1.0 } else { 0.0 },
+                        y: 0.0,
+                    },
+                );
+            }
+            Key::Confirm if self.screen == Screen::Article => {
+                if self.reading.is_some() {
+                    self.go(Screen::Contents);
+                }
+            }
             // The italic pictures turn like pages, whichever way.
             Key::Left | Key::Up if self.screen == Screen::Italic => self.turn_italic(-1),
             Key::Right | Key::Down | Key::Confirm if self.screen == Screen::Italic => {
@@ -1532,6 +1769,88 @@ impl App {
                 return self.use_zim(path);
             }
             Message::ZimChosen(_) => {}
+            Message::ChooseWiki => {
+                return self.dialog(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .add_filter("Wiki archive", &["xwa"])
+                            .pick_file()
+                            .await
+                            .map(|f| f.path().to_path_buf())
+                    },
+                    Message::WikiChosen,
+                );
+            }
+            Message::WikiChosen(Some(path)) => {
+                self.popup = None;
+                self.open_wiki(&path);
+                if self.screen != Screen::Read {
+                    self.go(Screen::Read);
+                }
+                return self.entered();
+            }
+            Message::WikiChosen(None) => {}
+            Message::WikiSearch(s) => {
+                self.wiki_hits = self
+                    .wiki
+                    .as_ref()
+                    .map(|w| w.search(&s, 40))
+                    .unwrap_or_default();
+                self.wiki_search = s;
+                self.focus = 0;
+            }
+            Message::WikiOpen(article, section) => self.read_article(article, section, true),
+            Message::WikiLink(link) => {
+                if let Some(wiki) = &self.wiki {
+                    let section = wiki.resolve(link.article, link.place);
+                    self.read_article(link.article, section, true);
+                }
+            }
+            Message::WikiTarget(crate::read::layout::Target::Link(link)) => {
+                return self.update(Message::WikiLink(link));
+            }
+            Message::WikiTarget(crate::read::layout::Target::Table(i)) => {
+                self.open_table(i);
+                return operation::snap_to(
+                    TABLE_ID,
+                    iced::widget::scrollable::RelativeOffset::START,
+                );
+            }
+            Message::WikiRandom => {
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(1, |d| d.as_nanos() as u64);
+                if let Some(id) = self.wiki.as_ref().and_then(|w| w.random(seed)) {
+                    self.read_article(id, 0, true);
+                }
+            }
+            Message::WikiSidebar(i) => {
+                if self.reading.as_ref().is_some_and(|r| i < r.sidebars.len()) {
+                    self.reading_sidebar = i;
+                    self.go(Screen::Sidebar);
+                }
+            }
+            Message::WikiSidebarLink(link) => {
+                // Back from the link returns to the page the sidebar was
+                // opened from, as from a link on that page.
+                while self.screen != Screen::Article {
+                    match self.history.pop() {
+                        Some((screen, focus)) => self.show(screen, focus),
+                        None => break,
+                    }
+                }
+                return self.update(Message::WikiLink(link));
+            }
+            Message::WikiSection(i) => {
+                if let Some(r) = &mut self.reading {
+                    r.page = match i {
+                        0 => 0,
+                        i => r.laid.section_pages.get(i - 1).copied().unwrap_or(0),
+                    };
+                }
+                // Back to the article, as it was left.
+                return self.back();
+            }
             Message::ZimRead(path, info) => {
                 if self.zim.as_ref() == Some(&path) {
                     self.zim_info = Some(info);
@@ -1872,6 +2191,7 @@ impl App {
                 Task::batch([self.load_library(), operation::focus(SEARCH_ID)])
             }
             Screen::Library | Screen::Languages => operation::focus(SEARCH_ID),
+            Screen::Read if self.wiki.is_some() => operation::focus(SEARCH_ID),
             Screen::Card => {
                 self.refresh_drives();
                 Task::none()

@@ -39,6 +39,19 @@ pub const SMALL_FONT: Font = Font::with_name("Noto Sans");
 pub const UBUNTU_REGULAR: &[u8] = include_bytes!("../fonts/Ubuntu-Regular.ttf");
 pub const UBUNTU_BOLD: &[u8] = include_bytes!("../fonts/Ubuntu-Bold.ttf");
 pub const NOTO_SANS: &[u8] = include_bytes!("../fonts/NotoSans-Regular.ttf");
+pub const NOTO_SANS_BOLD: &[u8] = include_bytes!("../fonts/NotoSans-Bold.ttf");
+pub const NOTO_SANS_ITALIC: &[u8] = include_bytes!("../fonts/NotoSans-Italic.ttf");
+pub const NOTO_SANS_BOLD_ITALIC: &[u8] = include_bytes!("../fonts/NotoSans-BoldItalic.ttf");
+/// Every font the app draws with: its own, and the e-reader's (Noto Sans)
+/// for reading archives.
+pub const FONTS: [&[u8]; 6] = [
+    UBUNTU_REGULAR,
+    UBUNTU_BOLD,
+    NOTO_SANS,
+    NOTO_SANS_BOLD,
+    NOTO_SANS_ITALIC,
+    NOTO_SANS_BOLD_ITALIC,
+];
 
 /// Ubuntu 10 pt, for list rows and body text.
 pub const BODY: f32 = 10.0 * 150.0 / 72.0;
@@ -358,6 +371,8 @@ pub enum Kind {
     Action,
     /// A fact, which cannot be chosen.
     Info,
+    /// A heading over the rows that follow, which cannot be chosen.
+    Heading,
 }
 
 #[derive(Debug, Clone)]
@@ -444,7 +459,7 @@ impl<M> Row<M> {
 
     /// Whether the selection can rest on it.
     pub fn focusable(&self) -> bool {
-        self.kind != Kind::Info && self.on_press.is_some()
+        !matches!(self.kind, Kind::Info | Kind::Heading) && self.on_press.is_some()
     }
 }
 
@@ -475,7 +490,7 @@ pub fn row_view<'a, M: Clone + 'a>(
     width: f32,
     on_hover: M,
 ) -> Element<'a, M> {
-    let enabled = r.on_press.is_some() || r.kind == Kind::Info;
+    let enabled = r.on_press.is_some() || matches!(r.kind, Kind::Info | Kind::Heading);
     let content: Element<'a, M> = match r.kind {
         Kind::Action => {
             let face = Face::UiBold;
@@ -486,6 +501,15 @@ pub fn row_view<'a, M: Clone + 'a>(
                 .into()
         }
         Kind::Menu => menu_content(r, width),
+        Kind::Heading => {
+            // Small and bold, sitting on the rows below it.
+            let title = fit(&r.title, Face::UiBold, SMALL, width - 2.0 * PAD).into_owned();
+            container(label(title, Face::UiBold, SMALL))
+                .padding(Padding::default().left(PAD).bottom(4.0))
+                .align_bottom(Length::Fill)
+                .width(Length::Fill)
+                .into()
+        }
         _ => list_content(r, width),
     };
     let kind = r.kind;

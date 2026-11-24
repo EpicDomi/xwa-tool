@@ -195,6 +195,7 @@ fn the_home_menu_opens_each_screen() {
         Screen::Library,
         Screen::Convert,
         Screen::Card,
+        Screen::Read,
         Screen::Firmware,
         Screen::Settings,
     ]
@@ -239,7 +240,7 @@ fn the_italic_pictures_turn_like_pages_and_back_returns_to_converting() {
 fn the_selection_goes_round_the_list_and_skips_what_cannot_be_chosen() {
     let mut app = app(Model::X4);
     press(&mut app, Key::Left);
-    assert_eq!(app.focus, 4, "up from the top goes to the bottom");
+    assert_eq!(app.focus, 5, "up from the top goes to the bottom");
     press(&mut app, Key::Right);
     assert_eq!(app.focus, 0);
 
@@ -576,6 +577,187 @@ fn a_finished_conversion_can_be_done_again_with_other_settings() {
     );
     let _ = app.update(Message::ConvertAgain);
     assert!(app.page().rows.iter().any(|r| r.title == "Made for"));
+}
+
+/// A two-article archive to read: "Pi", long enough for several pages,
+/// with sections, a link to "Tau" (an anchor in it) and a sidebar, and
+/// "Tau".
+fn reading_archive(path: &Path) {
+    use xwa_format::content::{
+        Anchor, Article, Block, Inline, Place, Sidebar, SidebarGroup, SidebarLink, anchor_hash,
+    };
+    use xwa_format::writer::{ArchiveWriter, WriterOptions};
+    let mut w =
+        ArchiveWriter::create(path, WriterOptions::new(xwa_format::Profile::Compact)).unwrap();
+    let words =
+        "The ratio of a circle's circumference to its diameter is the same for every circle. ";
+    let mut body = Vec::new();
+    for section in ["History", "Properties", "Computation"] {
+        body.push(Block::Heading {
+            level: 2,
+            content: vec![Inline::Text(section.into())],
+        });
+        for _ in 0..6 {
+            body.push(Block::Para(vec![Inline::Text(
+                words.repeat(4).trim_end().into(),
+            )]));
+        }
+    }
+    body.insert(
+        1,
+        Block::Para(vec![
+            Inline::Text("See ".into()),
+            Inline::Link {
+                article: 1,
+                place: Place::Anchor(anchor_hash("Uses")),
+                content: vec![Inline::Text("tau".into())],
+            },
+        ]),
+    );
+    let pi = Article {
+        title: "Pi".into(),
+        body,
+        sidebars: vec![Sidebar {
+            title: "Part of a series on circle constants".into(),
+            groups: vec![SidebarGroup {
+                heading: "Constants".into(),
+                links: vec![
+                    SidebarLink {
+                        label: "Tau".into(),
+                        article: 1,
+                        place: Place::Section(0),
+                    },
+                    SidebarLink {
+                        label: "Uses of tau".into(),
+                        article: 1,
+                        place: Place::Anchor(anchor_hash("Uses")),
+                    },
+                ],
+            }],
+        }],
+        ..Default::default()
+    };
+    let tau = Article {
+        title: "Tau".into(),
+        body: vec![
+            Block::Para(vec![Inline::Text("Twice pi.".into())]),
+            Block::Heading {
+                level: 2,
+                content: vec![Inline::Text("Uses".into())],
+            },
+            Block::Para(vec![Inline::Text("Turns.".into())]),
+        ],
+        anchors: vec![Anchor {
+            hash: anchor_hash("Uses"),
+            section: 1,
+        }],
+        ..Default::default()
+    };
+    w.add_article(0, &pi, 0).unwrap();
+    w.add_article(1, &tau, 0).unwrap();
+    w.set_meta("title", "Circles");
+    w.finish().unwrap();
+}
+
+#[test]
+fn an_archive_reads_in_pages_with_links_contents_and_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("circles.xwa");
+    reading_archive(&path);
+    let mut app = app(Model::X4);
+    let _ = app.update(Message::WikiChosen(Some(path)));
+    assert_eq!(app.screen, Screen::Read);
+    assert_eq!(app.page().title, "Circles");
+    let _ = app.update(Message::WikiSearch("ta".into()));
+    assert_eq!(titles(&app), ["Tau"]);
+    let _ = app.update(Message::WikiSearch(String::new()));
+
+    // Pi, in pages; the keys round Select turn them, within the article.
+    let pi = app.wiki.as_ref().unwrap().search("pi", 1)[0].article;
+    let _ = app.update(Message::WikiOpen(pi, 0));
+    assert_eq!(app.screen, Screen::Article);
+    let pages = app.reading.as_ref().unwrap().laid.pages.len();
+    assert!(pages >= 3, "{pages} pages");
+    press(&mut app, Key::Up);
+    assert_eq!(app.reading.as_ref().unwrap().page, 0);
+    press(&mut app, Key::Down);
+    press(&mut app, Key::Right);
+    assert_eq!(app.reading.as_ref().unwrap().page, 2);
+    assert_eq!(
+        app.page().subtitle.as_deref(),
+        Some(format!("3 of {pages}").as_str())
+    );
+
+    // The contents go to a section's page, which holds its heading.
+    press(&mut app, Key::Confirm);
+    assert_eq!(app.screen, Screen::Contents);
+    assert_eq!(
+        titles(&app),
+        [
+            "Part of a series on circle constants",
+            "Top",
+            "History",
+            "Properties",
+            "Computation"
+        ]
+    );
+    let _ = app.update(Message::WikiSection(3));
+    assert_eq!(app.screen, Screen::Article);
+    let r = app.reading.as_ref().unwrap();
+    let page = &r.laid.pages[r.page];
+    assert!(page.items.iter().any(
+        |i| matches!(i, crate::read::layout::Item::Text { text, .. } if text == "Computation")
+    ));
+
+    // The link to Tau#Uses opens Tau at that section; Back returns to Pi
+    // on the page it was left at.
+    let link = r.laid.pages[0].areas[0].target;
+    let left_at = r.page;
+    let _ = app.update(Message::WikiTarget(link));
+    let r = app.reading.as_ref().unwrap();
+    assert_eq!(r.title, "Tau");
+    assert_eq!(r.page, r.laid.section_pages[0]);
+    press(&mut app, Key::Back);
+    let r = app.reading.as_ref().unwrap();
+    assert_eq!((r.title.as_str(), r.page), ("Pi", left_at));
+
+    // The sidebar, from Contents: its heading, then its links. A link opens
+    // its article at its section, and Back returns to Pi's page.
+    press(&mut app, Key::Confirm);
+    let _ = app.update(Message::WikiSidebar(0));
+    assert_eq!(app.screen, Screen::Sidebar);
+    assert_eq!(app.page().title, "Circle constants");
+    assert_eq!(titles(&app), ["Constants", "Tau", "Uses of tau"]);
+    let link = app.page().rows[2].on_press.clone().unwrap();
+    let _ = app.update(link);
+    assert_eq!(app.screen, Screen::Article);
+    let r = app.reading.as_ref().unwrap();
+    assert_eq!(r.title, "Tau");
+    assert_eq!(r.page, r.laid.section_pages[0]);
+    press(&mut app, Key::Back);
+    let r = app.reading.as_ref().unwrap();
+    assert_eq!((r.title.as_str(), r.page), ("Pi", left_at));
+    press(&mut app, Key::Back);
+    assert_eq!(app.screen, Screen::Read);
+    assert_eq!(app.page().rows[0].title, "Carry on reading");
+}
+
+#[test]
+fn an_archive_that_will_not_open_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("broken.xwa");
+    std::fs::write(&path, b"not an archive").unwrap();
+    let mut app = app(Model::X4);
+    let _ = app.update(Message::WikiChosen(Some(path)));
+    assert_eq!(app.screen, Screen::Read);
+    assert!(app.wiki.is_none());
+    assert!(
+        app.page()
+            .note
+            .unwrap()
+            .starts_with("That archive would not open")
+    );
+    assert_eq!(titles(&app), ["Open an archive"]);
 }
 
 #[test]
@@ -942,8 +1124,58 @@ fn screens() {
         return;
     };
     let zim = std::env::var_os("XWA_GUI_ZIM").map(PathBuf::from);
+    // An archive to read, and the articles and pages to draw:
+    // `XWA_GUI_READ=Lion:0,1,7;Jaguar:17`.
+    let xwa = std::env::var_os("XWA_GUI_XWA").map(PathBuf::from);
+    let reads = std::env::var("XWA_GUI_READ").unwrap_or_default();
     for model in Model::ALL {
         let tag = model.key();
+        if let Some(xwa) = &xwa {
+            let mut a = app(model);
+            let _ = a.update(Message::WikiChosen(Some(xwa.clone())));
+            snap(&a, &dir, &format!("{tag}-read"));
+            let _ = a.update(Message::WikiSearch("li".into()));
+            snap(&a, &dir, &format!("{tag}-read-search"));
+            for spec in reads.split(';').filter(|s| !s.is_empty()) {
+                let (title, pages) = spec.split_once(':').unwrap_or((spec, "0"));
+                let hits = a.wiki.as_ref().unwrap().search(title, 20);
+                let Some(hit) = hits.iter().find(|h| h.display == title).or(hits.first()) else {
+                    continue;
+                };
+                let _ = a.update(Message::WikiOpen(hit.article, 0));
+                let name = title.replace(' ', "_");
+                for p in pages.split(',').filter_map(|p| p.parse::<usize>().ok()) {
+                    if let Some(r) = &mut a.reading {
+                        r.page = p.min(r.laid.pages.len() - 1);
+                    }
+                    snap(&a, &dir, &format!("{tag}-article-{name}-{p}"));
+                }
+                // The first table too wide for its pages, on its own.
+                let table = a.reading.as_ref().and_then(|r| {
+                    r.laid
+                        .pages
+                        .iter()
+                        .flat_map(|p| &p.areas)
+                        .find_map(|ar| match ar.target {
+                            crate::read::layout::Target::Table(i) => Some(i),
+                            _ => None,
+                        })
+                });
+                if let Some(i) = table {
+                    let _ = a.update(Message::WikiTarget(crate::read::layout::Target::Table(i)));
+                    snap(&a, &dir, &format!("{tag}-table-{name}"));
+                    let _ = a.update(Message::Back);
+                }
+                let _ = a.update(Message::Press(Key::Confirm));
+                snap(&a, &dir, &format!("{tag}-contents-{name}"));
+                if a.reading.as_ref().is_some_and(|r| !r.sidebars.is_empty()) {
+                    let _ = a.update(Message::WikiSidebar(0));
+                    snap(&a, &dir, &format!("{tag}-sidebar-{name}"));
+                    let _ = a.update(Message::Back);
+                }
+                let _ = a.update(Message::Back);
+            }
+        }
         for finish in Finish::ALL {
             let mut a = app(model);
             a.prefs.finish = Some(finish);
@@ -1087,11 +1319,7 @@ fn snap_pointing(app: &App, dir: &Path, name: &str, at: Option<iced::Point>) {
         return;
     }
     let settings = iced::Settings {
-        fonts: vec![
-            eink::UBUNTU_REGULAR.into(),
-            eink::UBUNTU_BOLD.into(),
-            eink::NOTO_SANS.into(),
-        ],
+        fonts: eink::FONTS.iter().map(|&f| f.into()).collect(),
         default_font: eink::UI,
         ..iced::Settings::default()
     };

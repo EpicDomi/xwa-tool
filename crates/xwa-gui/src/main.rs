@@ -17,6 +17,7 @@ mod graphics;
 mod icons;
 mod library;
 mod prefs;
+mod read;
 mod screens;
 #[cfg(test)]
 mod tests;
@@ -79,7 +80,7 @@ fn run(prefs: Prefs, open: Option<PathBuf>, launch: Launch) -> iced::Result {
     let zoom = app::start_zoom(&prefs);
     let window = prefs.model.spec().window();
     let graphics = launch.graphics;
-    iced::application(
+    let app = iced::application(
         move || App::new(prefs.clone(), zoom, open.clone(), graphics),
         App::update,
         App::view,
@@ -91,27 +92,27 @@ fn run(prefs: Prefs, open: Option<PathBuf>, launch: Launch) -> iced::Result {
         background_color: Color::TRANSPARENT,
         text_color: eink::INK,
     })
-    .scale_factor(|app: &App| app.zoom)
-    .font(eink::UBUNTU_REGULAR)
-    .font(eink::UBUNTU_BOLD)
-    .font(eink::NOTO_SANS)
-    .default_font(eink::UI)
-    .exit_on_close_request(false)
-    .window(window::Settings {
-        size: window,
-        position: window::Position::Centered,
-        visible: false,
-        // Resizable, so the system takes size changes (Wayland pins the size
-        // of a window that is not), and the device can be dragged bigger.
-        resizable: true,
-        decorations: false,
-        transparent: launch.shaped,
-        icon: device::window_icon(),
-        platform_specific: platform(launch.shaped),
-        exit_on_close_request: false,
-        ..window::Settings::default()
-    })
-    .run()
+    .scale_factor(|app: &App| app.zoom);
+    eink::FONTS
+        .iter()
+        .fold(app, |app, &f| app.font(f))
+        .default_font(eink::UI)
+        .exit_on_close_request(false)
+        .window(window::Settings {
+            size: window,
+            position: window::Position::Centered,
+            visible: false,
+            // Resizable, so the system takes size changes (Wayland pins the size
+            // of a window that is not), and the device can be dragged bigger.
+            resizable: true,
+            decorations: false,
+            transparent: launch.shaped,
+            icon: device::window_icon(),
+            platform_specific: platform(launch.shaped),
+            exit_on_close_request: false,
+            ..window::Settings::default()
+        })
+        .run()
 }
 
 /// Everything on screen is styled by hand; the theme only matters for its
