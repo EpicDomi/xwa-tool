@@ -420,6 +420,22 @@ impl Archive {
             None => Ok(None),
         }
     }
+
+    /// Whether the ZIM has its articles' pictures: false for Kiwix's
+    /// "nopic" and "mini" files, which say so in their tags
+    /// (`_pictures:no`) or their flavour. True when they say nothing.
+    pub fn has_pictures(&self) -> bool {
+        let text = |name: &str| {
+            self.metadata(name)
+                .ok()
+                .flatten()
+                .map(|v| String::from_utf8_lossy(&v).to_lowercase())
+                .unwrap_or_default()
+        };
+        let tagged_none = text("Tags").split(';').any(|t| t.trim() == "_pictures:no");
+        let flavour = text("Flavour");
+        !(tagged_none || matches!(flavour.trim(), "nopic" | "mini"))
+    }
 }
 
 fn read_mime_list(file: &File, pos: u64) -> Result<Vec<String>> {
