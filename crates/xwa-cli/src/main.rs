@@ -120,6 +120,27 @@ enum Command {
         #[arg(long)]
         decompress: bool,
     },
+    /// Install firmware on an Xteink reader connected by USB: the latest
+    /// release of the reader's firmware unless told otherwise. It goes into
+    /// the firmware slot not in use; books, settings and the SD card are
+    /// kept.
+    Flash {
+        /// List the releases, and the readers connected, without installing.
+        #[arg(long)]
+        list: bool,
+        /// Install this release (its tag) instead of the latest.
+        #[arg(long, conflicts_with = "file")]
+        release: Option<String>,
+        /// Install this firmware file; needs --any-firmware.
+        #[arg(long, requires = "any_firmware")]
+        file: Option<PathBuf>,
+        /// Allow firmware other than the releases (any valid firmware file).
+        #[arg(long)]
+        any_firmware: bool,
+        /// The reader's serial port, when more than one is connected.
+        #[arg(long)]
+        port: Option<String>,
+    },
     /// Download every Noto font the fallback font could need (about 120 MB),
     /// so conversions made offline later still get a complete one.
     DownloadFonts {
@@ -260,6 +281,13 @@ fn main() -> ExitCode {
         Command::Info { file, decompress } => info(&file, decompress),
         Command::Verify { file } => verify(&file),
         Command::DownloadFonts { font_cache } => download_fonts(font_cache),
+        Command::Flash {
+            list,
+            release,
+            file,
+            any_firmware: _,
+            port,
+        } => flash(list, release.as_deref(), file.as_deref(), port.as_deref()),
         Command::CompleteFont { file, font_cache } => complete_font(&file, font_cache),
         Command::Dump(args) => dump_cmd(&args),
         Command::TitleIndex { zim, queries } => title_index_cmd(&zim, &queries).map_err(Into::into),
@@ -638,6 +666,127 @@ impl Progress {
 fn overwrite(line: &str, shown: usize) -> String {
     let pad = shown.saturating_sub(line.chars().count());
     format!("\r{line}{}", " ".repeat(pad))
+}
+
+fn flash(list: bool, tag: Option<&str>, file: Option<&Path>, port: Option<&str>) -> CliResult {
+    use xwa_flash::device::{self, Source, Stage};
+    use xwa_flash::release::{self, FIRMWARE_REPO};
+    use xwa_flash::{Model, image};
+
+    let ports = device::ports();
+    let releases = || release::releases(FIRMWARE_REPO);
+    if list {
+        let releases = releases().unwrap_or_else(|e| {
+            println!("No releases: {e}");
+            Vec::new()
+        });
+        if releases.is_empty() {
+            println!("No releases of {FIRMWARE_REPO} to install.");
+        }
+        for r in &releases {
+            let has = |m: Model| {
+                if r.firmware_for(m).is_some() {
+                    "yes"
+                } else {
+                    "no"
+                }
+            };
+            println!(
+                "{}  {}{}  X4/X3: {}  X4 Pro: {}",
+                r.tag,
+                r.date(),
+                if r.prerelease { "  (pre-release)" } else { "" },
+                has(Model::X4),
+                has(Model::X4Pro)
+            );
+        }
+        match ports.as_slice() {
+            [] => println!("No reader is connected by USB."),
+            ports => {
+                for p in ports {
+                    println!("Reader connected on {}", p.name);
+                }
+            }
+        }
+        return Ok(());
+    }
+    let source = match file {
+        Some(path) => {
+            let data = std::fs::read(path)?;
+            let info = image::check(&data)?;
+            println!(
+                "{}: firmware for the {}{}",
+                path.display(),
+                info.chip.name(),
+                info.app
+                    .map(|a| format!(", {}", a.label()))
+                    .unwrap_or_default()
+            );
+            Source::File(data)
+        }
+        None => {
+            let releases = releases()?;
+            let chosen = match tag {
+                Some(tag) => releases.into_iter().find(|r| r.tag == tag),
+                // The latest that is not a pre-release, else the latest.
+                None => {
+                    let stable = releases.iter().position(|r| !r.prerelease);
+                    let i = stable.unwrap_or(0);
+                    releases.into_iter().nth(i)
+                }
+            };
+            let r = chosen.ok_or_else(|| match tag {
+                Some(t) => format!("{FIRMWARE_REPO} has no release {t}"),
+                None => format!("{FIRMWARE_REPO} has no releases yet"),
+            })?;
+            println!("Release {} ({})", r.tag, r.date());
+            Source::Release(r)
+        }
+    };
+    let port = match (port, ports.as_slice()) {
+        (Some(name), _) => ports
+            .iter()
+            .find(|p| p.name == name)
+            .cloned()
+            .ok_or_else(|| format!("no Xteink reader on {name}"))?,
+        (None, [one]) => one.clone(),
+        (None, []) => {
+            return Err("no reader is connected: connect it by USB and switch it on".into());
+        }
+        (None, _) => {
+            return Err("more than one reader is connected: choose one with --port".into());
+        }
+    };
+    let mut progress = Progress::new();
+    let installed = device::install(&port, &source, &mut |stage| {
+        match stage {
+            Stage::Connecting => progress.update("connecting", 0, 1),
+            Stage::Downloading(done, total) => progress.update("downloading", done, total),
+            Stage::Writing(f) => progress.update("writing", (f * 1000.0) as u64, 1000),
+            Stage::Verifying => progress.update("verifying", 1, 1),
+            Stage::Restarting => progress.update("restarting", 1, 1),
+        }
+        true
+    })?;
+    progress.clear();
+    let label = |a: &Option<image::AppDesc>| {
+        a.as_ref()
+            .map(image::AppDesc::label)
+            .unwrap_or_else(|| "firmware".into())
+    };
+    println!(
+        "Installed {} on the {} (in slot {}; it had {}).",
+        label(&installed.firmware),
+        installed.model.name(),
+        installed.slot,
+        label(&installed.previous)
+    );
+    if !installed.restarts {
+        println!(
+            "Unplug the USB cable, plug it in again, and hold the power button until the reader starts."
+        );
+    }
+    Ok(())
 }
 
 fn download_fonts(cache: Option<PathBuf>) -> CliResult {

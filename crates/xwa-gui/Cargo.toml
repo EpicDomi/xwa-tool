@@ -15,6 +15,7 @@ xwa-zim.workspace = true
 xwa-format.workspace = true
 xwa-convert.workspace = true
 xwa-fetch.workspace = true
+xwa-flash.workspace = true
 dirs.workspace = true
 iced = { workspace = true, features = ["tokio", "canvas", "image-without-codecs"] }
 image.workspace = true

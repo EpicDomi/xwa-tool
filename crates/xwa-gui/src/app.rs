@@ -12,6 +12,7 @@ use xwa_fetch::drives::Drive;
 use xwa_fetch::fonts::Fonts;
 use xwa_fetch::wikimedia::Diagrams;
 use xwa_fetch::{Book, Language, size_text};
+use xwa_flash::release::Release;
 use xwa_format::font::FontChars;
 
 use crate::device::{Finish, Key, Model};
@@ -59,6 +60,8 @@ pub enum Screen {
     Downloads,
     /// Pictures of real italic beside slanted regular letters.
     Italic,
+    /// Installing firmware on the e-reader over USB.
+    Firmware,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +71,8 @@ pub enum Popup {
     TurnOffBusy,
     /// Stopping a conversion throws away the work so far.
     StopConversion,
+    /// Installing firmware, once confirmed.
+    InstallFirmware,
     /// An archive of the same name is already where this one would go.
     ReplaceArchive,
     /// Where the archive goes may lack the room for it: about how much it
@@ -94,6 +99,8 @@ pub enum Choice {
     Selection,
     Articles,
     Sort,
+    /// Which firmware to install.
+    Firmware,
 }
 
 /// A long task on a worker thread: converting, downloading or copying.
@@ -137,6 +144,14 @@ impl Job {
         match self {
             Job::Running { label, .. } => label,
             _ => "",
+        }
+    }
+
+    /// Which step a running job is on.
+    pub fn step(&self) -> Option<usize> {
+        match self {
+            Job::Running { step, .. } => Some(*step),
+            _ => None,
         }
     }
 
@@ -201,6 +216,17 @@ impl Job {
         (*fraction >= 0.02 && elapsed >= 10.0)
             .then(|| Duration::from_secs_f32(elapsed * (1.0 - fraction) / fraction))
     }
+}
+
+/// Which firmware the Firmware screen installs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirmwareChoice {
+    /// The newest release that is not a pre-release (else the newest).
+    Latest,
+    /// The release at this place in the list.
+    Release(usize),
+    /// A file, when other firmware is allowed.
+    File(PathBuf),
 }
 
 /// What a ZIM file says about itself.
@@ -477,6 +503,20 @@ pub enum Message {
     SetZoom(Option<f32>),
     SetGraphics(Graphics),
     ToggleFlash,
+    /// Allow any valid firmware file, not only the releases.
+    ToggleAnyFirmware,
+    // Firmware.
+    LoadReleases,
+    FirmwareReleases(Result<Vec<Release>, String>),
+    LookForReaders,
+    /// Install the release at this place in the list.
+    ChooseRelease(usize),
+    ChooseFirmwareFile,
+    FirmwareFileChosen(Option<PathBuf>),
+    AskInstallFirmware,
+    InstallFirmware,
+    Installing(Event<String>),
+    CancelInstall,
     ChooseDownloadDir,
     DownloadDirChosen(Option<PathBuf>),
     /// A file dialog has closed, with what it gives on to.
@@ -627,6 +667,14 @@ pub struct App {
     /// Checking or completing it.
     pub font_work: Job,
     pub drives: Vec<Drive>,
+
+    // Firmware.
+    /// The firmware releases, once asked for.
+    pub releases: Option<Result<Vec<Release>, String>>,
+    pub firmware_choice: FirmwareChoice,
+    /// Readers connected by USB.
+    pub readers: Vec<xwa_flash::device::Port>,
+    pub install: Job,
     pub drive: Option<Drive>,
     pub copy: Job,
 
@@ -694,6 +742,10 @@ impl App {
             archive_font: ArchiveFont::Unknown,
             font_work: Job::Idle,
             drives: Vec::new(),
+            releases: None,
+            firmware_choice: FirmwareChoice::Latest,
+            readers: Vec::new(),
+            install: Job::Idle,
             drive: None,
             copy: Job::Idle,
             languages: Vec::new(),
@@ -726,7 +778,10 @@ impl App {
     }
 
     pub fn busy(&self) -> bool {
-        self.conversion.running() || self.copy.running() || self.downloads.is_running()
+        self.conversion.running()
+            || self.copy.running()
+            || self.downloads.is_running()
+            || self.install.running()
     }
 
     /// What is running, for the status line.
@@ -740,6 +795,9 @@ impl App {
         }
         if let Some(f) = self.copy.fraction() {
             parts.push(format!("Copying {:.0}%", f * 100.0));
+        }
+        if self.install.running() {
+            parts.push("Installing firmware".into());
         }
         (!parts.is_empty()).then(|| parts.join(" · "))
     }
@@ -1356,6 +1414,68 @@ impl App {
                 self.prefs.refresh_flash = !self.prefs.refresh_flash;
                 self.prefs.save();
             }
+            Message::ToggleAnyFirmware => {
+                self.prefs.any_firmware = !self.prefs.any_firmware;
+                self.prefs.save();
+                if !self.prefs.any_firmware
+                    && matches!(self.firmware_choice, FirmwareChoice::File(_))
+                {
+                    self.firmware_choice = FirmwareChoice::Latest;
+                }
+            }
+            Message::LoadReleases => return self.load_releases(),
+            Message::FirmwareReleases(result) => self.releases = Some(result),
+            Message::LookForReaders => {
+                if !self.install.running() {
+                    self.readers = xwa_flash::device::ports();
+                }
+            }
+            Message::ChooseRelease(i) => {
+                self.popup = None;
+                self.firmware_choice = FirmwareChoice::Release(i);
+            }
+            Message::ChooseFirmwareFile => {
+                self.popup = None;
+                if !self.prefs.any_firmware {
+                    return Task::none();
+                }
+                return self.dialog(
+                    async {
+                        rfd::AsyncFileDialog::new()
+                            .add_filter("Firmware", &["bin"])
+                            .pick_file()
+                            .await
+                            .map(|f| f.path().to_path_buf())
+                    },
+                    Message::FirmwareFileChosen,
+                );
+            }
+            Message::FirmwareFileChosen(Some(path)) => {
+                if self.prefs.any_firmware {
+                    self.firmware_choice = FirmwareChoice::File(path);
+                }
+            }
+            Message::FirmwareFileChosen(None) => {}
+            Message::AskInstallFirmware => {
+                if self.can_install() {
+                    self.popup = Some(Popup::InstallFirmware);
+                    self.popup_focus = 0;
+                }
+            }
+            Message::InstallFirmware => {
+                self.popup = None;
+                return self.start_install();
+            }
+            Message::Installing(Event::Progress(p)) => self.install.progress(p),
+            Message::Installing(Event::Done(result)) => {
+                self.install = Job::Finished(match result {
+                    Err(e) if e == "cancelled" => Err("Stopped; nothing was written.".into()),
+                    other => other,
+                });
+                self.readers = xwa_flash::device::ports();
+                self.focus = self.first_focusable();
+            }
+            Message::CancelInstall => self.install.cancel(),
             Message::ChooseDownloadDir => {
                 let dir = self.download_dir();
                 return self.dialog(
@@ -1746,6 +1866,13 @@ impl App {
                 self.refresh_save_free();
                 Task::none()
             }
+            Screen::Firmware => {
+                self.readers = xwa_flash::device::ports();
+                if matches!(self.releases, None | Some(Err(_))) {
+                    return self.load_releases();
+                }
+                Task::none()
+            }
             Screen::Settings => {
                 if !self.font_download.running() {
                     self.fonts_kept = FontsKept::count();
@@ -1827,6 +1954,129 @@ impl App {
             return Task::none();
         }
         self.start_conversion(out)
+    }
+
+    fn load_releases(&mut self) -> Task<Message> {
+        self.releases = None;
+        Task::perform(
+            background(|| {
+                xwa_flash::release::releases(xwa_flash::release::FIRMWARE_REPO)
+                    .map_err(|e| e.to_string())
+            }),
+            Message::FirmwareReleases,
+        )
+    }
+
+    /// The release the Firmware screen would install, if any.
+    pub(crate) fn chosen_release(&self) -> Option<&Release> {
+        let releases = self.releases.as_ref()?.as_ref().ok()?;
+        match &self.firmware_choice {
+            FirmwareChoice::Latest => releases
+                .iter()
+                .find(|r| !r.prerelease)
+                .or_else(|| releases.first()),
+            FirmwareChoice::Release(i) => releases.get(*i),
+            FirmwareChoice::File(_) => None,
+        }
+    }
+
+    /// Whether there is a reader, and firmware to put on it.
+    pub(crate) fn can_install(&self) -> bool {
+        let source = match &self.firmware_choice {
+            FirmwareChoice::File(_) => self.prefs.any_firmware,
+            _ => self.chosen_release().is_some(),
+        };
+        source && self.readers.len() == 1 && !self.install.running()
+    }
+
+    /// What will be installed, in a few words.
+    pub(crate) fn firmware_name(&self) -> String {
+        match (&self.firmware_choice, self.chosen_release()) {
+            (FirmwareChoice::File(path), _) => crate::screens::file_name(path),
+            (_, Some(r)) => format!("Firmware {}", r.tag),
+            (_, None) => "the firmware".into(),
+        }
+    }
+
+    fn start_install(&mut self) -> Task<Message> {
+        use xwa_flash::device::{self, Source, Stage};
+        if !self.can_install() {
+            return Task::none();
+        }
+        let port = self.readers[0].clone();
+        let source = match &self.firmware_choice {
+            FirmwareChoice::File(path) => match std::fs::read(path) {
+                Ok(data) => Source::File(data),
+                Err(e) => {
+                    self.install =
+                        Job::Finished(Err(format!("{}: {e}", crate::screens::file_name(path))));
+                    return Task::none();
+                }
+            },
+            _ => match self.chosen_release() {
+                Some(r) => Source::Release(r.clone()),
+                None => return Task::none(),
+            },
+        };
+        let tag = self.chosen_release().map(|r| r.tag.clone());
+        let (job, cancel) = Job::start();
+        self.install = job;
+        self.focus = 0;
+        let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            let mut throttle = Throttle::default();
+            let result = device::install(&port, &source, &mut |stage| {
+                let (label, fraction, step) = match stage {
+                    Stage::Connecting => ("Connecting to the reader".to_string(), 0.0, 0),
+                    Stage::Downloading(done, total) => (
+                        format!(
+                            "Downloading: {} of {}",
+                            xwa_fetch::size_text(done),
+                            xwa_fetch::size_text(total)
+                        ),
+                        if total > 0 {
+                            done as f32 / total as f32
+                        } else {
+                            0.0
+                        },
+                        1,
+                    ),
+                    Stage::Writing(f) => ("Writing the firmware".to_string(), f, 2),
+                    Stage::Verifying => ("Checking what was written".to_string(), 1.0, 3),
+                    Stage::Restarting => ("Restarting the reader".to_string(), 1.0, 4),
+                };
+                let steady = matches!(stage, Stage::Writing(_) | Stage::Downloading(..));
+                if !steady || throttle.due(step) {
+                    let _ = tx.unbounded_send(Event::Progress(Progress {
+                        label,
+                        fraction,
+                        step,
+                        rate: None,
+                        left: None,
+                    }));
+                }
+                !(stage.can_stop() && cancel.load(Ordering::Relaxed))
+            });
+            let result = result
+                .map(|done| {
+                    let what = match (&tag, &done.firmware) {
+                        (Some(t), _) => format!("Firmware {t}"),
+                        (None, Some(app)) => app.label(),
+                        (None, None) => "the firmware".into(),
+                    };
+                    let mut said = format!("{what} is installed on the {}.", done.model.name());
+                    if done.restarts {
+                        said += " It is restarting.";
+                    } else {
+                        said += " Unplug the USB cable, plug it in again, and hold the power \
+                                  button until the reader starts.";
+                    }
+                    said
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.unbounded_send(Event::Done(result));
+        });
+        Task::run(rx, Message::Installing)
     }
 
     fn refresh_drives(&mut self) {
@@ -2126,6 +2376,10 @@ impl App {
         }
         if self.flash.is_some() || self.tapped_key.is_some() {
             subs.push(window::frames().map(Message::Frame));
+        }
+        // A reader plugged in or out shows on the Firmware screen by itself.
+        if self.screen == Screen::Firmware && !self.install.running() {
+            subs.push(iced::time::every(Duration::from_secs(2)).map(|_| Message::LookForReaders));
         }
         Subscription::batch(subs)
     }

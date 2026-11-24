@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/xwa-zim", "crates/xwa-format", "crates/xwa-convert", "crates/xwa-fetch", "crates/xwa-cli", "crates/xwa-gui", "xtask"]
+members = ["crates/xwa-zim", "crates/xwa-format", "crates/xwa-convert", "crates/xwa-fetch", "crates/xwa-flash", "crates/xwa-cli", "crates/xwa-gui", "xtask"]
 # Patched copies of published crates (see vendor/README.md), not ours to lint
 # or format.
 exclude = ["vendor"]
@@ -16,6 +16,7 @@ xwa-zim = { path = "crates/xwa-zim" }
 xwa-format = { path = "crates/xwa-format" }
 xwa-convert = { path = "crates/xwa-convert" }
 xwa-fetch = { path = "crates/xwa-fetch" }
+xwa-flash = { path = "crates/xwa-flash" }
 zstd = { version = "0.14", features = ["experimental"] }
 lzma-rs = "0.3"
 thiserror = "2"
