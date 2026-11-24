@@ -15,6 +15,11 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
 - `crates/xwa-fetch`: Kiwix library catalog (OPDS), downloads (Metalink,
   resume, SHA-256), removable drives and copying to them, and sharper
   diagrams from Wikimedia (`wikimedia.rs`).
+- `crates/xwa-flash`: installs firmware on the e-reader over USB
+  (espflash): firmware image checks (`image.rs`), the Xteink partition
+  layouts and OTA data (`layout.rs`), GitHub releases (`release.rs`), and
+  the reader itself (`device.rs`). Only the app slot not in use and then
+  the OTA data are ever written.
 - `crates/xwa-cli`: the `xwa-tool` command line.
 - `crates/xwa-gui`: the `xwa-tool-gui` desktop app (iced), drawn as the
   e-reader: `device.rs` (the cases and keys of each model, and whether the

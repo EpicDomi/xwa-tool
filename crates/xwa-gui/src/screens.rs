@@ -12,8 +12,8 @@ use iced::{Alignment, Background, Element, Length, Padding, Shadow, mouse};
 use xwa_fetch::size_text;
 
 use crate::app::{
-    App, ArchiveFont, Choice, Job, Message, Popup, SEARCH_ID, Screen, ZOOMS, ZimInfo,
-    conversion_steps, group,
+    App, ArchiveFont, Choice, FirmwareChoice, Job, Message, Popup, SEARCH_ID, Screen, ZOOMS,
+    ZimInfo, conversion_steps, group,
 };
 use crate::device::{Body, Finish, Glass, Key, Model, margin};
 use crate::downloads::{Download, Fetch};
@@ -83,7 +83,7 @@ fn on_off(on: bool) -> &'static str {
     if on { "ON" } else { "OFF" }
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
@@ -115,6 +115,7 @@ impl App {
             Screen::Filter => self.filter_page(),
             Screen::Downloads => self.downloads_page(),
             Screen::Italic => self.italic_page(),
+            Screen::Firmware => self.firmware_page(),
         }
     }
 
@@ -180,6 +181,21 @@ impl App {
                              e-reader to it, first.",
                         )
                         .on_press(Message::Open(Screen::Card)),
+                ),
+                Some(
+                    Row::new(Kind::Menu, "Firmware")
+                        .icon(&icons::USB)
+                        .subtitle(if self.install.running() {
+                            format!("Installing… {}", self.install.label())
+                        } else {
+                            "Install or update the e-reader's firmware".into()
+                        })
+                        .tip(
+                            "Installs the latest release of the e-reader's firmware over a USB \
+                             cable (or another release you choose), keeping its books, \
+                             settings and SD card.",
+                        )
+                        .on_press(Message::Open(Screen::Firmware)),
                 ),
                 Some(
                     Row::new(Kind::Menu, "Settings")
@@ -638,6 +654,74 @@ impl App {
         }
     }
 
+    fn firmware_page(&self) -> Page {
+        let mut page = Page {
+            title: "Firmware".into(),
+            subtitle: None,
+            back: true,
+            top: 0.0,
+            bottom: 0.0,
+            rows: Vec::new(),
+            note: None,
+            hints: LIST_HINTS,
+        };
+        if self.install.running() {
+            page.top = COPY_TOP + progress_height(None);
+            // Connecting and downloading can stop; writing cannot.
+            page.rows = vec![if self.install.step().unwrap_or(0) <= 1 {
+                stop_row(&self.install, "Stop", Message::CancelInstall)
+            } else {
+                Row::new(Kind::Info, "Keep the reader plugged in")
+                    .subtitle("Writing takes a minute or two")
+            }];
+            return page;
+        }
+        let reader = Row::new(Kind::Item, "Reader")
+            .tip(
+                "Connect the e-reader to this computer with a USB cable that carries data \
+                 (some carry only power), and switch it on. It shows here by itself.",
+            )
+            .on_press(Message::LookForReaders);
+        let reader = match self.readers.as_slice() {
+            [] => reader.subtitle("Connect it by USB and switch it on"),
+            [one] => reader.subtitle(format!("Connected on {}", one.name)),
+            more => reader.subtitle(format!("{} connected: connect only one", more.len())),
+        };
+        let firmware = Row::new(Kind::Item, "Firmware").tip(
+            "Which firmware to install: the latest release unless you choose another. With \
+             \"Allow other firmware\" on in Settings, a firmware file can be chosen too.",
+        );
+        let can_choose =
+            matches!(&self.releases, Some(Ok(r)) if !r.is_empty()) || self.prefs.any_firmware;
+        let firmware = match (&self.firmware_choice, &self.releases, self.chosen_release()) {
+            (FirmwareChoice::File(path), _, _) => firmware.subtitle(file_name(path)),
+            (_, _, Some(r)) => firmware.subtitle(format!(
+                "{} · released {}{}",
+                r.tag,
+                r.date(),
+                if r.prerelease { " · pre-release" } else { "" }
+            )),
+            (_, None, _) => firmware.subtitle("Looking for releases…"),
+            (_, Some(Ok(_)), None) => firmware.subtitle("No releases yet"),
+            (_, Some(Err(e)), None) => firmware
+                .subtitle("Could not get the releases; choose to try again")
+                .tip(e.clone()),
+        };
+        let firmware = match (&self.releases, can_choose) {
+            (_, true) => firmware.opens().on_press(Message::Choose(Choice::Firmware)),
+            (Some(Err(_)), false) => firmware.on_press(Message::LoadReleases),
+            _ => firmware,
+        };
+        page.rows = vec![
+            reader,
+            firmware,
+            Row::new(Kind::Action, "Install")
+                .on_press_maybe(self.can_install().then_some(Message::AskInstallFirmware)),
+        ];
+        page.bottom = 150.0;
+        page
+    }
+
     fn italic_page(&self) -> Page {
         let spec = self.spec();
         let hints = if spec.hints.is_some() {
@@ -807,6 +891,15 @@ impl App {
                     )
                     .on_press(Message::ToggleFlash),
                 self.fonts_row(),
+                Row::new(Kind::Setting, "Allow other firmware")
+                    .value(on_off(self.prefs.any_firmware))
+                    .tip(
+                        "Off, only the firmware's own releases can be installed. On, any \
+                         firmware file for the reader's chip can be too, such as one you \
+                         built or another project's. Firmware that cannot read XWA archives \
+                         will not open them.",
+                    )
+                    .on_press(Message::ToggleAnyFirmware),
                 Row::new(Kind::Item, "Download folder")
                     .icon(&icons::FOLDER)
                     .tip("Where downloaded ZIM files are saved.")
@@ -950,6 +1043,11 @@ impl App {
             .on_scroll(Message::Scroll)
             .interaction(mouse::Interaction::Pointer)
             .into(),
+            Screen::Firmware if self.install.running() => column![
+                heading(&self.firmware_name(), "onto the e-reader", w),
+                progress_view(&self.install, None),
+            ]
+            .into(),
             Screen::Card if self.font_work.running() => {
                 let what = self.archive.as_deref().map(file_name).unwrap_or_default();
                 column![
@@ -991,6 +1089,14 @@ impl App {
             Screen::Book => match self.book_note() {
                 Some(s) => note(&s),
                 None => Space::new().into(),
+            },
+            Screen::Firmware => match &self.install {
+                Job::Finished(Ok(s)) => note(s),
+                Job::Finished(Err(e)) => note(&format!("It did not work: {e}")),
+                _ => note(
+                    "The firmware goes into the reader's spare slot and is checked before the \
+                     reader is set to start from it. Books, settings and the SD card are kept.",
+                ),
             },
             Screen::Settings => note(&format!(
                 "On the keyboard: the arrows move, Enter chooses, Esc goes back, Page Up and Page Down turn pages. {MODIFIER} with + and − changes the size, {MODIFIER} 0 fits it to the screen."
@@ -1352,6 +1458,17 @@ impl App {
                     size_text(has)
                 )),
             ),
+            Popup::InstallFirmware => (
+                "Install the firmware?",
+                Some(format!(
+                    "{} goes into the reader's spare firmware slot, and the reader starts \
+                     from it. Its books, settings and SD card are kept, and the firmware it \
+                     has now stays in the other slot. Keep the cable plugged in until it is \
+                     done.",
+                    self.firmware_name()
+                )),
+            ),
+            Popup::Choose(Choice::Firmware) => ("Firmware", None),
             Popup::Choose(Choice::Device) => ("Device", None),
             Popup::Choose(Choice::Case) => ("Case", None),
             Popup::Choose(Choice::Size) => ("Display size", None),
@@ -1416,6 +1533,39 @@ impl App {
             Popup::Choose(Choice::Sort) => {
                 let v = self.prefs.view;
                 choices(v.sort, |sort| View { sort, ..v })
+            }
+            Popup::Choose(Choice::Firmware) => {
+                let releases = match &self.releases {
+                    Some(Ok(r)) => r.as_slice(),
+                    _ => &[],
+                };
+                let chosen = self.chosen_release().map(|r| r.tag.clone());
+                let mut rows: Vec<_> = releases
+                    .iter()
+                    .enumerate()
+                    .take(8)
+                    .map(|(i, r)| {
+                        let pre = if r.prerelease { " · pre-release" } else { "" };
+                        pick(
+                            r.tag.clone(),
+                            chosen.as_deref() == Some(r.tag.as_str())
+                                && !matches!(self.firmware_choice, FirmwareChoice::File(_)),
+                            Message::ChooseRelease(i),
+                        )
+                        .subtitle(format!("Released {}{pre}", r.date()))
+                    })
+                    .collect();
+                if self.prefs.any_firmware {
+                    rows.push(
+                        pick(
+                            "A file on this computer".into(),
+                            matches!(self.firmware_choice, FirmwareChoice::File(_)),
+                            Message::ChooseFirmwareFile,
+                        )
+                        .subtitle("Any firmware for the reader's chip"),
+                    );
+                }
+                rows
             }
             Popup::Choose(Choice::Graphics) => Graphics::choices()
                 .into_iter()
@@ -1578,6 +1728,10 @@ fn popup_actions(p: Popup) -> Vec<Row<Message>> {
         Popup::LowSpace { .. } => vec![
             Row::new(Kind::Item, "Convert anyway").on_press(Message::ConvertAnyway),
             Row::new(Kind::Item, "Save somewhere else").on_press(Message::ChooseSaveDirFromPopup),
+            Row::new(Kind::Item, "Cancel").on_press(Message::ClosePopup),
+        ],
+        Popup::InstallFirmware => vec![
+            Row::new(Kind::Item, "Install").on_press(Message::InstallFirmware),
             Row::new(Kind::Item, "Cancel").on_press(Message::ClosePopup),
         ],
         Popup::StopConversion => vec![

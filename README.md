@@ -50,8 +50,17 @@ Early. What works today:
   interruption, mirrors tried in turn, checked against their SHA-256), and
   copying archives to SD cards (into the card's `wiki` folder, where the
   e-reader looks for them, with FAT32's 4 GB limit checked first).
+- `xwa-flash`: installs the e-reader's firmware over USB, the way the
+  CrossPoint web installer does: the reader's partition table must be one
+  of the Xteink layouts (X4, X3 or X4 Pro), the firmware file must be a
+  whole ESP32 image for the reader's chip, and it goes into the app slot
+  not in use and is verified there before the OTA data is switched to boot
+  it. The bootloader, partition table, settings and SD card are never
+  touched, and the old firmware stays in the other slot. Firmware comes
+  from the GitHub releases of the reader's firmware (checked against the
+  SHA-256 GitHub gives), or, when allowed, from any firmware file.
 - `xwa-tool`: command line with `catalog`, `download`, `convert`, `copy`,
-  `info`, `verify`, `dump` and `title-index`.
+  `flash`, `info`, `verify`, `dump` and `title-index`.
 - `xwa-tool-gui`: a desktop app drawn as the e-reader itself. The window
   is the device (an X4 Pro, X4 or X3, in a black or white case) and its
   screen looks like e-ink and shows the firmware's own menus, fonts and
@@ -79,7 +88,14 @@ Early. What works today:
   changes the size; Ctrl 0 fits it to the screen again. Drag the device by
   its case to move it, or by its edges and corners to resize it. Settings
   has the device, the case colour, the size, how the window is drawn, the
-  e-ink refresh flash and the download folder.
+  e-ink refresh flash, the download folder, and "Allow other firmware".
+
+  "Firmware" on the home screen installs the latest release of the
+  e-reader's firmware (or another release) on the e-reader connected by
+  USB; with "Allow other firmware" on, it can install a firmware file
+  instead. On the X4 and X3 the reader restarts by itself; the X4 Pro's
+  ESP32-S3 cannot be restarted over USB, so it is unplugged and switched
+  on again.
 
   Should the window fail to draw as the app starts, the app starts again
   drawing it another way (on Windows DirectX 12, then Vulkan, OpenGL and
@@ -148,6 +164,9 @@ xwa-tool catalog --languages
 xwa-tool download wikipedia_en_ray-charles --flavour maxi --dir ~/Downloads
 xwa-tool copy wiki.xwa                      # to the SD card's wiki folder, if one card is inserted
 xwa-tool copy wiki.xwa --to /media/me/SDCARD  # into /media/me/SDCARD/wiki
+xwa-tool flash --list                         # firmware releases, and readers connected
+xwa-tool flash                                # the latest release, onto the reader on USB
+xwa-tool flash --file firmware.bin --any-firmware
 ```
 
 For ZIM and XWA files:

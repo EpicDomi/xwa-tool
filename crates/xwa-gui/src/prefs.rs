@@ -30,6 +30,8 @@ pub struct Prefs {
     /// Flash the screen black and white when it changes, as e-ink does on a
     /// full refresh.
     pub refresh_flash: bool,
+    /// Allow installing any valid firmware file, not only the releases.
+    pub any_firmware: bool,
     /// How to draw the window; automatic unless chosen in Settings.
     pub graphics: Graphics,
     /// The wiki the library browser lists, and how.
@@ -48,6 +50,7 @@ impl Default for Prefs {
             save_dir: None,
             language: None,
             refresh_flash: true,
+            any_firmware: false,
             graphics: Graphics::Auto,
             wiki: Wiki::default(),
             view: View::default(),
@@ -111,6 +114,7 @@ impl Prefs {
                 "saves" if !value.is_empty() => prefs.save_dir = Some(PathBuf::from(value)),
                 "language" if !value.is_empty() => prefs.language = Some(value.to_string()),
                 "refresh_flash" => prefs.refresh_flash = value != "off",
+                "any_firmware" => prefs.any_firmware = value == "on",
                 "graphics" => {
                     if let Some(g) = Graphics::from_key(value) {
                         prefs.graphics = g;
@@ -150,8 +154,9 @@ impl Prefs {
             out += &format!("language={l}\n");
         }
         out += &format!(
-            "refresh_flash={}\n",
-            if self.refresh_flash { "on" } else { "off" }
+            "refresh_flash={}\nany_firmware={}\n",
+            if self.refresh_flash { "on" } else { "off" },
+            if self.any_firmware { "on" } else { "off" }
         );
         if self.graphics != Graphics::Auto {
             out += &format!("graphics={}\n", self.graphics.key());
@@ -195,6 +200,7 @@ mod tests {
             save_dir: Some(PathBuf::from("/media/disk/wikis")),
             language: Some("fra".into()),
             refresh_flash: false,
+            any_firmware: true,
             graphics: Graphics::Software,
             wiki: Wiki::Wikivoyage,
             view: View {

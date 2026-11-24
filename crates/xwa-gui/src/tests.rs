@@ -195,6 +195,7 @@ fn the_home_menu_opens_each_screen() {
         Screen::Library,
         Screen::Convert,
         Screen::Card,
+        Screen::Firmware,
         Screen::Settings,
     ]
     .into_iter()
@@ -238,7 +239,7 @@ fn the_italic_pictures_turn_like_pages_and_back_returns_to_converting() {
 fn the_selection_goes_round_the_list_and_skips_what_cannot_be_chosen() {
     let mut app = app(Model::X4);
     press(&mut app, Key::Left);
-    assert_eq!(app.focus, 3, "up from the top goes to the bottom");
+    assert_eq!(app.focus, 4, "up from the top goes to the bottom");
     press(&mut app, Key::Right);
     assert_eq!(app.focus, 0);
 
@@ -1009,6 +1010,32 @@ fn screens() {
             missing_bytes: 110_000_000,
         });
         snap(&a, &dir, &format!("{tag}-settings"));
+        let _ = a.update(Message::Open(Screen::Firmware));
+        a.readers = Vec::new();
+        let release = |tag: &str, date: &str, pre: bool| xwa_flash::release::Release {
+            tag: tag.into(),
+            name: tag.into(),
+            published: format!("{date}T10:00:00Z"),
+            prerelease: pre,
+            assets: Vec::new(),
+        };
+        let _ = a.update(Message::FirmwareReleases(Ok(vec![
+            release("1.6.0.1-cpr-vcodex", "2026-12-03", true),
+            release("1.6.0.0-cpr-vcodex", "2026-12-01", false),
+            release("1.5.0.40-cpr-vcodex", "2026-11-20", false),
+        ])));
+        snap(&a, &dir, &format!("{tag}-firmware"));
+        let _ = a.update(Message::Choose(Choice::Firmware));
+        snap(&a, &dir, &format!("{tag}-firmware-choose"));
+        let _ = a.update(Message::ClosePopup);
+        a.install = running(0.42, 2, "Writing the firmware");
+        snap(&a, &dir, &format!("{tag}-firmware-installing"));
+        a.install = Job::Finished(Ok(
+            "Firmware 1.6.0.0-cpr-vcodex is installed on the Xteink X4. It is restarting.".into(),
+        ));
+        snap(&a, &dir, &format!("{tag}-firmware-done"));
+        a.install = Job::Idle;
+        let _ = a.update(Message::Open(Screen::Home));
         press(&mut a, Key::Power);
         snap(&a, &dir, &format!("{tag}-power"));
     }
@@ -1160,4 +1187,90 @@ fn settings_and_choices_a_newcomer_may_not_know_have_tips() {
     for title in ["Graphics", "Refresh flash", "Fonts for converting offline"] {
         assert!(tipped(&app, title), "{title}");
     }
+}
+
+#[test]
+fn firmware_comes_from_the_releases_unless_other_firmware_is_allowed() {
+    use crate::app::FirmwareChoice;
+    use xwa_flash::release::{Asset, Release};
+    let release = |tag: &str, pre: bool| Release {
+        tag: tag.into(),
+        name: tag.into(),
+        published: "2026-12-01T10:00:00Z".into(),
+        prerelease: pre,
+        assets: vec![Asset {
+            name: format!("{tag}.bin"),
+            url: "https://example.invalid/a.bin".into(),
+            size: 5_000_000,
+            sha256: None,
+        }],
+    };
+    let mut app = app(Model::X4);
+    let _ = app.update(Message::Open(Screen::Firmware));
+    let _ = app.update(Message::FirmwareReleases(Ok(vec![
+        release("1.6.0.1", true),
+        release("1.5.0.40", false),
+    ])));
+    let rows = |app: &App| app.page().rows;
+    let firmware = |app: &App| {
+        rows(app)
+            .into_iter()
+            .find(|r| r.title == "Firmware")
+            .unwrap()
+    };
+    // The latest that is not a pre-release.
+    assert_eq!(app.chosen_release().unwrap().tag, "1.5.0.40");
+    assert!(firmware(&app).subtitle.unwrap().contains("1.5.0.40"));
+    // No reader: nothing to install on.
+    assert!(!app.can_install());
+    let install = rows(&app)
+        .into_iter()
+        .find(|r| r.title == "Install")
+        .unwrap();
+    assert!(install.on_press.is_none());
+    // The list offers the releases, and a file only once allowed.
+    let _ = app.update(Message::Choose(Choice::Firmware));
+    let titles = |app: &App| {
+        app.popup_rows(app.popup.unwrap())
+            .into_iter()
+            .map(|r| r.title)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(titles(&app), ["1.6.0.1", "1.5.0.40"]);
+    let _ = app.update(Message::ChooseRelease(0));
+    assert_eq!(app.chosen_release().unwrap().tag, "1.6.0.1");
+    assert!(firmware(&app).subtitle.unwrap().contains("pre-release"));
+    // A file cannot be chosen while other firmware is not allowed.
+    let _ = app.update(Message::FirmwareFileChosen(Some(PathBuf::from(
+        "/x/fw.bin",
+    ))));
+    assert_ne!(
+        app.firmware_choice,
+        FirmwareChoice::File(PathBuf::from("/x/fw.bin"))
+    );
+    let _ = app.update(Message::ToggleAnyFirmware);
+    assert!(app.prefs.any_firmware);
+    let _ = app.update(Message::Choose(Choice::Firmware));
+    assert_eq!(
+        titles(&app).last().map(String::as_str),
+        Some("A file on this computer")
+    );
+    let _ = app.update(Message::ClosePopup);
+    let _ = app.update(Message::FirmwareFileChosen(Some(PathBuf::from(
+        "/x/fw.bin",
+    ))));
+    assert_eq!(firmware(&app).subtitle.as_deref(), Some("fw.bin"));
+    // Turning it off again goes back to the releases.
+    let _ = app.update(Message::ToggleAnyFirmware);
+    assert_eq!(app.firmware_choice, FirmwareChoice::Latest);
+    // Releases that cannot be had say so, and can be asked for again.
+    let _ = app.update(Message::FirmwareReleases(Err("it may be private".into())));
+    let row = firmware(&app);
+    assert!(
+        row.subtitle
+            .unwrap()
+            .starts_with("Could not get the releases")
+    );
+    assert_eq!(row.tip.as_deref(), Some("it may be private"));
+    assert!(matches!(row.on_press, Some(Message::LoadReleases)));
 }
