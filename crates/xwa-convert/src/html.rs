@@ -14,9 +14,9 @@ use scraper::node::Element;
 use scraper::{Html, Node};
 use unicode_normalization::{UnicodeNormalization, is_nfc};
 use xwa_format::content::{
-    Anchor, Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Place, Style,
-    Table, Tree, TreeNode, anchor_hash, heading_anchor_hash, is_no_break_space, plain_text,
-    tidy_pre,
+    Anchor, Article, Block, Cell, Formula, Infobox, InfoboxRow, Inline, ListKind, Place, Sidebar,
+    SidebarGroup, SidebarLink, Style, Table, Tree, TreeNode, anchor_hash, heading_anchor_hash,
+    is_no_break_space, plain_text, tidy_pre,
 };
 use xwa_format::records::article_flags;
 
@@ -72,6 +72,9 @@ pub struct Stats {
     pub tables: u64,
     /// Cladograms, kept as trees.
     pub trees: u64,
+    /// Sidebars kept for the article's menu, and their links.
+    pub sidebars: u64,
+    pub sidebar_links: u64,
     pub citations_dropped: u64,
 }
 
@@ -85,6 +88,8 @@ impl std::ops::AddAssign for Stats {
         self.images_skipped += o.images_skipped;
         self.tables += o.tables;
         self.trees += o.trees;
+        self.sidebars += o.sidebars;
+        self.sidebar_links += o.sidebar_links;
         self.citations_dropped += o.citations_dropped;
     }
 }
@@ -125,6 +130,7 @@ pub fn extract(
         resolver,
         tables: Vec::new(),
         infobox: None,
+        sidebars: Vec::new(),
         stats: Stats::default(),
         flags: 0,
         pending: Vec::new(),
@@ -189,6 +195,7 @@ pub fn extract(
         tables: cx.tables,
         infobox: cx.infobox,
         anchors: listed,
+        sidebars: cx.sidebars,
     };
     xwa_format::content::for_each_link_mut(&mut article, &mut |_, place| {
         if let Place::Section(n) = place
@@ -316,6 +323,11 @@ fn verdict_class(e: &Element) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// A series' navigation box: kept for the article's menu (spec 7.5).
+fn is_sidebar(e: &Element) -> bool {
+    has_class(e, "sidebar") || has_class(e, "vertical-navbox")
 }
 
 /// Elements that never carry article text.
@@ -508,6 +520,7 @@ struct Cx<'a> {
     resolver: &'a dyn Resolver,
     tables: Vec<Table>,
     infobox: Option<Infobox>,
+    sidebars: Vec<Sidebar>,
     stats: Stats,
     flags: u16,
     /// Anchor hashes of places in this article that links wait for.
@@ -545,6 +558,10 @@ impl Cx<'_> {
         };
         if e.name() == "meta" && e.attr("property") == Some("mw:PageProp/disambiguation") {
             self.flags |= article_flags::DISAMBIGUATION;
+        }
+        if is_sidebar(e) && self.in_cell == 0 {
+            self.sidebar(node);
+            return;
         }
         if is_chrome(e) {
             self.count_dropped(node, e);
@@ -1394,6 +1411,119 @@ impl Cx<'_> {
         }
     }
 
+    /// Where a link in a sidebar leads, if to another article in the
+    /// archive.
+    fn sidebar_target(&mut self, e: &Element) -> Option<(u32, Place)> {
+        let internal = e
+            .attr("rel")
+            .is_some_and(|r| r.split_whitespace().any(|t| t == "mw:WikiLink"));
+        if !internal || has_class(e, "mw-selflink") {
+            return None;
+        }
+        let target = resolve_href(self.path, e.attr("href")?)?;
+        let article = self.resolver.article(&target.path)?;
+        if article == self.self_id {
+            return None;
+        }
+        let place = match target.fragment {
+            Some(f) => Place::Anchor(anchor_hash(&f)),
+            None => self
+                .resolver
+                .anchor(&target.path)
+                .map_or(Place::TOP, Place::Anchor),
+        };
+        Some((article, place))
+    }
+
+    /// A sidebar ("Part of a series on ..."): its title, and its links that
+    /// lead to other articles here, grouped under its headings. Kept for
+    /// the article's menu rather than in the text; one with fewer than two
+    /// such links is left out.
+    fn sidebar(&mut self, node: NodeRef<'_, Node>) {
+        struct Walk {
+            title: Vec<String>,
+            groups: Vec<SidebarGroup>,
+            seen: std::collections::HashSet<(u32, Place)>,
+        }
+        fn line(n: NodeRef<'_, Node>) -> String {
+            xwa_format::content::tidy_line(&text_content(n)).into_owned()
+        }
+        fn walk(cx: &mut Cx<'_>, n: NodeRef<'_, Node>, w: &mut Walk) {
+            for c in n.children() {
+                let Some(e) = element(&c) else { continue };
+                if has_class(e, "sidebar-navbar")
+                    || has_class(e, "navbar")
+                    || has_class(e, "sidebar-image")
+                    || has_class(e, "sidebar-top-image")
+                    || (is_chrome(e) && !is_sidebar(e))
+                {
+                    continue;
+                }
+                let title = [
+                    "sidebar-pretitle",
+                    "sidebar-pretitle-with-top-image",
+                    "sidebar-title",
+                    "sidebar-title-with-pretitle",
+                    "sidebar-outer-title",
+                    "sidebar-person-title",
+                ]
+                .iter()
+                .any(|k| has_class(e, k));
+                if title {
+                    let t = line(c);
+                    if !t.is_empty() {
+                        w.title.push(t);
+                    }
+                } else if has_class(e, "sidebar-heading") || has_class(e, "sidebar-list-title") {
+                    w.groups.push(SidebarGroup {
+                        heading: line(c),
+                        links: Vec::new(),
+                    });
+                } else if e.name() == "a" {
+                    if let Some((article, place)) = cx.sidebar_target(e) {
+                        let label = line(c);
+                        if !label.is_empty() && w.seen.insert((article, place)) {
+                            w.groups.last_mut().unwrap().links.push(SidebarLink {
+                                label,
+                                article,
+                                place,
+                            });
+                        }
+                    }
+                    continue;
+                }
+                walk(cx, c, w);
+            }
+        }
+        let mut w = Walk {
+            title: Vec::new(),
+            groups: vec![SidebarGroup::default()],
+            seen: Default::default(),
+        };
+        // A link in the title (the series' main article) comes first.
+        walk(self, node, &mut w);
+        w.groups.retain(|g| !g.links.is_empty());
+        let links: usize = w.groups.iter().map(|g| g.links.len()).sum();
+        if links < 2 {
+            return;
+        }
+        let mut title = w.title.join(" ");
+        if title.is_empty() {
+            title = "Related articles".to_string();
+        }
+        let sidebar = Sidebar {
+            title,
+            groups: w.groups,
+        };
+        // Some pages place the same sidebar twice.
+        if self.sidebars.contains(&sidebar) {
+            return;
+        }
+        self.stats.sidebars += 1;
+        self.stats.sidebar_links += links as u64;
+        self.sidebars.push(sidebar);
+    }
+
     fn link(&mut self, node: NodeRef<'_, Node>, e: &Element, out: &mut Vec<Inline>) {
         let mut content = Vec::new();
         self.inline_children(node, &mut content);
@@ -2090,6 +2220,64 @@ mod tests {
 
     fn text(s: &str) -> Inline {
         Inline::Text(s.to_string())
+    }
+
+    #[test]
+    fn sidebars_keep_their_links_for_the_menu() {
+        let sidebar = r#"<table class="sidebar nomobile nowraplinks" role="navigation"><tbody>
+            <tr><td class="sidebar-pretitle">Part of a series on</td></tr>
+            <tr><th class="sidebar-title-with-pretitle"><a rel="mw:WikiLink" href="Mathematics">Mathematics</a></th></tr>
+            <tr><td class="sidebar-image"><a rel="mw:WikiLink" href="Euclid's_Elements"><img src="./_assets_/x/logo.png"></a></td></tr>
+            <tr><td class="sidebar-content hlist"><ul>
+              <li><a rel="mw:WikiLink" href="Geometry">Geometry</a></li>
+              <li>Topology</li>
+              <li><a class="mw-selflink selflink" rel="mw:WikiLink" href="Self">Self</a></li>
+              <li><a rel="mw:WikiLink" href="Missing">Missing</a></li></ul></td></tr>
+            <tr><th class="sidebar-heading">Calls</th></tr>
+            <tr><td class="sidebar-content"><div class="sidebar-list"><div class="sidebar-list-title">More  calls</div>
+              <div class="sidebar-list-content"><a rel="mw:WikiLink" href="Frog_call">Frog call</a> ·
+              <a rel="mw:WikiLink" href="Geometry">Geometry again</a></div></div></td></tr>
+            <tr><td class="sidebar-navbar"><a rel="mw:WikiLink" href="Mathematics">v</a></td></tr>
+            </tbody></table>"#;
+        let thin = r#"<table class="sidebar"><tr><th class="sidebar-title">Thin</th></tr>
+            <tr><td class="sidebar-content"><a rel="mw:WikiLink" href="Geometry">Only one</a></td></tr></table>"#;
+        let x = run(&format!("{sidebar}<p>Body.</p>{sidebar}{thin}"));
+        assert_eq!(x.article.body, vec![Block::Para(vec![text("Body.")])]);
+        // Once, though the page has it twice; the one with a single link
+        // is left out.
+        assert_eq!(
+            x.article.sidebars,
+            vec![Sidebar {
+                title: "Part of a series on Mathematics".into(),
+                groups: vec![
+                    SidebarGroup {
+                        heading: String::new(),
+                        links: vec![
+                            SidebarLink {
+                                label: "Mathematics".into(),
+                                article: 3,
+                                place: Place::TOP
+                            },
+                            SidebarLink {
+                                label: "Geometry".into(),
+                                article: 5,
+                                place: Place::TOP
+                            },
+                        ]
+                    },
+                    SidebarGroup {
+                        heading: "More calls".into(),
+                        links: vec![SidebarLink {
+                            label: "Frog call".into(),
+                            article: 5,
+                            place: Place::Anchor(anchor_hash("Call"))
+                        }]
+                    },
+                ]
+            }]
+        );
+        assert_eq!((x.stats.sidebars, x.stats.sidebar_links), (1, 3));
+        assert!(xwa_format::content::text_problems(&x.article).is_empty());
     }
 
     #[test]

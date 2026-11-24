@@ -286,6 +286,30 @@ pub struct Infobox {
     pub rows: Vec<InfoboxRow>,
 }
 
+/// A sidebar ("Part of a series on ..."): the links of a series' navigation
+/// box, which readers list in the article's menu (spec 7.5).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Sidebar {
+    /// A tidy line, kept in the article header.
+    pub title: String,
+    pub groups: Vec<SidebarGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SidebarGroup {
+    /// A tidy line; empty for links before the first heading.
+    pub heading: String,
+    pub links: Vec<SidebarLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarLink {
+    /// A tidy line, never empty.
+    pub label: String,
+    pub article: u32,
+    pub place: Place,
+}
+
 /// Everything stored for one article.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Article {
@@ -293,6 +317,7 @@ pub struct Article {
     pub body: Vec<Block>,
     pub tables: Vec<Table>,
     pub infobox: Option<Infobox>,
+    pub sidebars: Vec<Sidebar>,
     /// Named places other than what [`heading_anchors`] derives from the
     /// headings (spec 7.2): anchors inside sections, and headings whose
     /// anchor is not the derived one.
@@ -326,6 +351,15 @@ pub struct ArticleHeader {
     pub table_pos: Vec<u32>,
     pub infobox_pos: Option<u32>,
     pub anchors: Vec<Anchor>,
+    pub sidebars: Vec<SidebarEntry>,
+}
+
+/// A sidebar as the article header lists it: its title, and where its
+/// record is (from the first byte of the body).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarEntry {
+    pub title: String,
+    pub pos: u32,
 }
 
 /// The hash anchors are stored and looked up by (spec 7.2): 32-bit FNV-1a
@@ -576,6 +610,25 @@ pub fn text_problems(a: &Article) -> Vec<String> {
             run(&c.content, &mut problems);
         }
         run(&t.caption, &mut problems);
+    }
+    for sb in &a.sidebars {
+        let links: usize = sb.groups.iter().map(|g| g.links.len()).sum();
+        if links < 2 || sb.groups.iter().any(|g| g.links.is_empty()) {
+            problems.push(format!(
+                "sidebar {:?} has an empty group or fewer than two links",
+                sb.title
+            ));
+        }
+        let lines =
+            std::iter::once(("sidebar title", &sb.title)).chain(sb.groups.iter().flat_map(|g| {
+                std::iter::once(("sidebar heading", &g.heading))
+                    .chain(g.links.iter().map(|l| ("sidebar link", &l.label)))
+            }));
+        for (what, line) in lines {
+            if !is_tidy_line(line) || (what != "sidebar heading" && line.is_empty()) {
+                problems.push(format!("{what} {line:?} is empty or not a tidy line"));
+            }
+        }
     }
     if let Some(ib) = &a.infobox {
         for row in &ib.rows {
@@ -851,6 +904,28 @@ fn encode_table(out: &mut Vec<u8>, t: &Table) {
     encode_run(out, &t.caption);
 }
 
+fn encode_sidebar(out: &mut Vec<u8>, sb: &Sidebar) {
+    varint::put(out, sb.groups.len() as u64);
+    for g in &sb.groups {
+        put_str(out, &g.heading);
+        varint::put(out, g.links.len() as u64);
+        for l in &g.links {
+            put_str(out, &l.label);
+            varint::put(out, l.article as u64);
+            match l.place {
+                Place::Section(s) => {
+                    out.push(0);
+                    varint::put(out, s as u64);
+                }
+                Place::Anchor(h) => {
+                    out.push(1);
+                    out.extend_from_slice(&h.to_le_bytes());
+                }
+            }
+        }
+    }
+}
+
 fn encode_infobox(out: &mut Vec<u8>, ib: &Infobox) {
     varint::put(out, ib.rows.len() as u64);
     for row in &ib.rows {
@@ -902,6 +977,11 @@ pub fn encode_article(a: &Article) -> Vec<u8> {
         encode_infobox(&mut tail, ib);
         pos
     });
+    let mut sidebar_pos = Vec::with_capacity(a.sidebars.len());
+    for sb in &a.sidebars {
+        sidebar_pos.push((body.len() + tail.len()) as u32);
+        encode_sidebar(&mut tail, sb);
+    }
 
     let mut header = Vec::new();
     put_str(&mut header, &a.title);
@@ -921,6 +1001,11 @@ pub fn encode_article(a: &Article) -> Vec<u8> {
     for anchor in &a.anchors {
         header.extend_from_slice(&anchor.hash.to_le_bytes());
         varint::put(&mut header, anchor.section as u64);
+    }
+    varint::put(&mut header, a.sidebars.len() as u64);
+    for (sb, pos) in a.sidebars.iter().zip(&sidebar_pos) {
+        put_str(&mut header, &sb.title);
+        varint::put(&mut header, *pos as u64);
     }
 
     let mut out = Vec::with_capacity(8 + header.len() + body.len() + tail.len());
@@ -1308,6 +1393,33 @@ fn decode_table(c: &mut Cursor) -> Result<Table> {
     Ok(t)
 }
 
+/// A sidebar record; its title comes from the header.
+fn decode_sidebar(c: &mut Cursor, title: String) -> Result<Sidebar> {
+    let n = c.count()?;
+    let mut groups = Vec::with_capacity(n);
+    for _ in 0..n {
+        let heading = c.string()?;
+        let m = c.count()?;
+        let mut links = Vec::with_capacity(m);
+        for _ in 0..m {
+            let label = c.string()?;
+            let article = c.u32v()?;
+            let place = match c.u8()? {
+                0 => Place::Section(c.u32v()?),
+                1 => Place::Anchor(c.u32le()?),
+                k => return Err(corrupt(format!("unknown sidebar link place {k}"))),
+            };
+            links.push(SidebarLink {
+                label,
+                article,
+                place,
+            });
+        }
+        groups.push(SidebarGroup { heading, links });
+    }
+    Ok(Sidebar { title, groups })
+}
+
 fn decode_infobox(c: &mut Cursor) -> Result<Infobox> {
     let n = c.count()?;
     let mut rows = Vec::with_capacity(n);
@@ -1365,6 +1477,14 @@ pub fn decode_header(payload: &[u8]) -> Result<(ArticleHeader, usize)> {
             section: c.u32v()?,
         });
     }
+    let n = c.count()?;
+    let mut sidebars = Vec::with_capacity(n);
+    for _ in 0..n {
+        sidebars.push(SidebarEntry {
+            title: c.string()?,
+            pos: c.u32v()?,
+        });
+    }
     Ok((
         ArticleHeader {
             title,
@@ -1373,6 +1493,7 @@ pub fn decode_header(payload: &[u8]) -> Result<(ArticleHeader, usize)> {
             table_pos,
             infobox_pos,
             anchors,
+            sidebars,
         },
         c.pos,
     ))
@@ -1401,12 +1522,18 @@ pub fn decode_article(payload: &[u8]) -> Result<Article> {
         .infobox_pos
         .map(|p| decode_infobox(&mut at(p)?))
         .transpose()?;
+    let sidebars = h
+        .sidebars
+        .into_iter()
+        .map(|e| decode_sidebar(&mut at(e.pos)?, e.title))
+        .collect::<Result<Vec<_>>>()?;
     Ok(Article {
         title: h.title,
         body,
         tables,
         infobox,
         anchors: h.anchors,
+        sidebars,
     })
 }
 
@@ -1467,6 +1594,11 @@ pub fn for_each_link_mut(a: &mut Article, f: &mut impl FnMut(u32, &mut Place)) {
                     inlines(value, f);
                 }
             }
+        }
+    }
+    for sb in &mut a.sidebars {
+        for l in sb.groups.iter_mut().flat_map(|g| &mut g.links) {
+            f(l.article, &mut l.place);
         }
     }
 }
@@ -1554,6 +1686,13 @@ pub fn for_each_styled_text<'a>(a: &'a Article, f: &mut impl FnMut(&'a str, Font
             }
         }
     }
+    for sb in &a.sidebars {
+        f(&sb.title, FontStyle::Bold);
+        for g in &sb.groups {
+            f(&g.heading, FontStyle::Bold);
+            g.links.iter().for_each(|l| f(&l.label, FontStyle::Regular));
+        }
+    }
 }
 
 /// Calls `f` for every reference in the article, in document order.
@@ -1624,6 +1763,11 @@ pub fn walk_refs<'a>(a: &'a Article, f: &mut impl FnMut(Ref<'a>)) {
                     inlines(value, f);
                 }
             }
+        }
+    }
+    for sb in &a.sidebars {
+        for l in sb.groups.iter().flat_map(|g| &g.links) {
+            f(Ref::Link(l.article, l.place));
         }
     }
 }
@@ -1784,6 +1928,27 @@ mod tests {
                     ],
                 },
             ],
+            sidebars: vec![Sidebar {
+                title: "Part of a series on Geometry".into(),
+                groups: vec![
+                    SidebarGroup {
+                        heading: String::new(),
+                        links: vec![SidebarLink {
+                            label: "Geometry".into(),
+                            article: 9,
+                            place: Place::TOP,
+                        }],
+                    },
+                    SidebarGroup {
+                        heading: "Theorems".into(),
+                        links: vec![SidebarLink {
+                            label: "Thales's theorem".into(),
+                            article: 81,
+                            place: Place::Anchor(anchor_hash("Proof")),
+                        }],
+                    },
+                ],
+            }],
             tables: vec![Table {
                 caption: vec![
                     text("Areas of the "),
@@ -1902,7 +2067,7 @@ mod tests {
         assert_eq!(images, vec![4, 2, 1, 4, 5, 6, 8, 7]);
         assert_eq!(
             (links, formulas, tables, infoboxes),
-            (vec![12, 70_000, 3, 44], 2, vec![0], 1)
+            (vec![12, 70_000, 3, 44, 9, 81], 2, vec![0], 1)
         );
     }
 

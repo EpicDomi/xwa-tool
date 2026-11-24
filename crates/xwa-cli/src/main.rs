@@ -365,6 +365,10 @@ fn convert(zim: &Path, out: Option<PathBuf>, opts: &xwa_convert::Options) -> Cli
         r.stats.links, r.stats.unresolved_links, r.stats.tables, r.stats.trees
     );
     println!(
+        "  sidebars: {} kept for the article menu, with {} links",
+        r.stats.sidebars, r.stats.sidebar_links
+    );
+    println!(
         "  pictures: {} stored ({:.1} MB) for {} places in articles; {} left out",
         s.images,
         mb(s.image_bytes),

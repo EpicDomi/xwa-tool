@@ -17,6 +17,29 @@ pub fn article_text(a: &Article, title_of: &dyn Fn(u32) -> Option<String>) -> St
     };
     let _ = writeln!(r.out, "# {}", a.title);
     r.blocks(&a.body, "");
+    for sb in &a.sidebars {
+        let _ = writeln!(r.out, "[sidebar: {}]", sb.title);
+        for g in &sb.groups {
+            let links: Vec<String> = g
+                .links
+                .iter()
+                .map(|l| {
+                    r.inlines(&[Inline::Link {
+                        article: l.article,
+                        place: l.place,
+                        content: vec![Inline::Text(l.label.clone())],
+                    }])
+                })
+                .collect();
+            let lead = if g.heading.is_empty() {
+                String::new()
+            } else {
+                format!("{}: ", g.heading)
+            };
+            let _ = writeln!(r.out, "  {lead}{}", links.join(" · "));
+        }
+        r.out.push('\n');
+    }
     r.out
 }
 
