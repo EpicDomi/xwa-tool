@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use iced::border::Border;
 use iced::widget::{
-    Space, button, canvas, column, container, image, mouse_area, opaque, pin, row, space, stack,
-    tooltip,
+    Space, button, canvas, column, container, image, mouse_area, opaque, pin, row, scrollable,
+    space, stack, tooltip,
 };
 use iced::{Alignment, Background, Element, Length, Padding, Shadow, mouse};
 use xwa_fetch::size_text;
@@ -116,6 +116,169 @@ impl App {
             Screen::Downloads => self.downloads_page(),
             Screen::Italic => self.italic_page(),
             Screen::Firmware => self.firmware_page(),
+            Screen::Read => self.read_page(),
+            Screen::Article => self.article_page(),
+            Screen::Contents => self.contents_page(),
+            Screen::Table => self.table_page(),
+        }
+    }
+
+    fn read_page(&self) -> Page {
+        let Some(wiki) = &self.wiki else {
+            return Page {
+                title: "Read".into(),
+                subtitle: None,
+                back: true,
+                top: 0.0,
+                bottom: 0.0,
+                rows: vec![
+                    Row::new(Kind::Item, "Open an archive")
+                        .icon(&icons::FOLDER)
+                        .opens()
+                        .on_press(Message::ChooseWiki),
+                ],
+                note: Some(match &self.wiki_error {
+                    Some(e) => format!("That archive would not open: {e}"),
+                    None => {
+                        "Open an archive (an .xwa file) to read it as the e-reader shows it.".into()
+                    }
+                }),
+                hints: LIST_HINTS,
+            };
+        };
+        let searching = !self.wiki_search.trim().is_empty();
+        let rows: Vec<Row<Message>> = if searching {
+            self.wiki_hits
+                .iter()
+                .map(|h| {
+                    let place = match h.anchor {
+                        Some(a) => xwa_format::content::Place::Anchor(a),
+                        None => xwa_format::content::Place::TOP,
+                    };
+                    Row::new(Kind::Item, h.display.clone()).on_press(Message::WikiLink(
+                        crate::read::layout::Link {
+                            article: h.article,
+                            place,
+                        },
+                    ))
+                })
+                .collect()
+        } else {
+            let mut rows = Vec::new();
+            if let Some(r) = &self.reading {
+                rows.push(
+                    Row::new(Kind::Item, "Carry on reading")
+                        .subtitle(r.title.clone())
+                        .on_press(Message::Open(Screen::Article)),
+                );
+            }
+            if let Some(id) = wiki.main_article() {
+                rows.push(
+                    Row::new(Kind::Item, "Main page")
+                        .subtitle(wiki.article_title(id))
+                        .on_press(Message::WikiOpen(id, 0)),
+                );
+            }
+            let today = chrono::Local::now();
+            use chrono::Datelike;
+            if let Some(id) = wiki.today(today.month(), today.day()) {
+                rows.push(
+                    Row::new(Kind::Item, "On this day")
+                        .subtitle(wiki.article_title(id))
+                        .on_press(Message::WikiOpen(id, 0)),
+                );
+            }
+            rows.push(Row::new(Kind::Item, "Random article").on_press(Message::WikiRandom));
+            rows.push(
+                Row::new(Kind::Item, "Open another archive")
+                    .icon(&icons::FOLDER)
+                    .opens()
+                    .on_press(Message::ChooseWiki),
+            );
+            rows
+        };
+        let note = match (&self.wiki_error, searching && rows.is_empty()) {
+            (Some(e), _) => Some(format!("That article would not open: {e}")),
+            (None, true) => Some("No titles start with that.".into()),
+            (None, false) => None,
+        };
+        Page {
+            title: wiki.title.clone(),
+            subtitle: Some(format!("{} articles", group(wiki.articles as u64))),
+            back: true,
+            top: FIELD_TOP,
+            bottom: 0.0,
+            rows,
+            note,
+            hints: LIST_HINTS,
+        }
+    }
+
+    fn article_page(&self) -> Page {
+        let (title, subtitle) = match &self.reading {
+            Some(r) => (
+                r.title.clone(),
+                Some(format!("{} of {}", r.page + 1, r.laid.pages.len().max(1))),
+            ),
+            None => ("Read".into(), None),
+        };
+        let (_, h) = self.reading_size();
+        Page {
+            title,
+            subtitle,
+            back: true,
+            top: h + 20.0,
+            bottom: 0.0,
+            rows: Vec::new(),
+            note: None,
+            hints: ["« Back", "Contents", "Prev", "Next"],
+        }
+    }
+
+    fn table_page(&self) -> Page {
+        let (_, h) = self.reading_size();
+        Page {
+            title: "Table".into(),
+            subtitle: self.reading.as_ref().map(|r| r.title.clone()),
+            back: true,
+            top: h + 20.0,
+            bottom: 0.0,
+            rows: Vec::new(),
+            note: None,
+            hints: ["« Back", "Across", "Up", "Down"],
+        }
+    }
+
+    fn contents_page(&self) -> Page {
+        let Some(r) = &self.reading else {
+            return Page {
+                title: "Contents".into(),
+                subtitle: None,
+                back: true,
+                top: 0.0,
+                bottom: 0.0,
+                rows: Vec::new(),
+                note: None,
+                hints: LIST_HINTS,
+            };
+        };
+        let mut rows = vec![Row::new(Kind::Item, "Top").on_press(Message::WikiSection(0))];
+        for (i, (level, text)) in r.toc.iter().enumerate() {
+            let indent = "    ".repeat(level.saturating_sub(2) as usize);
+            rows.push(
+                Row::new(Kind::Item, format!("{indent}{text}"))
+                    .on_press(Message::WikiSection(i + 1)),
+            );
+        }
+        Page {
+            title: "Contents".into(),
+            subtitle: Some(r.title.clone()),
+            back: true,
+            top: 0.0,
+            bottom: 0.0,
+            rows,
+            note: None,
+            hints: LIST_HINTS,
         }
     }
 
@@ -181,6 +344,24 @@ impl App {
                              e-reader to it, first.",
                         )
                         .on_press(Message::Open(Screen::Card)),
+                ),
+                Some(
+                    Row::new(Kind::Menu, "Read")
+                        .icon(&icons::BOOK)
+                        .subtitle(match &self.wiki {
+                            Some(w) => w.title.clone(),
+                            None => "See an archive as the e-reader shows it".into(),
+                        })
+                        .tip(
+                            "Open an archive and read it here, laid out in pages as the \
+                             e-reader shows it: search, follow links, and see its pictures, \
+                             tables and formulas before copying it to the card.",
+                        )
+                        .on_press(match (&self.wiki, &self.archive) {
+                            // The archive just made or copied, unless one is open.
+                            (None, Some(a)) => Message::WikiChosen(Some(a.clone())),
+                            _ => Message::Open(Screen::Read),
+                        }),
                 ),
                 Some(
                     Row::new(Kind::Menu, "Firmware")
@@ -968,6 +1149,72 @@ impl App {
                 Some(Message::Submit),
                 SEARCH_ID,
             )),
+            Screen::Read if self.wiki.is_some() => search(eink::field(
+                "Search titles",
+                &self.wiki_search,
+                Message::WikiSearch,
+                Some(Message::Submit),
+                SEARCH_ID,
+            )),
+            Screen::Article => match (&self.wiki, &self.reading) {
+                (Some(wiki), Some(r)) => {
+                    let (rw, rh) = self.reading_size();
+                    container(
+                        canvas(crate::read::draw::PageView {
+                            wiki,
+                            laid: &r.laid,
+                            page: r.page,
+                            on_link: Message::WikiTarget,
+                        })
+                        .width(rw)
+                        .height(rh),
+                    )
+                    .padding(Padding {
+                        top: 12.0,
+                        bottom: 8.0,
+                        left: SIDE,
+                        right: SIDE,
+                    })
+                    .into()
+                }
+                _ => Space::new().into(),
+            },
+            Screen::Table => match (&self.wiki, &self.reading_table) {
+                (Some(wiki), Some(t)) => {
+                    let (rw, rh) = self.reading_size();
+                    let title = paragraph(t.title.clone(), Face::UiBold, BODY);
+                    let table = canvas(crate::read::draw::PageView {
+                        wiki,
+                        laid: &t.laid,
+                        page: 0,
+                        on_link: Message::WikiTarget,
+                    })
+                    .width(t.width)
+                    .height(t.height);
+                    container(
+                        column![
+                            title,
+                            scrollable(table)
+                                .id(crate::app::TABLE_ID)
+                                .direction(scrollable::Direction::Both {
+                                    vertical: scrollable::Scrollbar::new().width(4).scroller_width(4),
+                                    horizontal: scrollable::Scrollbar::new().width(4).scroller_width(4),
+                                })
+                                .width(rw)
+                                .height(rh - 34.0),
+                        ]
+                        .spacing(8),
+                    )
+                    .padding(Padding {
+                        top: 10.0,
+                        bottom: 8.0,
+                        left: SIDE,
+                        right: SIDE,
+                    })
+                    .into()
+                }
+                _ => Space::new().into(),
+            },
             Screen::Languages => search(eink::field(
                 "Search languages",
                 &self.language_search,

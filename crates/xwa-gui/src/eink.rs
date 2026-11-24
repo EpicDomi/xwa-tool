@@ -39,6 +39,19 @@ pub const SMALL_FONT: Font = Font::with_name("Noto Sans");
 pub const UBUNTU_REGULAR: &[u8] = include_bytes!("../fonts/Ubuntu-Regular.ttf");
 pub const UBUNTU_BOLD: &[u8] = include_bytes!("../fonts/Ubuntu-Bold.ttf");
 pub const NOTO_SANS: &[u8] = include_bytes!("../fonts/NotoSans-Regular.ttf");
+pub const NOTO_SANS_BOLD: &[u8] = include_bytes!("../fonts/NotoSans-Bold.ttf");
+pub const NOTO_SANS_ITALIC: &[u8] = include_bytes!("../fonts/NotoSans-Italic.ttf");
+pub const NOTO_SANS_BOLD_ITALIC: &[u8] = include_bytes!("../fonts/NotoSans-BoldItalic.ttf");
+/// Every font the app draws with: its own, and the e-reader's (Noto Sans)
+/// for reading archives.
+pub const FONTS: [&[u8]; 6] = [
+    UBUNTU_REGULAR,
+    UBUNTU_BOLD,
+    NOTO_SANS,
+    NOTO_SANS_BOLD,
+    NOTO_SANS_ITALIC,
+    NOTO_SANS_BOLD_ITALIC,
+];
 
 /// Ubuntu 10 pt, for list rows and body text.
 pub const BODY: f32 = 10.0 * 150.0 / 72.0;

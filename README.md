@@ -65,6 +65,17 @@ Installs the latest firmware release over USB, safely: the firmware it replaces 
 
 </td>
 </tr>
+<tr>
+<td width="50%" valign="top">
+
+**📖 Read**<br>
+Opens an archive in the app and shows its articles in pages, as the reader does: search, follow links, and check pictures, tables, formulas and cladograms before copying it to the card.
+
+</td>
+<td width="50%" valign="top">
+
+</td>
+</tr>
 </table>
 
 ## Getting started
@@ -123,6 +134,18 @@ The window *is* the reader: an X4 Pro, X4 or X3, in a black or white case. Its s
 </p>
 
 **Copy to SD card** puts an archive on a card. If an archive was converted offline and is missing some glyphs, it offers to complete its font in place.
+
+<p align="center">
+  <img src="docs/images/read.png" alt="Read: searching an archive, an article with its formulas, and a cladogram with its pictures" width="840">
+</p>
+
+**Read** opens an archive (the one you just made, or any other) and shows it as the reader would.
+- **Search** lists titles as you type, the most popular first.
+- **Ways in:** *Main page*, *On this day* and *Random article*.
+- **Pages:** articles are laid out in pages at the reader's size with the reader's font (Noto Sans). The arrow keys or the scroll wheel turn them, and *Contents* jumps to a section.
+- **What's drawn:** formulas are vector math, characters the reader's fonts lack come from the archive's own font, and cladograms draw as trees with their pictures.
+- **Links:** clicking one opens its article at the right section, and *Back* returns to where you were.
+- **Wide tables:** a table too wide for the page opens on its own screen, where it scrolls both ways.
 
 **Firmware** installs the latest firmware release, or another you choose, on the reader connected by USB ([details](#installing-firmware)).
 

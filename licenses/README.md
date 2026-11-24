@@ -12,8 +12,9 @@ the glyphs their formulas use; the OFL does not cover documents made with
 the fonts.
 
 The app draws its screen in the e-reader firmware's fonts, Ubuntu (Ubuntu
-Font Licence 1.0, `Ubuntu-font-UFL.txt`) and Noto Sans (SIL Open Font
-License 1.1, `NotoSans-OFL.txt`), with icons from the CPR-vCodex firmware
+Font Licence 1.0, `Ubuntu-font-UFL.txt`) and Noto Sans (regular, bold,
+italic and bold italic, for reading archives; SIL Open Font License 1.1,
+`NotoSans-OFL.txt`), with icons from the CPR-vCodex firmware
 and Wikipedia's globe from Kiwix's Wikipedia files. Its pictures of
 italic (`crates/xwa-gui/assets/italic-*.png`) are the CPR-vCodex
 simulator's drawings of text from the English Wikipedia article "Kosmas

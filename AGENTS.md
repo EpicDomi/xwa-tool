@@ -29,10 +29,13 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   and sorts of the library browser), `downloads.rs` (the download queue),
   `graphics.rs` (which renderer draws the window, and starting again
   another way when one fails), `crash.rs` (the crash report and dialog),
-  `prefs.rs` (remembered choices). `XWA_GUI_SCREENS=DIR cargo test -p
+  `prefs.rs` (remembered choices), `read/` (reading an archive in the app:
+  `layout.rs` lays articles out in pages, as the firmware does, and
+  `draw.rs` draws them on a canvas). `XWA_GUI_SCREENS=DIR cargo test -p
   xwa-gui -- --ignored screens` draws every screen of every model into
-  `DIR` (`XWA_GUI_ZIM` adds a real ZIM, `XWA_GUI_ONLY` picks screens by
-  name).
+  `DIR` (`XWA_GUI_ZIM` adds a real ZIM, `XWA_GUI_XWA` an archive to read
+  with `XWA_GUI_READ=Title:0,3;Other:1` choosing articles and pages,
+  `XWA_GUI_ONLY` picks screens by name).
 - `vendor/iced_wgpu`, `vendor/iced_winit`: iced's wgpu renderer and window
   shell with small patches, used through `[patch.crates-io]`: a transparent
   window on Windows, resizing that works on Wayland (KDE), and windows that
