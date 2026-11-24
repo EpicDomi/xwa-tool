@@ -192,6 +192,7 @@ fn article(id: u32) -> Article {
         tables,
         infobox,
         anchors,
+        sidebars: Vec::new(),
     }
 }
 
