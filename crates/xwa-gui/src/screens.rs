@@ -120,6 +120,7 @@ impl App {
             Screen::Article => self.article_page(),
             Screen::Contents => self.contents_page(),
             Screen::Table => self.table_page(),
+            Screen::Sidebar => self.sidebar_page(),
         }
     }
 
@@ -262,7 +263,21 @@ impl App {
                 hints: LIST_HINTS,
             };
         };
-        let mut rows = vec![Row::new(Kind::Item, "Top").on_press(Message::WikiSection(0))];
+        // The article's sidebars first: few, and easily missed below a long
+        // list of sections.
+        let mut rows: Vec<Row<Message>> = r
+            .sidebars
+            .iter()
+            .enumerate()
+            .map(|(i, sb)| {
+                let links: usize = sb.groups.iter().map(|g| g.links.len()).sum();
+                Row::new(Kind::Item, sb.title.clone())
+                    .subtitle(format!("{links} articles"))
+                    .opens()
+                    .on_press(Message::WikiSidebar(i))
+            })
+            .collect();
+        rows.push(Row::new(Kind::Item, "Top").on_press(Message::WikiSection(0)));
         for (i, (level, text)) in r.toc.iter().enumerate() {
             let indent = "    ".repeat(level.saturating_sub(2) as usize);
             rows.push(
@@ -272,6 +287,62 @@ impl App {
         }
         Page {
             title: "Contents".into(),
+            subtitle: Some(r.title.clone()),
+            back: true,
+            top: 0.0,
+            bottom: 0.0,
+            rows,
+            note: None,
+            hints: LIST_HINTS,
+        }
+    }
+
+    fn sidebar_page(&self) -> Page {
+        let sidebar = self
+            .reading
+            .as_ref()
+            .and_then(|r| Some((r, r.sidebars.get(self.reading_sidebar)?)));
+        let Some((r, sb)) = sidebar else {
+            return Page {
+                title: "Series".into(),
+                subtitle: None,
+                back: true,
+                top: 0.0,
+                bottom: 0.0,
+                rows: Vec::new(),
+                note: None,
+                hints: LIST_HINTS,
+            };
+        };
+        let mut rows = Vec::new();
+        for g in &sb.groups {
+            if !g.heading.is_empty() {
+                rows.push(Row::new(Kind::Heading, g.heading.clone()));
+            }
+            for l in &g.links {
+                let link = crate::read::layout::Link {
+                    article: l.article,
+                    place: l.place,
+                };
+                rows.push(
+                    Row::new(Kind::Item, l.label.clone()).on_press(Message::WikiSidebarLink(link)),
+                );
+            }
+        }
+        // "Part of a series on Biology" is too long for the title bar; the
+        // series' name says it.
+        let title = ["Part of a series on ", "Part of a series about "]
+            .iter()
+            .find_map(|p| sb.title.strip_prefix(p))
+            .map_or(sb.title.as_str(), |rest| {
+                rest.strip_prefix("the ").unwrap_or(rest)
+            });
+        let mut title = title.to_string();
+        if let Some(c) = title.get(..1) {
+            title = c.to_uppercase() + &title[1..];
+        }
+        Page {
+            title,
             subtitle: Some(r.title.clone()),
             back: true,
             top: 0.0,

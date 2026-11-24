@@ -580,9 +580,12 @@ fn a_finished_conversion_can_be_done_again_with_other_settings() {
 }
 
 /// A two-article archive to read: "Pi", long enough for several pages,
-/// with sections and a link to "Tau" (an anchor in it), and "Tau".
+/// with sections, a link to "Tau" (an anchor in it) and a sidebar, and
+/// "Tau".
 fn reading_archive(path: &Path) {
-    use xwa_format::content::{Anchor, Article, Block, Inline, Place, anchor_hash};
+    use xwa_format::content::{
+        Anchor, Article, Block, Inline, Place, Sidebar, SidebarGroup, SidebarLink, anchor_hash,
+    };
     use xwa_format::writer::{ArchiveWriter, WriterOptions};
     let mut w =
         ArchiveWriter::create(path, WriterOptions::new(xwa_format::Profile::Compact)).unwrap();
@@ -614,6 +617,24 @@ fn reading_archive(path: &Path) {
     let pi = Article {
         title: "Pi".into(),
         body,
+        sidebars: vec![Sidebar {
+            title: "Part of a series on circle constants".into(),
+            groups: vec![SidebarGroup {
+                heading: "Constants".into(),
+                links: vec![
+                    SidebarLink {
+                        label: "Tau".into(),
+                        article: 1,
+                        place: Place::Section(0),
+                    },
+                    SidebarLink {
+                        label: "Uses of tau".into(),
+                        article: 1,
+                        place: Place::Anchor(anchor_hash("Uses")),
+                    },
+                ],
+            }],
+        }],
         ..Default::default()
     };
     let tau = Article {
@@ -672,7 +693,13 @@ fn an_archive_reads_in_pages_with_links_contents_and_back() {
     assert_eq!(app.screen, Screen::Contents);
     assert_eq!(
         titles(&app),
-        ["Top", "History", "Properties", "Computation"]
+        [
+            "Part of a series on circle constants",
+            "Top",
+            "History",
+            "Properties",
+            "Computation"
+        ]
     );
     let _ = app.update(Message::WikiSection(3));
     assert_eq!(app.screen, Screen::Article);
@@ -687,6 +714,23 @@ fn an_archive_reads_in_pages_with_links_contents_and_back() {
     let link = r.laid.pages[0].areas[0].target;
     let left_at = r.page;
     let _ = app.update(Message::WikiTarget(link));
+    let r = app.reading.as_ref().unwrap();
+    assert_eq!(r.title, "Tau");
+    assert_eq!(r.page, r.laid.section_pages[0]);
+    press(&mut app, Key::Back);
+    let r = app.reading.as_ref().unwrap();
+    assert_eq!((r.title.as_str(), r.page), ("Pi", left_at));
+
+    // The sidebar, from Contents: its heading, then its links. A link opens
+    // its article at its section, and Back returns to Pi's page.
+    press(&mut app, Key::Confirm);
+    let _ = app.update(Message::WikiSidebar(0));
+    assert_eq!(app.screen, Screen::Sidebar);
+    assert_eq!(app.page().title, "Circle constants");
+    assert_eq!(titles(&app), ["Constants", "Tau", "Uses of tau"]);
+    let link = app.page().rows[2].on_press.clone().unwrap();
+    let _ = app.update(link);
+    assert_eq!(app.screen, Screen::Article);
     let r = app.reading.as_ref().unwrap();
     assert_eq!(r.title, "Tau");
     assert_eq!(r.page, r.laid.section_pages[0]);
@@ -1091,6 +1135,11 @@ fn screens() {
                 }
                 let _ = a.update(Message::Press(Key::Confirm));
                 snap(&a, &dir, &format!("{tag}-contents-{name}"));
+                if a.reading.as_ref().is_some_and(|r| !r.sidebars.is_empty()) {
+                    let _ = a.update(Message::WikiSidebar(0));
+                    snap(&a, &dir, &format!("{tag}-sidebar-{name}"));
+                    let _ = a.update(Message::Back);
+                }
                 let _ = a.update(Message::Back);
             }
         }

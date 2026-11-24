@@ -142,7 +142,7 @@ The window *is* the reader: an X4 Pro, X4 or X3, in a black or white case. Its s
 **Read** opens an archive (the one you just made, or any other) and shows it as the reader would.
 - **Search** lists titles as you type, the most popular first.
 - **Ways in:** *Main page*, *On this day* and *Random article*.
-- **Pages:** articles are laid out in pages at the reader's size with the reader's font (Noto Sans). The arrow keys or the scroll wheel turn them, and *Contents* jumps to a section.
+- **Pages:** articles are laid out in pages at the reader's size with the reader's font (Noto Sans). The arrow keys or the scroll wheel turn them, and *Contents* jumps to a section. Contents also lists the article's "Part of a series" sidebars, each opening a list of its articles.
 - **What's drawn:** formulas are vector math, characters the reader's fonts lack come from the archive's own font, and cladograms draw as trees with their pictures.
 - **Links:** clicking one opens its article at the right section, and *Back* returns to where you were.
 - **Wide tables:** a table too wide for the page opens on its own screen, where it scrolls both ways.

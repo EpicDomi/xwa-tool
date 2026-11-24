@@ -371,6 +371,8 @@ pub enum Kind {
     Action,
     /// A fact, which cannot be chosen.
     Info,
+    /// A heading over the rows that follow, which cannot be chosen.
+    Heading,
 }
 
 #[derive(Debug, Clone)]
@@ -457,7 +459,7 @@ impl<M> Row<M> {
 
     /// Whether the selection can rest on it.
     pub fn focusable(&self) -> bool {
-        self.kind != Kind::Info && self.on_press.is_some()
+        !matches!(self.kind, Kind::Info | Kind::Heading) && self.on_press.is_some()
     }
 }
 
@@ -488,7 +490,7 @@ pub fn row_view<'a, M: Clone + 'a>(
     width: f32,
     on_hover: M,
 ) -> Element<'a, M> {
-    let enabled = r.on_press.is_some() || r.kind == Kind::Info;
+    let enabled = r.on_press.is_some() || matches!(r.kind, Kind::Info | Kind::Heading);
     let content: Element<'a, M> = match r.kind {
         Kind::Action => {
             let face = Face::UiBold;
@@ -499,6 +501,15 @@ pub fn row_view<'a, M: Clone + 'a>(
                 .into()
         }
         Kind::Menu => menu_content(r, width),
+        Kind::Heading => {
+            // Small and bold, sitting on the rows below it.
+            let title = fit(&r.title, Face::UiBold, SMALL, width - 2.0 * PAD).into_owned();
+            container(label(title, Face::UiBold, SMALL))
+                .padding(Padding::default().left(PAD).bottom(4.0))
+                .align_bottom(Length::Fill)
+                .width(Length::Fill)
+                .into()
+        }
         _ => list_content(r, width),
     };
     let kind = r.kind;

@@ -70,6 +70,8 @@ pub enum Screen {
     Contents,
     /// A table too wide for the article's pages, on its own.
     Table,
+    /// One of the open article's sidebars: its links, under its headings.
+    Sidebar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,6 +248,8 @@ pub struct Reading {
     pub page: usize,
     /// Its contents: each heading's level and text.
     pub toc: Vec<(u8, String)>,
+    /// Its sidebars ("Part of a series on ..."), listed in Contents.
+    pub sidebars: Vec<xwa_format::content::Sidebar>,
 }
 
 /// A table on its own: laid out as wide as it needs, and its size.
@@ -570,6 +574,10 @@ pub enum Message {
     WikiTarget(crate::read::layout::Target),
     WikiRandom,
     WikiSection(usize),
+    /// One of the open article's sidebars, by its place in the list.
+    WikiSidebar(usize),
+    /// A sidebar's link: back to the article, then on to the link.
+    WikiSidebarLink(crate::read::layout::Link),
     ZimRead(PathBuf, Result<ZimInfo, String>),
     ToggleImages,
     ToggleSharper,
@@ -695,6 +703,8 @@ pub struct App {
     pub reading_trail: Vec<(u32, usize)>,
     /// A table opened from the article, and whether it shows its right end.
     pub reading_table: Option<TableView>,
+    /// The sidebar shown, by its place in the article's list.
+    pub reading_sidebar: usize,
     pub table_right: bool,
     pub images: bool,
     pub sharper: bool,
@@ -818,6 +828,7 @@ impl App {
             laid,
             page,
             toc,
+            sidebars: article.sidebars,
         });
         self.wiki_error = None;
         if self.screen != Screen::Article {
@@ -903,6 +914,7 @@ impl App {
             reading: None,
             reading_trail: Vec::new(),
             reading_table: None,
+            reading_sidebar: 0,
             table_right: false,
             images: true,
             sharper: false,
@@ -1797,6 +1809,23 @@ impl App {
                 if let Some(id) = self.wiki.as_ref().and_then(|w| w.random(seed)) {
                     self.read_article(id, 0, true);
                 }
+            }
+            Message::WikiSidebar(i) => {
+                if self.reading.as_ref().is_some_and(|r| i < r.sidebars.len()) {
+                    self.reading_sidebar = i;
+                    self.go(Screen::Sidebar);
+                }
+            }
+            Message::WikiSidebarLink(link) => {
+                // Back from the link returns to the page the sidebar was
+                // opened from, as from a link on that page.
+                while self.screen != Screen::Article {
+                    match self.history.pop() {
+                        Some((screen, focus)) => self.show(screen, focus),
+                        None => break,
+                    }
+                }
+                return self.update(Message::WikiLink(link));
             }
             Message::WikiSection(i) => {
                 if let Some(r) = &mut self.reading {
