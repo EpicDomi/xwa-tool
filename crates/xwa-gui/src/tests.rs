@@ -195,6 +195,7 @@ fn the_home_menu_opens_each_screen() {
         Screen::Library,
         Screen::Convert,
         Screen::Card,
+        Screen::Firmware,
         Screen::Settings,
     ]
     .into_iter()
@@ -238,7 +239,7 @@ fn the_italic_pictures_turn_like_pages_and_back_returns_to_converting() {
 fn the_selection_goes_round_the_list_and_skips_what_cannot_be_chosen() {
     let mut app = app(Model::X4);
     press(&mut app, Key::Left);
-    assert_eq!(app.focus, 3, "up from the top goes to the bottom");
+    assert_eq!(app.focus, 4, "up from the top goes to the bottom");
     press(&mut app, Key::Right);
     assert_eq!(app.focus, 0);
 
@@ -1205,7 +1206,6 @@ fn firmware_comes_from_the_releases_unless_other_firmware_is_allowed() {
         }],
     };
     let mut app = app(Model::X4);
-    let _ = app.update(Message::Open(Screen::Settings));
     let _ = app.update(Message::Open(Screen::Firmware));
     let _ = app.update(Message::FirmwareReleases(Ok(vec![
         release("1.6.0.1", true),

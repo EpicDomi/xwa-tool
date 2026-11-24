@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use crate::{Error, Model, Result};
 
 /// The firmware the app installs unless other firmware is allowed.
-pub const FIRMWARE_REPO: &str = "EpicDomi/cpr-vcodex-wiki";
+pub const FIRMWARE_REPO: &str = "EpicDomi/cpr-vcodex-wiki-x4pro";
 
 const USER_AGENT: &str = concat!(
     "xwa-tool/",
@@ -74,7 +74,9 @@ fn network(e: ureq::Error) -> Error {
     Error::Network(e.to_string())
 }
 
-/// Reads GitHub's list of releases (newest first); drafts are left out.
+/// Reads GitHub's list of releases (newest first), keeping those with
+/// firmware in them: drafts, and releases of other files (the SD card font
+/// releases), are left out.
 pub fn parse_releases(json: &str) -> Result<Vec<Release>> {
     let v: serde_json::Value =
         serde_json::from_str(json).map_err(|e| Error::Format(e.to_string()))?;
@@ -107,6 +109,7 @@ pub fn parse_releases(json: &str) -> Result<Vec<Release>> {
                 })
                 .unwrap_or_default(),
         })
+        .filter(|r| r.assets.iter().any(|a| a.name.ends_with(".bin")))
         .collect())
 }
 
@@ -179,6 +182,10 @@ mod tests {
           "browser_download_url": "https://github.com/x/y/releases/download/t/c.json"}
        ]},
       {"tag_name": "draft", "draft": true, "assets": []},
+      {"tag_name": "sd-fonts-m1-b4", "name": "SD fonts", "draft": false,
+       "prerelease": false, "published_at": "2026-12-01T09:00:00Z",
+       "assets": [{"name": "ChareInk-14.cpfont", "size": 9, "browser_download_url": "f"},
+                  {"name": "all-fonts.zip", "size": 9, "browser_download_url": "z"}]},
       {"tag_name": "1.5.0.40-cpr-vcodex", "name": "", "draft": false,
        "prerelease": false, "published_at": "2026-11-20T08:00:00Z",
        "assets": [{"name": "1.5.0.40-cpr-vcodex.bin", "size": 5,
@@ -188,7 +195,7 @@ mod tests {
     #[test]
     fn releases_and_their_firmware_for_each_reader() {
         let r = parse_releases(REPLY).unwrap();
-        assert_eq!(r.len(), 2, "no drafts");
+        assert_eq!(r.len(), 2, "no drafts, and no releases without firmware");
         assert!(r[0].prerelease && !r[1].prerelease);
         assert_eq!(r[0].date(), "2026-12-02");
         let x4 = r[0].firmware_for(Model::X4).unwrap();

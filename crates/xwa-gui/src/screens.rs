@@ -183,6 +183,21 @@ impl App {
                         .on_press(Message::Open(Screen::Card)),
                 ),
                 Some(
+                    Row::new(Kind::Menu, "Firmware")
+                        .icon(&icons::USB)
+                        .subtitle(if self.install.running() {
+                            format!("Installing… {}", self.install.label())
+                        } else {
+                            "Install or update the e-reader's firmware".into()
+                        })
+                        .tip(
+                            "Installs the latest release of the e-reader's firmware over a USB \
+                             cable (or another release you choose), keeping its books, \
+                             settings and SD card.",
+                        )
+                        .on_press(Message::Open(Screen::Firmware)),
+                ),
+                Some(
                     Row::new(Kind::Menu, "Settings")
                         .icon(&icons::SETTINGS)
                         .subtitle(settings)
@@ -876,15 +891,6 @@ impl App {
                     )
                     .on_press(Message::ToggleFlash),
                 self.fonts_row(),
-                Row::new(Kind::Item, "Firmware")
-                    .subtitle("Install it on the e-reader over USB")
-                    .tip(
-                        "Installs the latest release of the e-reader's firmware (or another \
-                         you choose) over a USB cable, keeping its books, settings and SD \
-                         card.",
-                    )
-                    .opens()
-                    .on_press(Message::Open(Screen::Firmware)),
                 Row::new(Kind::Setting, "Allow other firmware")
                     .value(on_off(self.prefs.any_firmware))
                     .tip(

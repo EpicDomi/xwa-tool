@@ -88,9 +88,11 @@ Early. What works today:
   changes the size; Ctrl 0 fits it to the screen again. Drag the device by
   its case to move it, or by its edges and corners to resize it. Settings
   has the device, the case colour, the size, how the window is drawn, the
-  e-ink refresh flash, the download folder and "Firmware", which installs
-  the latest firmware release (or another release) on the e-reader
-  connected by USB; "Allow other firmware" lets it install a firmware file
+  e-ink refresh flash, the download folder, and "Allow other firmware".
+
+  "Firmware" on the home screen installs the latest release of the
+  e-reader's firmware (or another release) on the e-reader connected by
+  USB; with "Allow other firmware" on, it can install a firmware file
   instead. On the X4 and X3 the reader restarts by itself; the X4 Pro's
   ESP32-S3 cannot be restarted over USB, so it is unplugged and switched
   on again.
