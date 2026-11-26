@@ -796,6 +796,11 @@ fn a_zim_without_pictures_turns_pictures_off_and_says_why() {
 /// A one-article archive at `path` whose text uses π and α: with a FONT
 /// holding `glyphs` when given, and its CHARS section when `chars`.
 fn small_archive(path: &Path, glyphs: Option<&str>, chars: bool) {
+    archive_with_text(path, "π and α", glyphs, chars);
+}
+
+/// A one-article archive at `path` with `text`, as [`small_archive`].
+fn archive_with_text(path: &Path, text: &str, glyphs: Option<&str>, chars: bool) {
     use xwa_format::content::{Article, Block, Inline};
     use xwa_format::font::{Font, FontChars, FontStyle, Glyph};
     use xwa_format::writer::{ArchiveWriter, WriterOptions};
@@ -803,7 +808,7 @@ fn small_archive(path: &Path, glyphs: Option<&str>, chars: bool) {
         ArchiveWriter::create(path, WriterOptions::new(xwa_format::Profile::Compact)).unwrap();
     let article = Article {
         title: "Pi".into(),
-        body: vec![Block::Para(vec![Inline::Text("π and α".into())])],
+        body: vec![Block::Para(vec![Inline::Text(text.into())])],
         ..Default::default()
     };
     w.add_article(0, &article, 0).unwrap();
@@ -851,7 +856,7 @@ fn an_archive_missing_glyphs_offers_to_complete_its_font() {
     ));
     assert!(matches!(
         archive_font(&path("complete.xwa")),
-        ArchiveFont::Complete
+        ArchiveFont::Complete { .. }
     ));
     assert!(matches!(
         archive_font(&path("older.xwa")),
@@ -889,6 +894,54 @@ fn an_archive_missing_glyphs_offers_to_complete_its_font() {
         archive_font(&path("missing.xwa")),
     ));
     assert!(!titles(&app).iter().any(|r| r.contains("fallback font")));
+}
+
+#[test]
+fn rare_characters_are_off_unless_chosen_and_can_be_added_later() {
+    use crate::app::{ArchiveFont, archive_font};
+    // Converting: off by default, and says what it gives and costs.
+    let mut app = app(Model::X4);
+    let _ = app.update(Message::Opened(PathBuf::from("/nowhere/wiki.zim")));
+    let rare = |app: &App| {
+        app.page()
+            .rows
+            .into_iter()
+            .find(|r| r.title == "Rare characters")
+            .unwrap()
+    };
+    assert!(!app.rare_characters);
+    assert_eq!(rare(&app).value.as_deref(), Some("OFF"));
+    let tip = rare(&app).tip.unwrap();
+    assert!(
+        tip.contains("rare Chinese characters") && tip.contains("downloaded"),
+        "{tip}"
+    );
+    let _ = app.update(Message::ToggleRare);
+    assert!(app.rare_characters);
+    assert_eq!(rare(&app).value.as_deref(), Some("ON"));
+
+    // A finished archive whose text has one: a Tamil fraction only a font
+    // for rare characters has. Copy to SD card offers to add it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rare.xwa");
+    archive_with_text(&path, "π and α, \u{11FC0}", Some("πα"), true);
+    let state = archive_font(&path);
+    let ArchiveFont::Complete { rare, .. } = &state else {
+        panic!("{state:?}");
+    };
+    assert_eq!(rare.chars, 1);
+    assert!(rare.bytes > 100 && rare.bytes < 2000, "{}", rare.bytes);
+    let mut app = self::app(Model::X4);
+    let _ = app.update(Message::Opened(path.clone()));
+    let _ = app.update(Message::ArchiveFontRead(path, state));
+    let row = app
+        .page()
+        .rows
+        .into_iter()
+        .find(|r| r.title == "Add rare characters")
+        .expect("the row");
+    assert!(row.subtitle.unwrap().starts_with("1 character · about "));
+    assert!(matches!(row.on_press, Some(Message::AddRareCharacters)));
 }
 
 #[test]
@@ -1258,6 +1311,10 @@ fn screens() {
         a.archive_font = crate::app::ArchiveFont::Missing {
             glyphs: 161_586,
             chars: std::sync::Arc::new(chars),
+            rare: crate::app::RareChars {
+                chars: 77_935,
+                bytes: 57_400_000,
+            },
         };
         snap(&a, &dir, &format!("{tag}-card-font"));
         a.font_work = running(0.4, 0, "Fonts: 24 of 61");
@@ -1534,4 +1591,86 @@ fn firmware_comes_from_the_releases_unless_other_firmware_is_allowed() {
     );
     assert_eq!(row.tip.as_deref(), Some("it may be private"));
     assert!(matches!(row.on_press, Some(Message::LoadReleases)));
+}
+
+#[test]
+fn table_lines_go_round_spanning_cells() {
+    use crate::read::layout::{Item, lay_out_table};
+    use xwa_format::content::{Article, Block, Cell, Inline, Table};
+    use xwa_format::writer::{ArchiveWriter, WriterOptions};
+    let cell = |text: &str, rowspan, colspan| Cell {
+        header: false,
+        rowspan,
+        colspan,
+        content: vec![Inline::Text(text.into())],
+    };
+    // | wide (2 columns) | c |
+    // | tall (2 rows)    | d | e |
+    // |                  | f | g |
+    let table = Table {
+        rows: 3,
+        cols: 3,
+        flags: 0,
+        cells: vec![
+            cell("wide", 1, 2),
+            cell("c", 1, 1),
+            cell("tall", 2, 1),
+            cell("d", 1, 1),
+            cell("e", 1, 1),
+            cell("f", 1, 1),
+            cell("g", 1, 1),
+        ],
+        caption: Vec::new(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("table.xwa");
+    let mut w =
+        ArchiveWriter::create(&path, WriterOptions::new(xwa_format::Profile::Compact)).unwrap();
+    let article = Article {
+        title: "Grid".into(),
+        body: vec![Block::TableRef(0)],
+        tables: vec![table.clone()],
+        ..Default::default()
+    };
+    w.add_article(0, &article, 0).unwrap();
+    w.finish().unwrap();
+    let wiki = crate::read::Wiki::open(&path).unwrap();
+    let (laid, _, _) = lay_out_table(&wiki, &table, 300.0);
+    // Each row's lines, relative to the row: (x, y, w, h) of the fills.
+    let mut rows: Vec<Vec<(f32, f32, f32, f32)>> = Vec::new();
+    let mut fills = Vec::new();
+    for item in laid.pages.iter().flat_map(|p| &p.items) {
+        if let Item::Fill { x, y, w, h, .. } = *item {
+            fills.push((x, y, w, h));
+        }
+    }
+    fills.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.total_cmp(&b.0)));
+    // Vertical lines are 1 wide and a row tall; group them by their top.
+    let mut tops: Vec<f32> = fills
+        .iter()
+        .filter(|f| f.2 == 1.0 && f.3 > 1.0)
+        .map(|f| f.1)
+        .collect();
+    tops.dedup();
+    assert_eq!(tops.len(), 3, "{fills:?}");
+    for top in &tops {
+        rows.push(
+            fills
+                .iter()
+                .filter(|f| f.1 == *top && f.2 == 1.0 && f.3 > 1.0)
+                .copied()
+                .collect(),
+        );
+    }
+    // Row 1: no line between the two columns "wide" spans; row 2 has all
+    // four; row 3 has them too (the tall cell's right edge included).
+    assert_eq!(rows[0].len(), 3, "{:?}", rows[0]);
+    assert_eq!(rows[1].len(), 4, "{:?}", rows[1]);
+    assert_eq!(rows[2].len(), 4, "{:?}", rows[2]);
+    // No line along the top of row 3 across the tall cell's column.
+    let col0_right = rows[1][1].0;
+    let across_tall = fills
+        .iter()
+        .any(|f| f.1 == tops[2] && f.3 == 1.0 && f.0 < col0_right && f.2 > 1.0);
+    assert!(!across_tall, "{fills:?}");
 }

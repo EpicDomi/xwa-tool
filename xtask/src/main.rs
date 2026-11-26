@@ -15,7 +15,10 @@
 //!
 //! `cargo xtask fonts` writes `crates/xwa-convert/data/fonts.tsv.zst`, the
 //! Noto fonts the converter draws the fallback FONT from, with their
-//! files' addresses, checksums and coverage.
+//! files' addresses, checksums and coverage. `cargo xtask fonts --rare`
+//! writes `fonts-rare.tsv.zst` beside it: the fonts for the converter's
+//! optional rare characters (Plangothic, GNU Unifont and the other designs
+//! of Noto scripts), for what the Noto fonts lack.
 //!
 //! `cargo xtask unicode` writes `crates/xwa-convert/data/no-character.txt`,
 //! the code points no font draws (unassigned, private use, surrogates and
@@ -79,9 +82,10 @@ fn main() -> ExitCode {
         Some("licenses") => licenses(&args[1..]),
         Some("days") if args.len() == 1 => days::write(&workspace_root()),
         Some("fonts") if args.len() == 1 => fonts::write(&workspace_root()),
+        Some("fonts") if args[1..] == ["--rare"] => fonts::write_rare(&workspace_root()),
         Some("unicode") if args.len() == 1 => unicode::write(&workspace_root()),
         _ => Err(
-            "usage: cargo xtask licenses [--target TRIPLE]... [--out FILE]\n       cargo xtask days\n       cargo xtask fonts\n       cargo xtask unicode"
+            "usage: cargo xtask licenses [--target TRIPLE]... [--out FILE]\n       cargo xtask days\n       cargo xtask fonts [--rare]\n       cargo xtask unicode"
                 .into(),
         ),
     };

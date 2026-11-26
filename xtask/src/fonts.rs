@@ -336,3 +336,280 @@ fn file_line(
         cover.join(",")
     ))
 }
+
+/// The catalogue of the fonts for the converter's optional "rare
+/// characters", in the order they are looked in after the Noto fonts:
+///
+/// - the designs of Noto scripts the main catalogue leaves out, for what
+///   only they have (Noto Sans Tamil Supplement, for one);
+/// - Plangothic, for the CJK ideographs of Unicode's extensions B to I,
+///   which Noto has only the commonest of, and many of the newest letters
+///   and symbols;
+/// - GNU Unifont and Unifont Upper, drawn from pixels, as the last resort.
+///
+/// A file is listed only where it has a glyph no font before it has. Each
+/// line has a seventh column: the mean size in bytes, in FONT's encoding
+/// (spec 10), of the glyphs it adds, for estimating what the option costs.
+/// Writes `crates/xwa-convert/data/fonts-rare.tsv.zst`. A source that
+/// cannot be had is left out, and the task then fails after writing.
+pub fn write_rare(root: &Path) -> Result<(), String> {
+    let agent = agent();
+    // Code points no font draws (unassigned, private use, controls) are
+    // never counted as added, nor are those the Noto fonts have.
+    let mut covered = vec![false; 0x11_0000];
+    let none = root.join("crates/xwa-convert/data/no-character.txt");
+    let none = std::fs::read_to_string(&none).map_err(|e| format!("{}: {e}", none.display()))?;
+    for line in none.lines().filter(|l| !l.starts_with('#')) {
+        for (a, b) in parse_ranges(line) {
+            covered[a as usize..=b as usize].fill(true);
+        }
+    }
+    let main = root.join("crates/xwa-convert/data/fonts.tsv.zst");
+    let packed = std::fs::read(&main).map_err(|e| format!("{}: {e}", main.display()))?;
+    let table = zstd::decode_all(&packed[..]).map_err(|e| e.to_string())?;
+    for line in String::from_utf8_lossy(&table).lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() >= 6 && f[1] == "regular" {
+            for (a, b) in parse_ranges(f[5]) {
+                covered[a as usize..=b as usize].fill(true);
+            }
+        }
+    }
+
+    let mut sources: Vec<(String, Result<String, String>)> = Vec::new();
+    for family in noto_variants(&agent)? {
+        let url = font_url(&agent, &family, "regular", false);
+        sources.push((family, url));
+    }
+    match plangothic(&agent) {
+        Ok(files) => sources.extend(files.into_iter().map(|(n, u)| (n, Ok(u)))),
+        Err(e) => sources.push(("Plangothic".into(), Err(e))),
+    }
+    match unifont(&agent) {
+        Ok(files) => sources.extend(files.into_iter().map(|(n, u)| (n, Ok(u)))),
+        Err(e) => sources.push(("Unifont".into(), Err(e))),
+    }
+
+    let mut table = String::new();
+    let mut failed = Vec::new();
+    for (family, url) in sources {
+        let got = url.and_then(|url| {
+            let data = download(&agent, &url).map_err(|e| format!("{family}: {e}"))?;
+            Ok((url, data))
+        });
+        let (url, data) = match got {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("{family}: could not be had: {e}");
+                failed.push(e);
+                continue;
+            }
+        };
+        let ranges = coverage(&data).map_err(|e| format!("{family}: {e}"))?;
+        let face = ttf_parser::Face::parse(&data, 0).map_err(|e| format!("{family}: {e}"))?;
+        let mut added = 0u64;
+        let mut bytes = 0u64;
+        for &(a, b) in &ranges {
+            for cp in a..=b {
+                if covered[cp as usize] {
+                    continue;
+                }
+                let Some(c) = char::from_u32(cp) else {
+                    continue;
+                };
+                if let Some(n) = glyph_bytes(&face, c) {
+                    added += 1;
+                    bytes += n;
+                }
+            }
+        }
+        if added == 0 {
+            eprintln!("{family}: adds nothing, left out");
+            continue;
+        }
+        for &(a, b) in &ranges {
+            covered[a as usize..=b as usize].fill(true);
+        }
+        let mean = bytes / added;
+        eprintln!(
+            "{family}: {} KB, adds {added} code points, {mean} bytes a glyph",
+            data.len() / 1024
+        );
+        let sha: String = Sha256::digest(&data)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        table.push_str(&format!(
+            "{family}\tregular\t{url}\t{sha}\t{}\t{}\t{mean}\n",
+            data.len(),
+            format_ranges(&ranges)
+        ));
+    }
+    let packed = zstd::encode_all(table.as_bytes(), 19).map_err(|e| e.to_string())?;
+    let out = root.join("crates/xwa-convert/data/fonts-rare.tsv.zst");
+    std::fs::write(&out, &packed).map_err(|e| format!("{}: {e}", out.display()))?;
+    eprintln!("wrote {} ({} bytes)", out.display(), packed.len());
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the catalogue was written without {} source(s): {}",
+            failed.len(),
+            failed.join("; ")
+        ))
+    }
+}
+
+/// The Noto families on Google Fonts that the main catalogue leaves out as
+/// other designs of a script ([`unwanted`]), except the colour emoji, which
+/// has no outlines.
+fn noto_variants(agent: &ureq::Agent) -> Result<Vec<String>, String> {
+    let meta = agent
+        .get("https://fonts.google.com/metadata/fonts")
+        .call()
+        .map_err(|e| format!("Google Fonts: {e}"))?
+        .body_mut()
+        .with_config()
+        .limit(64 << 20)
+        .read_to_string()
+        .map_err(|e| format!("Google Fonts: {e}"))?;
+    let json: serde_json::Value =
+        serde_json::from_str(meta.trim_start_matches(")]}'")).map_err(|e| e.to_string())?;
+    let mut out: Vec<String> = json["familyMetadataList"]
+        .as_array()
+        .ok_or("Google Fonts: no family list")?
+        .iter()
+        .filter_map(|f| f["family"].as_str())
+        .filter(|f| f.starts_with("Noto ") && unwanted(f) && *f != "Noto Color Emoji")
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+/// Plangothic's latest release on GitHub: its two TrueType files (the
+/// font is split in two, as one file can hold at most 65,535 glyphs).
+fn plangothic(agent: &ureq::Agent) -> Result<Vec<(String, String)>, String> {
+    let release = agent
+        .get("https://api.github.com/repos/Fitzgerald-Porthmouth-Koenigsegg/Plangothic-Project/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| format!("Plangothic's releases: {e}"))?
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("Plangothic's releases: {e}"))?;
+    let json: serde_json::Value = serde_json::from_str(&release).map_err(|e| e.to_string())?;
+    let assets = json["assets"].as_array().ok_or("Plangothic: no assets")?;
+    ["P1", "P2"]
+        .iter()
+        .map(|part| {
+            let name = format!("Plangothic{part}-Regular.ttf");
+            assets
+                .iter()
+                .find(|a| a["name"].as_str() == Some(&name))
+                .and_then(|a| a["browser_download_url"].as_str())
+                .map(|u| (format!("Plangothic {part}"), u.to_string()))
+                .ok_or_else(|| format!("Plangothic: no {name} in the latest release"))
+        })
+        .collect()
+}
+
+/// GNU Unifont's latest version: its fonts for the Basic Multilingual Plane
+/// and for the planes above it, as OpenType outlines of its pixels.
+fn unifont(agent: &ureq::Agent) -> Result<Vec<(String, String)>, String> {
+    const BASE: &str = "https://ftp.gnu.org/gnu/unifont/";
+    let index = agent
+        .get(BASE)
+        .call()
+        .map_err(|e| format!("Unifont: {e}"))?
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("Unifont: {e}"))?;
+    let version = index
+        .split("href=\"unifont-")
+        .skip(1)
+        .filter_map(|s| s.split('/').next())
+        .filter_map(|v| {
+            let parts: Option<Vec<u32>> = v.split('.').map(|p| p.parse().ok()).collect();
+            parts.map(|p| (p, v.to_string()))
+        })
+        .max()
+        .map(|(_, v)| v)
+        .ok_or("Unifont: no version listed")?;
+    Ok(vec![
+        (
+            "Unifont".into(),
+            format!("{BASE}unifont-{version}/unifont-{version}.otf"),
+        ),
+        (
+            "Unifont Upper".into(),
+            format!("{BASE}unifont-{version}/unifont_upper-{version}.otf"),
+        ),
+    ])
+}
+
+fn download(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
+    agent
+        .get(url)
+        .call()
+        .map_err(|e| e.to_string())?
+        .body_mut()
+        .with_config()
+        .limit(256 << 20)
+        .read_to_vec()
+        .map_err(|e| e.to_string())
+}
+
+/// The size of `c`'s glyph in FONT's encoding (spec 10): its bounding box,
+/// each command (move and line 5 bytes, quadratic 9, cubic 13, close 1)
+/// and END, and its advance and offset in the tables.
+fn glyph_bytes(face: &ttf_parser::Face, c: char) -> Option<u64> {
+    struct Count(u64);
+    impl ttf_parser::OutlineBuilder for Count {
+        fn move_to(&mut self, _: f32, _: f32) {
+            self.0 += 5;
+        }
+        fn line_to(&mut self, _: f32, _: f32) {
+            self.0 += 5;
+        }
+        fn quad_to(&mut self, _: f32, _: f32, _: f32, _: f32) {
+            self.0 += 9;
+        }
+        fn curve_to(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {
+            self.0 += 13;
+        }
+        fn close(&mut self) {
+            self.0 += 1;
+        }
+    }
+    let id = face.glyph_index(c).filter(|g| g.0 != 0)?;
+    let mut n = Count(8 + 1 + 6);
+    face.outline_glyph(id, &mut n);
+    Some(n.0)
+}
+
+fn parse_ranges(s: &str) -> Vec<(u32, u32)> {
+    s.split(',')
+        .filter_map(|r| {
+            let (a, b) = r.split_once('-').unwrap_or((r, r));
+            Some((
+                u32::from_str_radix(a, 16).ok()?,
+                u32::from_str_radix(b, 16).ok()?,
+            ))
+        })
+        .collect()
+}
+
+fn format_ranges(ranges: &[(u32, u32)]) -> String {
+    ranges
+        .iter()
+        .map(|&(a, b)| {
+            if a == b {
+                format!("{a:X}")
+            } else {
+                format!("{a:X}-{b:X}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}

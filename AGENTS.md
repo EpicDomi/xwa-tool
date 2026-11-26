@@ -49,7 +49,11 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   (each style's address, SHA-256, coverage) that the fallback FONT and
   FONT_BOLD are drawn from
   (`xwa-convert/src/fallback.rs`; `xwa-fetch/src/fonts.rs` downloads and
-  keeps them).
+  keeps them); `cargo xtask fonts --rare` writes `fonts-rare.tsv.zst` beside
+  it, the optional fonts for rare characters (other Noto designs,
+  Plangothic from GitHub, GNU Unifont), each listed only for what it adds,
+  with the mean size of those glyphs for cost estimates. It needs
+  api.github.com and github.com for Plangothic.
 - `docs/format-spec-v0.md`: the format specification.
 
 ## Rules

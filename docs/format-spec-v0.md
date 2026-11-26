@@ -156,7 +156,9 @@ that folder; FAT32 and exFAT match its name in any case.
 `license`, `attribution`, `created` (RFC 3339), `converter` (name and
 version), `profile`, `counts.articles`, `counts.redirects` (redirect
 entries in the title index, after de-duplication), `counts.images`,
-`counts.formulas`, `main_article` (decimal article id).
+`counts.formulas`, `main_article` (decimal article id), `license.font`
+and `license.math_font` (10, 8), `font.rare_characters` (`yes` when FONT
+was built with rare characters, 10; tools completing the font keep them).
 
 Wikipedia content is CC BY-SA: `attribution` must be shown somewhere in the
 firmware UI (archive info screen).
@@ -848,8 +850,23 @@ Wiktionary, 2,599 (0.9 MB, 0.55% of the archive) for chemistry, 6,816 (2.2
 MB, 3%) for mathematics and 10,157 (4.8 MB, 0.56%) for Swedish Wikipedia's
 2.6 million articles. A Han character takes about 590 bytes, most other
 glyphs 200-300. What no Noto font draws is rare: private-use and
-unassigned code points in the source text, some of CJK extension B, and
-symbols added in Unicode 15 and 16 (`xwa-tool verify` lists them).
+unassigned code points in the source text, the rare CJK ideographs of
+extensions B to I, and letters and symbols added to Unicode lately
+(`xwa-tool verify` lists them).
+
+**Rare characters (optional).** On request, xwa-tool also draws what no
+Noto font has, from fonts looked in after every Noto font: the other
+designs of Noto scripts (Noto Sans Tamil Supplement, Noto Sans Mono and
+Noto Sans Syriac Western, for what only they have), Plangothic (the CJK
+ideographs of extensions B to I, and many of the newest letters and
+symbols) and GNU Unifont and Unifont Upper (outlines of 16-pixel glyphs,
+as the last resort), all under the SIL Open Font License 1.1.
+`cargo xtask fonts --rare` pins them as for the Noto fonts. Of the
+159,801 characters Unicode 17 assigns, the Noto fonts lack 78,841 (72,590
+of them rare CJK ideographs); these fonts draw all but 3,995, which are
+Egyptian Hieroglyphs Extended-A. META `font.rare_characters` is `yes` for
+such an archive, and `license.font` names the sources used. Nothing
+changes for a reader: they are glyphs in FONT like any other.
 
 ### 10.1 Bold and italic (FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC)
 

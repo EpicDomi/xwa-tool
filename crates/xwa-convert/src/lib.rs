@@ -93,6 +93,10 @@ pub struct Options {
     /// FONT_BOLD_ITALIC, spec 10.1); without, the e-reader slants the
     /// regular ones.
     pub real_italic: bool,
+    /// With the fallback font, glyphs for rare characters too: what no
+    /// Noto font has, from Plangothic, GNU Unifont and the other designs of
+    /// Noto scripts.
+    pub rare_characters: bool,
 }
 
 impl Options {
@@ -106,6 +110,7 @@ impl Options {
             diagrams: None,
             fonts: None,
             real_italic: true,
+            rare_characters: false,
         }
     }
 }
@@ -880,9 +885,14 @@ fn convert_inner(
             let language = zim
                 .metadata("Language")?
                 .map(|v| String::from_utf8_lossy(&v).trim().to_string());
-            let (sections, report) = build_fonts(&chars, language.as_deref(), fonts, &mut check)?;
+            let rare = opts.rare_characters;
+            let (sections, report) =
+                build_fonts(&chars, language.as_deref(), fonts, rare, &mut check)?;
             if !sections.is_empty() {
-                writer.set_meta("license.font", fallback::LICENSE);
+                writer.set_meta("license.font", fallback::license(&report.fonts));
+                if rare {
+                    writer.set_meta(fallback::RARE_META, "yes");
+                }
             }
             for (style, data) in sections {
                 writer.set_font(style, data);
@@ -972,17 +982,20 @@ pub fn download_all_fonts(
 type FontSections = Vec<(FontStyle, Vec<u8>)>;
 
 /// FONT and the other font sections for `chars` (spec 10), from the Noto
-/// fonts in `fonts`, downloading what is not kept. Once the network fails
-/// only fonts already kept are used, so offline work does not wait for
-/// every font in turn.
+/// fonts in `fonts`, and with `rare` the fonts for rare characters,
+/// downloading what is not kept. Once the network fails only fonts already
+/// kept are used, so offline work does not wait for every font in turn.
+/// Without `rare`, the report says what the fonts for rare characters
+/// would add.
 fn build_fonts(
     chars: &FontChars,
     language: Option<&str>,
     fonts: &xwa_fetch::fonts::Fonts,
+    rare: bool,
     check: &mut dyn FnMut(Progress) -> Result<()>,
 ) -> Result<(FontSections, fallback::Report)> {
     let (wanted, styled) = fallback::requests(chars);
-    let order = fallback::search_order(fallback::catalogue(), language);
+    let order = fallback::fonts(language, rare);
     let total = fallback::fonts_needed(&wanted, &styled, &order) as u64;
     check(Progress {
         stage: Stage::Fonts,
@@ -1015,17 +1028,45 @@ fn build_fonts(
     });
     match stopped {
         Some(e) => Err(e),
-        None => Ok(built),
+        None => {
+            let (sections, mut report) = built;
+            if !rare {
+                let l = fallback::lacking(&report.lacking, &order, &fallback::rare_catalogue());
+                report.rare = (l.in_rare.len(), l.rare_bytes);
+            }
+            Ok((sections, report))
+        }
     }
 }
 
 /// How complete an archive's font sections are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontStatus {
-    /// Code points of the text FONT has no glyph for that a Noto font has.
+    /// Code points of the text FONT has no glyph for that a Noto font has,
+    /// or for an archive with rare characters, any font it draws from.
     pub missing: usize,
-    /// Bold, italic and bold italic glyphs missing that the Noto fonts have.
+    /// Bold, italic and bold italic glyphs missing that those fonts have.
     pub missing_styled: usize,
+    /// Whether the archive was made with rare characters.
+    pub rare: bool,
+    /// For one without: how many characters of its text the fonts for rare
+    /// characters would add, and about how many bytes adding them with
+    /// [`rebuild_font`] would add to the file: their glyphs, and a new
+    /// copy of its font sections, as the old ones are left in place.
+    pub rare_chars: usize,
+    pub rare_bytes: u64,
+}
+
+/// The size of an archive's font sections and CHARS, which [`rebuild_font`]
+/// writes anew.
+pub fn font_sections_bytes(archive: &xwa_format::reader::Archive) -> u64 {
+    let mut kinds: Vec<u32> = FontStyle::ALL.iter().map(|s| s.section()).collect();
+    kinds.push(xwa_format::section::CHARS);
+    kinds
+        .iter()
+        .filter_map(|&k| archive.superblock().section(k))
+        .map(|s| s.length)
+        .sum()
 }
 
 impl FontStatus {
@@ -1034,36 +1075,61 @@ impl FontStatus {
     }
 }
 
-/// What an archive's font sections lack for `chars` that the Noto fonts
-/// could supply.
+/// What an archive's font sections lack for `chars` that the fonts it
+/// draws from could supply, and for one without rare characters, what
+/// those would add.
 pub fn font_status(archive: &xwa_format::reader::Archive, chars: &FontChars) -> Result<FontStatus> {
     let fonts = FontStyle::ALL.map(|s| archive.styled_font(s));
     let mut sections = Vec::with_capacity(4);
     for f in fonts {
         sections.push(f?);
     }
-    let order = fallback::search_order(fallback::catalogue(), archive.meta_value("language"));
+    let rare = archive.meta_value(fallback::RARE_META) == Some("yes");
+    let order = fallback::fonts(archive.meta_value("language"), rare);
     let has = |style: FontStyle, c: char| {
         sections[style as usize]
             .as_ref()
             .is_some_and(|f| f.glyphs.contains_key(&c))
     };
     let (missing, missing_styled) = fallback::missing(chars, &order, &has);
+    let (rare_chars, rare_bytes) = if rare {
+        (0, 0)
+    } else {
+        let (wanted, _) = fallback::requests(chars);
+        let text = chars.set(FontStyle::Regular);
+        let lack: Vec<char> = wanted
+            .into_iter()
+            .filter(|&c| text.contains(c) && !has(FontStyle::Regular, c))
+            .collect();
+        let l = fallback::lacking(&lack, &order, &fallback::rare_catalogue());
+        let rewrite = if l.in_rare.is_empty() {
+            0
+        } else {
+            font_sections_bytes(archive)
+        };
+        (l.in_rare.len(), l.rare_bytes + rewrite)
+    };
     Ok(FontStatus {
         missing,
         missing_styled,
+        rare,
+        rare_chars,
+        rare_bytes,
     })
 }
 
 /// Builds the font sections of the archive at `path` again for `chars` (its
 /// CHARS section, or what [`xwa_format::reader::Archive::scan_font_chars`]
-/// found), downloading the Noto fonts it needs, and puts them in the
-/// archive in place of the old ones, with a CHARS section. Nothing is
-/// written unless the new sections hold more glyphs than the old.
+/// found), downloading the fonts it needs, and puts them in the archive in
+/// place of the old ones, with a CHARS section. With `rare`, or when the
+/// archive was made with them, rare characters too, and the archive is
+/// marked as having them. Nothing is written unless the new sections hold
+/// more glyphs than the old.
 pub fn rebuild_font(
     path: &Path,
     chars: &FontChars,
     fonts: &xwa_fetch::fonts::Fonts,
+    rare: bool,
     progress: &mut dyn FnMut(Progress) -> bool,
 ) -> Result<fallback::Report> {
     let archive = xwa_format::reader::Archive::open(path)?;
@@ -1076,6 +1142,7 @@ pub fn rebuild_font(
     };
     let before = glyphs(&archive)?;
     let language = archive.meta_value("language").map(str::to_string);
+    let rare = rare || archive.meta_value(fallback::RARE_META) == Some("yes");
     let mut meta = archive.meta().to_vec();
     drop(archive);
     let mut check = |p: Progress| {
@@ -1085,7 +1152,7 @@ pub fn rebuild_font(
             Err(Error::Cancelled)
         }
     };
-    let (sections, report) = build_fonts(chars, language.as_deref(), fonts, &mut check)?;
+    let (sections, report) = build_fonts(chars, language.as_deref(), fonts, rare, &mut check)?;
     let after: usize = report.glyphs + report.styled.iter().map(|s| s.glyphs).sum::<usize>();
     if after <= before {
         return Ok(report);
@@ -1101,8 +1168,16 @@ pub fn rebuild_font(
         })
         .collect();
     changes.push((xwa_format::section::CHARS, Some(chars.encode())));
-    if !meta.iter().any(|(k, _)| k == "license.font") {
-        meta.push(("license.font".into(), fallback::LICENSE.into()));
+    let before_meta = meta.clone();
+    let mut set = |key: &str, value: String| match meta.iter_mut().find(|(k, _)| k == key) {
+        Some(entry) => entry.1 = value,
+        None => meta.push((key.to_string(), value)),
+    };
+    set("license.font", fallback::license(&report.fonts));
+    if rare {
+        set(fallback::RARE_META, "yes".into());
+    }
+    if meta != before_meta {
         changes.push((
             xwa_format::section::META,
             Some(xwa_format::meta::encode(&meta)),
