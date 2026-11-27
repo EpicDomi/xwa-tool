@@ -1050,23 +1050,11 @@ pub struct FontStatus {
     /// Whether the archive was made with rare characters.
     pub rare: bool,
     /// For one without: how many characters of its text the fonts for rare
-    /// characters would add, and about how many bytes adding them with
-    /// [`rebuild_font`] would add to the file: their glyphs, and a new
-    /// copy of its font sections, as the old ones are left in place.
+    /// characters would add, and about how many bytes their glyphs take
+    /// (what adding them with [`rebuild_font`] adds to the file, which
+    /// takes back the old sections' space).
     pub rare_chars: usize,
     pub rare_bytes: u64,
-}
-
-/// The size of an archive's font sections and CHARS, which [`rebuild_font`]
-/// writes anew.
-pub fn font_sections_bytes(archive: &xwa_format::reader::Archive) -> u64 {
-    let mut kinds: Vec<u32> = FontStyle::ALL.iter().map(|s| s.section()).collect();
-    kinds.push(xwa_format::section::CHARS);
-    kinds
-        .iter()
-        .filter_map(|&k| archive.superblock().section(k))
-        .map(|s| s.length)
-        .sum()
 }
 
 impl FontStatus {
@@ -1102,12 +1090,7 @@ pub fn font_status(archive: &xwa_format::reader::Archive, chars: &FontChars) -> 
             .filter(|&c| text.contains(c) && !has(FontStyle::Regular, c))
             .collect();
         let l = fallback::lacking(&lack, &order, &fallback::rare_catalogue());
-        let rewrite = if l.in_rare.is_empty() {
-            0
-        } else {
-            font_sections_bytes(archive)
-        };
-        (l.in_rare.len(), l.rare_bytes + rewrite)
+        (l.in_rare.len(), l.rare_bytes)
     };
     Ok(FontStatus {
         missing,

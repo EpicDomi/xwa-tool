@@ -9,7 +9,7 @@
 use std::path::Path;
 
 /// The Unicode version the table follows.
-const VERSION: &str = "17.0.0";
+const VERSION: &str = "18.0.0";
 
 pub fn write(root: &Path) -> Result<(), String> {
     let url = format!(

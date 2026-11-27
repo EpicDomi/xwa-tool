@@ -1007,20 +1007,18 @@ fn print_lacking(archive: &Xwa, chars: &[char]) {
     }
     let ideographs = |n: usize| {
         if n > 0 {
-            format!(" ({n} of them rare CJK ideographs, of Unicode's extensions B to I)")
+            format!(" ({n} of them rare CJK ideographs, of Unicode's extensions B to J)")
         } else {
             String::new()
         }
     };
     if !l.in_rare.is_empty() {
-        // Completing the font writes its sections anew after the old ones.
-        let growth = l.rare_bytes + xwa_convert::font_sections_bytes(archive);
         println!(
             "    {} are in the fonts for rare characters{}; \
              `xwa-tool complete-font --rare-characters` adds them, about {} to the file{}",
             l.in_rare.len(),
             ideographs(l.rare_ideographs),
-            size_words(growth),
+            size_words(l.rare_bytes),
             sample(&l.in_rare)
         );
     }

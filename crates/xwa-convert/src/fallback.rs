@@ -4,9 +4,9 @@
 //! the same family. `cargo xtask fonts` makes the catalogue of fonts.
 //!
 //! Optionally, rare characters too: what no Noto font has, from Plangothic
-//! (the rare CJK ideographs of Unicode's extensions B to I, and many of the
-//! newest letters and symbols), GNU Unifont, and the other designs of Noto
-//! scripts. `cargo xtask fonts --rare` makes their catalogue.
+//! (the rare CJK ideographs of Unicode's extensions B to J, and many of the
+//! newest letters and symbols), NewGardiner (Egyptian hieroglyphs), GNU
+//! Unifont, and the other designs of Noto scripts. `cargo xtask fonts --rare` makes their catalogue.
 
 use std::collections::BTreeMap;
 
@@ -35,6 +35,9 @@ pub fn license(families: &[String]) -> String {
     let mut sources = vec!["the Noto fonts (Google Fonts)"];
     if from("Plangothic") {
         sources.push("Plangothic");
+    }
+    if from("NewGardiner") {
+        sources.push("NewGardiner");
     }
     if from("Unifont") {
         sources.push("GNU Unifont");
@@ -238,6 +241,12 @@ pub fn search_order(mut fonts: Vec<CatalogFont>, language: Option<&str>) -> Vec<
     fonts
 }
 
+/// Whether `cp` is a CJK ideograph of Unicode's extensions B to J (planes 2
+/// and 3, before the Seal script), of which Noto has only the commonest.
+fn rare_ideograph(cp: u32) -> bool {
+    (0x20000..0x3D000).contains(&cp)
+}
+
 /// Whether `c` is an Arabic letter or mark, which the firmware shapes into
 /// presentation forms.
 fn is_arabic(c: char) -> bool {
@@ -321,7 +330,7 @@ pub fn missing(
 pub struct RareSummary {
     /// Characters (assigned in Unicode) they have and no Noto font has.
     pub characters: usize,
-    /// How many of those are CJK ideographs of Unicode's extensions B to I.
+    /// How many of those are CJK ideographs of Unicode's extensions B to J.
     pub ideographs: usize,
     /// About how many bytes all of them would add to an archive.
     pub bytes: u64,
@@ -349,7 +358,7 @@ pub fn rare_summary() -> RareSummary {
                 for cp in lo..=hi {
                     if !std::mem::replace(&mut taken[cp as usize], true) {
                         out.characters += 1;
-                        out.ideographs += usize::from((0x20000..0x40000).contains(&cp));
+                        out.ideographs += usize::from(rare_ideograph(cp));
                         out.bytes += u64::from(f.regular.glyph_bytes);
                     }
                 }
@@ -369,7 +378,7 @@ pub struct Lacking {
     /// About how many bytes their glyphs would add to FONT.
     pub rare_bytes: u64,
     /// How many of them are CJK ideographs of planes 2 and 3 (Unicode's
-    /// extensions B to I), of which Noto has only the commonest.
+    /// extensions B to J), of which Noto has only the commonest.
     pub rare_ideographs: usize,
     /// Characters no font xwa-tool knows has.
     pub not_in_noto: Vec<char>,
@@ -406,7 +415,7 @@ pub fn lacking(chars: &[char], fonts: &[CatalogFont], rare: &[CatalogFont]) -> L
     let none = no_character();
     let mut out = Lacking::default();
     for &c in chars {
-        let ideograph = usize::from((0x20000..0x40000).contains(&(c as u32)));
+        let ideograph = usize::from(rare_ideograph(c as u32));
         // A font's private-use glyphs are its own, not the text's.
         let i = none.partition_point(|&(_, hi)| hi < c as u32);
         if none.get(i).is_some_and(|&(lo, _)| lo <= c as u32) {
@@ -888,34 +897,41 @@ mod tests {
     fn lacking_characters_are_sorted_by_why() {
         let fonts = search_order(catalogue(), None);
         // α is in Noto Sans; U+11FC0 is a Tamil fraction only Noto Sans
-        // Tamil Supplement has, and U+10D40 a Garay letter (Unicode 16)
-        // only Unifont Upper has; U+13460 is an Egyptian hieroglyph of
-        // Extended-A, which no font xwa-tool knows has; U+0378 is
-        // unassigned, and U+E000 private use (whatever a font may put
+        // Tamil Supplement has, U+10D40 a Garay letter (Unicode 16) only
+        // Unifont Upper has, and U+13460 an Egyptian hieroglyph of
+        // Extended-A only NewGardiner has; U+18E00 is Jurchen and U+3D000
+        // Seal (Unicode 18), which no font xwa-tool knows has yet; U+0378
+        // is unassigned, and U+E000 private use (whatever a font may put
         // there).
         let chars = [
             'α',
             '\u{11FC0}',
             '\u{10D40}',
             '\u{13460}',
+            '\u{18E00}',
+            '\u{3D000}',
             '\u{378}',
             '\u{E000}',
         ];
         let l = lacking(&chars, &fonts, &rare_catalogue());
         assert_eq!(l.in_noto, ['α']);
-        assert_eq!(l.in_rare, ['\u{11FC0}', '\u{10D40}']);
+        assert_eq!(l.in_rare, ['\u{11FC0}', '\u{10D40}', '\u{13460}']);
         assert!(
-            l.rare_bytes > 100 && l.rare_bytes < 3000,
+            l.rare_bytes > 1000 && l.rare_bytes < 5000,
             "{}",
             l.rare_bytes
         );
-        assert_eq!(l.not_in_noto, ['\u{13460}']);
-        assert_eq!(l.no_character, ['\u{378}', '\u{E000}']);
+        assert_eq!(l.not_in_noto, ['\u{18E00}', '\u{3D000}']);
+        // Seal characters are not CJK ideographs of the extensions.
+        assert_eq!((l.rare_ideographs, l.unknown_ideographs), (0, 0));
         assert_eq!(no_character().len(), 735, "the whole table is read");
         // Without the fonts for rare characters, no font has them.
         let l = lacking(&chars, &fonts, &[]);
-        assert_eq!(l.not_in_noto, ['\u{11FC0}', '\u{10D40}', '\u{13460}']);
+        assert_eq!(l.not_in_noto.len(), 5);
         assert!(l.in_rare.is_empty() && l.rare_bytes == 0);
+        // An Extension B ideograph is counted as one.
+        let l = lacking(&['\u{20000}'], &fonts, &[]);
+        assert_eq!(l.unknown_ideographs, 1);
     }
 
     #[test]
@@ -930,6 +946,7 @@ mod tests {
             families.ends_with(&["Unifont", "Unifont Upper"]),
             "{families:?}"
         );
+        assert!(families.contains(&"NewGardiner"), "{families:?}");
         assert!(rare.iter().all(|f| f.regular.glyph_bytes > 0));
         let all = fonts(None, true);
         let noto = fonts(None, false);
@@ -975,6 +992,11 @@ mod tests {
         assert_eq!(
             license(&names(&["Noto Sans", "Plangothic P1", "Unifont Upper"])),
             "Fallback glyphs from the Noto fonts (Google Fonts), Plangothic and GNU Unifont, \
+             SIL Open Font License 1.1"
+        );
+        assert_eq!(
+            license(&names(&["Noto Sans", "NewGardiner"])),
+            "Fallback glyphs from the Noto fonts (Google Fonts) and NewGardiner, \
              SIL Open Font License 1.1"
         );
         assert_eq!(

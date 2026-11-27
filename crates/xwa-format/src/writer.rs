@@ -966,12 +966,28 @@ impl Spool {
     }
 }
 
+/// How much of the sections after a replaced one [`patch_sections`] will
+/// copy to take back the replaced one's space.
+const MOVE_LIMIT: u64 = 64 << 20;
+
 /// Replaces sections of the finished archive at `path`, in place: each
-/// `(kind, Some(bytes))` is written after the end of the file and takes
-/// the place of any section of that kind, and `(kind, None)` removes it.
-/// Old bytes stay where they are, no longer referred to, and the
-/// superblock is written last, so until then the archive is as it was.
-/// Optional feature bit 0 follows whether a FONT section is left.
+/// `(kind, Some(bytes))` takes the place of any section of that kind, and
+/// `(kind, None)` removes it. Optional feature bit 0 follows whether a FONT
+/// section is left.
+///
+/// The space of the old sections is taken back where they are near the end
+/// of the file, as a rebuilt fallback font's are: the sections from the
+/// first replaced one on (up to [`MOVE_LIMIT`] of others among them) are
+/// written anew in their place and the file is cut short after them.
+/// Old sections further from the end are left where they are, no longer
+/// referred to.
+///
+/// The archive stays readable whenever the work stops: everything new is
+/// first written after the end of the file, and only then does the
+/// superblock point at it; the sections are then copied down into the space
+/// no longer referred to, the superblock is pointed at them, and last the
+/// file is cut short. In between, the file only ever has unused bytes after
+/// the end the superblock gives, which readers ignore (spec 2).
 pub fn patch_sections(path: &Path, changes: &[(u32, Option<Vec<u8>>)]) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .read(true)
@@ -980,33 +996,108 @@ pub fn patch_sections(path: &Path, changes: &[(u32, Option<Vec<u8>>)]) -> Result
     let mut head = vec![0u8; Superblock::SIZE];
     file.read_exact(&mut head)?;
     let mut sb = Superblock::decode(&head)?;
-    let mut end = file.seek(SeekFrom::End(0))?;
+    let block = BLOCK_SIZE as u64;
+    let end = file.seek(SeekFrom::End(0))?.max(sb.file_size);
+    let changed = |kind: u32| changes.iter().any(|(k, _)| *k == kind);
+
+    // Where to start writing anew: the first replaced section after which
+    // the sections kept are few enough to copy.
+    let kept_after = |at: u64| -> u64 {
+        sb.sections
+            .iter()
+            .filter(|s| s.offset >= at && !changed(s.kind))
+            .map(|s| s.length)
+            .sum()
+    };
+    let mut starts: Vec<u64> = sb
+        .sections
+        .iter()
+        .filter(|s| changed(s.kind))
+        .map(|s| s.offset)
+        .collect();
+    starts.sort_unstable();
+    let from = starts.into_iter().find(|&at| kept_after(at) <= MOVE_LIMIT);
+
+    // What goes from `from` on (or after the end): the sections kept there,
+    // in their order, then the new ones.
+    let mut moved: Vec<SectionEntry> = match from {
+        Some(at) => sb
+            .sections
+            .iter()
+            .filter(|s| s.offset >= at && !changed(s.kind))
+            .copied()
+            .collect(),
+        None => Vec::new(),
+    };
+    moved.sort_by_key(|s| s.offset);
+    let mut pieces: Vec<(SectionEntry, Vec<u8>)> = Vec::new();
+    for s in moved {
+        let mut data = vec![0u8; s.length as usize];
+        file.seek(SeekFrom::Start(s.offset))?;
+        file.read_exact(&mut data)?;
+        pieces.push((s, data));
+    }
     for (kind, data) in changes {
-        sb.sections.retain(|s| s.kind != *kind);
-        let Some(data) = data else { continue };
-        let offset = end.next_multiple_of(BLOCK_SIZE as u64);
-        file.seek(SeekFrom::Start(end))?;
-        file.write_all(&vec![0u8; (offset - end) as usize])?;
-        file.write_all(data)?;
-        end = offset + data.len() as u64;
-        sb.sections.push(SectionEntry {
-            kind: *kind,
-            flags: 0,
-            offset,
-            length: data.len() as u64,
-            crc32: crate::crc::crc32(data),
-        });
+        if let Some(data) = data {
+            pieces.push((
+                SectionEntry {
+                    kind: *kind,
+                    flags: 0,
+                    offset: 0,
+                    length: data.len() as u64,
+                    crc32: crate::crc::crc32(data),
+                },
+                data.clone(),
+            ));
+        }
     }
-    if sb.section(section::FONT).is_some() {
-        sb.optional_features |= optional::FONT;
-    } else {
-        sb.optional_features &= !optional::FONT;
+    let span: u64 = pieces
+        .iter()
+        .map(|(_, d)| (d.len() as u64).next_multiple_of(block))
+        .sum();
+
+    // Writes `pieces` from `at` and points the superblock at them, the
+    // file then ending at `size`.
+    let place = |file: &mut File, sb: &mut Superblock, at: u64, size: u64| -> Result<()> {
+        let mut pos = at;
+        let mut placed = Vec::with_capacity(pieces.len());
+        for (s, data) in &pieces {
+            file.seek(SeekFrom::Start(pos))?;
+            file.write_all(data)?;
+            let pad = (data.len() as u64).next_multiple_of(block) - data.len() as u64;
+            file.write_all(&vec![0u8; pad as usize])?;
+            placed.push(SectionEntry { offset: pos, ..*s });
+            pos += data.len() as u64 + pad;
+        }
+        let gone =
+            |s: &SectionEntry| changed(s.kind) || pieces.iter().any(|(p, _)| p.kind == s.kind);
+        sb.sections.retain(|s| !gone(s));
+        sb.sections.extend(placed);
+        if sb.section(section::FONT).is_some() {
+            sb.optional_features |= optional::FONT;
+        } else {
+            sb.optional_features &= !optional::FONT;
+        }
+        sb.file_size = size;
+        let head = sb.encode()?;
+        file.sync_data()?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&head)?;
+        file.sync_all()?;
+        Ok(())
+    };
+
+    // First after the end, clear of where the sections will finally go.
+    let staged = end
+        .next_multiple_of(block)
+        .max(from.map_or(0, |at| at + span));
+    place(&mut file, &mut sb, staged, staged + span)?;
+    if let Some(at) = from {
+        // Then down into the space no longer referred to, and the file cut
+        // short after them.
+        place(&mut file, &mut sb, at, at + span)?;
+        file.set_len(at + span)?;
+        file.sync_all()?;
     }
-    sb.file_size = end;
-    let head = sb.encode()?;
-    file.sync_data()?;
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(&head)?;
-    file.sync_all()?;
     Ok(())
 }

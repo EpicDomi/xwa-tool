@@ -51,9 +51,11 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   (`xwa-convert/src/fallback.rs`; `xwa-fetch/src/fonts.rs` downloads and
   keeps them); `cargo xtask fonts --rare` writes `fonts-rare.tsv.zst` beside
   it, the optional fonts for rare characters (other Noto designs,
-  Plangothic from GitHub, GNU Unifont), each listed only for what it adds,
-  with the mean size of those glyphs for cost estimates. It needs
-  api.github.com and github.com for Plangothic.
+  Plangothic's latest release, NewGardiner at its newest commit, GNU
+  Unifont), each listed only for what it adds, with the mean size of those
+  glyphs for cost estimates. It needs api.github.com and github.com (and
+  `git`), and fails, after writing what it could, when a source can't be
+  had. `cargo xtask unicode` follows the newest Unicode version.
 - `docs/format-spec-v0.md`: the format specification.
 
 ## Rules

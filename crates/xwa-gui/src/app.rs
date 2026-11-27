@@ -2982,13 +2982,11 @@ fn summary(r: &xwa_convert::Report, out: &Path, device: xwa_convert::Device) -> 
     if let Some(f) = &r.fallback_font
         && f.rare.0 > 0
     {
-        // Adding them writes the font anew after the old one.
-        let font: usize = f.bytes + f.styled.iter().map(|s| s.bytes).sum::<usize>();
         done.push_str(&format!(
             " Its text has {} the fallback font leaves out as rare: Add rare characters, \
              on the Copy to SD card screen, draws them for about {} more.",
             crate::screens::characters(f.rare.0),
-            size_text(f.rare.1 + font as u64)
+            size_text(f.rare.1)
         ));
     }
     if let Some(f) = &r.fallback_font

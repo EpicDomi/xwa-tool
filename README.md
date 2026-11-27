@@ -128,13 +128,13 @@ The window *is* the reader: an X4 Pro, X4 or X3, in a black or white case. Its s
 - **Pictures** can be left out for a far smaller archive.
 - **Sharper diagrams** fetches crisper diagrams from Wikipedia (see below).
 - **Real italic** stores true italic letters for scripts the reader's fonts lack; *See the difference* shows pictures of both.
-- **Rare characters** (off unless chosen) also draws what no Noto font has: the rare Chinese characters of Unicode's extensions B to I, and letters and symbols of scripts new to Unicode, from Plangothic and GNU Unifont. Its tooltip says how many characters it adds and what its fonts take to download. An archive grows only by the ones its text uses: nothing for most wikis, up to about 55 MB for one that uses them all, as English Wikipedia's articles on Unicode do. Converted without it, the summary says how many the wiki has and what adding them would cost.
+- **Rare characters** (off unless chosen) also draws what no Noto font has: the rare Chinese characters of Unicode's extensions B to J, Egyptian hieroglyphs, and letters and symbols of scripts new to Unicode, from Plangothic, NewGardiner and GNU Unifont. Its tooltip says how many characters it adds and what its fonts take to download. An archive grows only by the ones its text uses: nothing for most wikis, up to about 55 MB for one that uses them all, as English Wikipedia's articles on Unicode do. Converted without it, the summary says how many the wiki has and what adding them would cost.
 
 <p align="center">
   <img src="docs/images/card-firmware.png" alt="Copy to SD card with a card selected, the Firmware screen, and firmware being installed" width="840">
 </p>
 
-**Copy to SD card** puts an archive on a card. If an archive was converted offline and is missing some glyphs, it offers to complete its font in place. If its text has rare characters it was converted without, *Add rare characters* adds them in place, saying how many and how much space it takes.
+**Copy to SD card** puts an archive on a card. If an archive was converted offline and is missing some glyphs, it offers to complete its font in place. If its text has rare characters it was converted without, *Add rare characters* adds them in place, saying how many and how much space it takes. Rebuilding a font in place takes back the old font's space.
 
 <p align="center">
   <img src="docs/images/read.png" alt="Read: searching an archive, an article with its formulas, and a cladogram with its pictures" width="840">
@@ -338,7 +338,7 @@ cargo test --workspace
 | [`xwa-cli`](crates/xwa-cli) | The `xwa-tool` command line |
 | [`xwa-gui`](crates/xwa-gui) | The `xwa-tool-gui` app ([iced](https://iced.rs)) |
 | [`xtask`](xtask) | `cargo xtask licenses` (the release's third-party notice), `days` (each Wikipedia's day articles, from Wikidata), `fonts` (the Noto font catalogue; `--rare` for the fonts for rare characters), `unicode` (code points no font draws) |
-| [`docs`](docs) | The [XWA format specification](docs/format-spec-v0.md), and [ideas for later](docs/future.md) |
+| [`docs`](docs) | The [XWA format specification](docs/format-spec-v0.md) |
 
 Every push to `main` builds the Windows, macOS and Linux zips, which are kept as workflow artifacts. Pushing a `v*` tag attaches them to a GitHub release.
 
@@ -351,7 +351,7 @@ It stands on the work of many others:
 - **[Kiwix](https://kiwix.org)** and **[Wikimedia](https://wikimedia.org)** make the ZIM files. The articles in an archive keep their own licences (for Wikipedia, CC BY-SA), and each archive names its source.
 - **[KaTeX](https://katex.org)**: its fonts are embedded for drawing formulas (SIL Open Font License).
 - **[Noto](https://fonts.google.com/noto)**: the fallback glyphs come from the Noto fonts (SIL Open Font License).
-- **[Plangothic](https://github.com/Fitzgerald-Porthmouth-Koenigsegg/Plangothic-Project)** and **[GNU Unifont](https://unifoundry.com/unifont/)** draw rare characters, when chosen (SIL Open Font License; Unifont is also under the GNU GPL with the font embedding exception).
+- **[Plangothic](https://github.com/Fitzgerald-Porthmouth-Koenigsegg/Plangothic-Project)**, **[NewGardiner](https://github.com/nederhof/newgardiner)** and **[GNU Unifont](https://unifoundry.com/unifont/)** draw rare characters, when chosen (SIL Open Font License; Unifont is also under the GNU GPL with the font embedding exception).
 - **[Ubuntu](https://design.ubuntu.com/font)** and Noto Sans draw the app's screen, as on the reader (Ubuntu Font Licence; SIL Open Font License).
 - **[CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)** and **[CPR-vCodex](https://github.com/franssjz/cpr-vcodex)**: the firmware these archives are made for, whose menus and icons the app draws.
 

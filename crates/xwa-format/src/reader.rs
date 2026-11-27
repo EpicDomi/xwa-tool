@@ -164,7 +164,9 @@ impl<S: Source> Archive<S> {
                 "required features {unknown:#x}"
             )));
         }
-        if sb.file_size != size {
+        // Bytes after the end are unused (spec 2): what a tool changing the
+        // archive in place may leave if it is stopped.
+        if size < sb.file_size {
             return Err(corrupt(format!(
                 "file is {size} bytes but should be {} (incomplete copy?)",
                 sb.file_size

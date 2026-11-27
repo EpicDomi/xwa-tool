@@ -342,9 +342,11 @@ fn file_line(
 ///
 /// - the designs of Noto scripts the main catalogue leaves out, for what
 ///   only they have (Noto Sans Tamil Supplement, for one);
-/// - Plangothic, for the CJK ideographs of Unicode's extensions B to I,
+/// - Plangothic, for the CJK ideographs of Unicode's extensions B to J,
 ///   which Noto has only the commonest of, and many of the newest letters
 ///   and symbols;
+/// - NewGardiner, for the Egyptian hieroglyphs of Extended-A (Unicode 16),
+///   which Noto Sans Egyptian Hieroglyphs lacks;
 /// - GNU Unifont and Unifont Upper, drawn from pixels, as the last resort.
 ///
 /// A file is listed only where it has a glyph no font before it has. Each
@@ -384,6 +386,10 @@ pub fn write_rare(root: &Path) -> Result<(), String> {
     match plangothic(&agent) {
         Ok(files) => sources.extend(files.into_iter().map(|(n, u)| (n, Ok(u)))),
         Err(e) => sources.push(("Plangothic".into(), Err(e))),
+    }
+    match newgardiner() {
+        Ok(files) => sources.extend(files.into_iter().map(|(n, u)| (n, Ok(u)))),
+        Err(e) => sources.push(("NewGardiner".into(), Err(e))),
     }
     match unifont(&agent) {
         Ok(files) => sources.extend(files.into_iter().map(|(n, u)| (n, Ok(u)))),
@@ -487,8 +493,9 @@ fn noto_variants(agent: &ureq::Agent) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Plangothic's latest release on GitHub: its two TrueType files (the
-/// font is split in two, as one file can hold at most 65,535 glyphs).
+/// Plangothic's latest release on GitHub: its TrueType files, in order
+/// (the font is split in parts, P1, P2 and so on, as one file can hold at
+/// most 65,535 glyphs).
 fn plangothic(agent: &ureq::Agent) -> Result<Vec<(String, String)>, String> {
     let release = agent
         .get("https://api.github.com/repos/Fitzgerald-Porthmouth-Koenigsegg/Plangothic-Project/releases/latest")
@@ -500,18 +507,48 @@ fn plangothic(agent: &ureq::Agent) -> Result<Vec<(String, String)>, String> {
         .map_err(|e| format!("Plangothic's releases: {e}"))?;
     let json: serde_json::Value = serde_json::from_str(&release).map_err(|e| e.to_string())?;
     let assets = json["assets"].as_array().ok_or("Plangothic: no assets")?;
-    ["P1", "P2"]
+    let mut parts: Vec<(u32, String, String)> = assets
         .iter()
-        .map(|part| {
-            let name = format!("Plangothic{part}-Regular.ttf");
-            assets
-                .iter()
-                .find(|a| a["name"].as_str() == Some(&name))
-                .and_then(|a| a["browser_download_url"].as_str())
-                .map(|u| (format!("Plangothic {part}"), u.to_string()))
-                .ok_or_else(|| format!("Plangothic: no {name} in the latest release"))
+        .filter_map(|a| {
+            let name = a["name"].as_str()?;
+            let part: u32 = name
+                .strip_prefix("PlangothicP")?
+                .strip_suffix("-Regular.ttf")?
+                .parse()
+                .ok()?;
+            let url = a["browser_download_url"].as_str()?;
+            Some((part, format!("Plangothic P{part}"), url.to_string()))
         })
-        .collect()
+        .collect();
+    parts.sort();
+    if parts.is_empty() {
+        return Err("Plangothic: no PlangothicP*-Regular.ttf in the latest release".into());
+    }
+    Ok(parts.into_iter().map(|(_, n, u)| (n, u)).collect())
+}
+
+/// NewGardiner's fonts at the newest commit of its repository, which is
+/// where it is published: the core signs, then the few non-core ones.
+fn newgardiner() -> Result<Vec<(String, String)>, String> {
+    const REPO: &str = "https://github.com/nederhof/newgardiner";
+    let out = std::process::Command::new("git")
+        .args(["ls-remote", REPO, "refs/heads/main"])
+        .output()
+        .map_err(|e| format!("NewGardiner: git: {e}"))?;
+    let commit = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .filter(|c| c.len() == 40)
+        .map(str::to_string)
+        .ok_or("NewGardiner: no main branch")?;
+    let raw = format!("https://raw.githubusercontent.com/nederhof/newgardiner/{commit}/fonts");
+    Ok(vec![
+        ("NewGardiner".into(), format!("{raw}/NewGardiner.ttf")),
+        (
+            "NewGardiner Non-Core".into(),
+            format!("{raw}/NewGardinerNonCore.ttf"),
+        ),
+    ])
 }
 
 /// GNU Unifont's latest version: its fonts for the Basic Multilingual Plane

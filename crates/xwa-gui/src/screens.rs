@@ -85,8 +85,9 @@ fn rare_tip() -> String {
     let others = r.characters - r.ideographs;
     format!(
         "Adds the shapes of characters no Noto font has, which the e-reader shows as boxes: \
-         {} rare Chinese characters (Unicode's extensions B to I) and {} letters and symbols \
-         of scripts new to Unicode, from Plangothic and GNU Unifont. Few wikis use them. The \
+         {} rare Chinese characters (Unicode's extensions B to J) and {} letters and symbols \
+         of scripts new to Unicode, from Plangothic, NewGardiner and GNU Unifont. Few wikis \
+         use them. The \
          archive grows only by the ones its text uses: nothing for most wikis, up to about \
          {} for one that uses them all, as English Wikipedia's articles on Unicode do. Their \
          fonts ({}) are downloaded the first time they are needed. Converted without it, the \
