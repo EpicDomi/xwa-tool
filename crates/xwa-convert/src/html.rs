@@ -357,6 +357,15 @@ fn is_chrome(e: &Element) -> bool {
         "portal",
         "mw-empty-elt",
         "mw-editsection",
+        // The edit link of an excerpt's note ("This section is an excerpt
+        // from ... [edit]").
+        "mw-editsection-like",
+        // Coordinates Wikipedia shows only beside the title, and the " / "
+        // between a coordinate's two forms, of which one is kept.
+        "geo-inline-hidden",
+        "geo-multi-punct",
+        // "Media related to ... at Wikimedia Commons".
+        "sister-inline",
         "reference",
         "mw-ref",
         "reflist",
@@ -467,6 +476,36 @@ fn child_elements<'a>(
         .filter_map(|c| c.value().as_element().map(|e| (c, e)))
 }
 
+/// Whether a list item is a link to another website: its first text is in
+/// an external link (Parsoid's `rel="mw:ExtLink"`, or class `external`), as
+/// in "External links" sections in any language.
+fn is_external_entry(li: NodeRef<'_, Node>) -> bool {
+    let Some(text) = li.descendants().find(|d| match d.value() {
+        Node::Text(t) => !t.trim().is_empty(),
+        _ => false,
+    }) else {
+        return false;
+    };
+    text.ancestors()
+        .take_while(|a| a.id() != li.id())
+        .filter_map(|a| element(&a))
+        .any(|e| {
+            e.name() == "a"
+                && (e.attr("rel").is_some_and(|r| r.contains("mw:ExtLink"))
+                    || has_class(e, "external"))
+        })
+}
+
+/// Whether every data cell of a table starts with a link to another
+/// website, as a box of external media does.
+fn is_external_links_table(table: NodeRef<'_, Node>) -> bool {
+    let cells: Vec<_> = table
+        .descendants()
+        .filter(|d| element(d).is_some_and(|e| e.name() == "td"))
+        .collect();
+    !cells.is_empty() && cells.into_iter().all(is_external_entry)
+}
+
 fn text_content(n: NodeRef<'_, Node>) -> String {
     let mut s = String::new();
     for d in n.descendants() {
@@ -573,6 +612,11 @@ impl Cx<'_> {
         }
         self.note_place(e);
         match e.name() {
+            // "Media related to ... at Wikimedia Commons" and its kin: a
+            // line about another site, after its logo.
+            "p" if child_elements(node)
+                .find(|(_, ce)| ce.name() != "style")
+                .is_some_and(|(_, ce)| has_class(ce, "sister-inline-image")) => {}
             "p" => {
                 flow.flush();
                 self.flow_children(node, flow);
@@ -656,6 +700,32 @@ impl Cx<'_> {
                 normalize(&mut run);
                 if !run.is_empty() {
                     flow.block(Block::Para(vec![styled(Style::Italic, run)]));
+                }
+            }
+            "div" if has_class(e, "hidden-begin") => {
+                // A collapsible box ("Titles and succession"): its title
+                // only when something of its content is kept.
+                let mut inner = Flow::default();
+                for (c, ce) in child_elements(node) {
+                    if !has_class(ce, "hidden-title") {
+                        self.flow_node(c, &mut inner);
+                    }
+                }
+                let content = inner.finish();
+                if !content.is_empty() {
+                    for (c, ce) in child_elements(node) {
+                        if has_class(ce, "hidden-title") {
+                            let mut run = Vec::new();
+                            self.inline_children(c, &mut run);
+                            normalize(&mut run);
+                            if !run.is_empty() {
+                                flow.block(Block::Para(vec![styled(Style::Bold, run)]));
+                            }
+                        }
+                    }
+                    for b in content {
+                        flow.block(b);
+                    }
                 }
             }
             "div" if has_class(e, "gallery") => self.gallery(node, flow),
@@ -921,6 +991,11 @@ impl Cx<'_> {
     }
 
     fn table(&mut self, node: NodeRef<'_, Node>, e: &Element, flow: &mut Flow) {
+        // A box of links to other websites ("External videos").
+        if self.in_cell == 0 && is_external_links_table(node) {
+            self.stats.citations_dropped += 1;
+            return;
+        }
         if has_class(e, "clade") {
             self.cladogram(node, Vec::new(), flow);
             return;
@@ -1722,6 +1797,7 @@ fn count_images(node: NodeRef<'_, Node>) -> u64 {
 /// bibliography or an "External links" section.
 fn is_link_or_citation_list(list: NodeRef<'_, Node>) -> bool {
     let mut items = 0;
+    let mut links = 0;
     for (li, le) in child_elements(list) {
         if le.name() != "li" {
             continue;
@@ -1740,11 +1816,15 @@ fn is_link_or_citation_list(list: NodeRef<'_, Node>) -> bool {
                 _ => {}
             }
         }
-        if !(citation || (external && !internal)) {
-            return false;
+        // An entry that starts with a link to another website is one even
+        // when it names a Wikipedia article after ("Archived ... at the
+        // Wayback Machine").
+        if citation || (external && !internal) || is_external_entry(li) {
+            links += 1;
         }
     }
-    items > 0
+    // Two in three: a list of links keeps the odd entry that is not one.
+    items > 0 && links * 3 >= items * 2
 }
 
 /// Cells grouped by the row their top-left corner is in.
@@ -2038,6 +2118,32 @@ fn trim_end(list: &mut Vec<Inline>) {
 /// Drops headings with nothing under them before the next heading of the
 /// same or a higher level. Also gives, for each heading before (in order),
 /// its section number after: its own, or the one it now falls in.
+/// A short line of bold text alone, or one indented: a label for what
+/// follows rather than content.
+fn is_label(b: &Block) -> bool {
+    fn bold_only(run: &[Inline]) -> bool {
+        run.iter().all(|i| match i {
+            Inline::Styled(Style::Bold, _) => true,
+            Inline::Text(t) => t.trim().is_empty(),
+            _ => false,
+        })
+    }
+    match b {
+        Block::Para(run) => {
+            bold_only(run)
+                && run.iter().any(|i| !matches!(i, Inline::Text(_)))
+                && plain_text(run).chars().count() <= 120
+        }
+        Block::Quote(inner) => inner.len() == 1 && is_label(&inner[0]),
+        // Terms of a definition list with no definitions.
+        Block::List {
+            kind: ListKind::Definition,
+            items,
+        } => items.iter().all(|i| i.len() == 1 && is_label(&i[0])),
+        _ => false,
+    }
+}
+
 fn drop_empty_headings(
     blocks: Vec<Block>,
     anchors: Vec<Option<String>>,
@@ -2046,16 +2152,27 @@ fn drop_empty_headings(
         Block::Heading { level, .. } => Some(*level),
         _ => None,
     };
-    let keep: Vec<bool> = (0..blocks.len())
+    // A heading is kept when something other than headings and labels
+    // follows it before the next heading of its level or above: labels are
+    // what is left of a section whose lists were left out ("Citations",
+    // "Books"), and go with it.
+    let mut keep: Vec<bool> = (0..blocks.len())
         .map(|i| match level(&blocks[i]) {
             None => true,
             Some(l) => blocks[i + 1..]
                 .iter()
-                .map(level)
-                .take_while(|n| n.is_none_or(|n| n > l))
-                .any(|n| n.is_none()),
+                .take_while(|b| level(b).is_none_or(|n| n > l))
+                .any(|b| level(b).is_none() && !is_label(b)),
         })
         .collect();
+    let mut dropped = false;
+    for (b, k) in blocks.iter().zip(keep.iter_mut()) {
+        match level(b) {
+            Some(_) => dropped = !*k,
+            None if dropped && is_label(b) => *k = false,
+            None => {}
+        }
+    }
     let mut sections = Vec::new();
     let mut n = 0;
     for (b, k) in blocks.iter().zip(&keep) {
@@ -2668,6 +2785,43 @@ mod more_tests {
                 text("H"),
                 Inline::Styled(Style::Subscript, vec![text("5")]),
             ])]
+        );
+    }
+
+    #[test]
+    fn what_points_elsewhere_or_says_nothing_is_left_out() {
+        let ext = |t: &str| {
+            format!(r#"<a rel="mw:ExtLink" class="external text" href="https://x.org/">{t}</a>"#)
+        };
+        let wayback = r#" Archived 2012 at the <a rel="mw:WikiLink" href="Wayback_Machine">Wayback Machine</a>"#;
+        let body = format!(
+            r#"<div class="excerpt-block"><div role="note" class="hatnote">This section is an excerpt from Goodreads.<span class="mw-editsection-like "><span class="mw-editsection-bracket">[</span>{edit}<span class="mw-editsection-bracket">]</span></span></div></div>
+            <p>Seen at <span class="geo-default">69°S 2°W</span><span class="geo-multi-punct"> / </span><span class="geo-nondefault">-69, -2</span>, in 1820.</p>
+            <div class="mw-heading mw-heading2"><h2 id="References">References</h2></div>
+            <div class="mw-heading mw-heading3"><h3 id="Citations">Citations</h3></div>
+            <p><b>Attribution</b></p>
+            <dl><dt>Books</dt></dl>
+            <div class="mw-heading mw-heading2"><h2 id="External_links">External links</h2></div>
+            <table class="infobox"><tr><th>External videos</th></tr><tr><td><span typeof="mw:File"><img src="./_assets_/v.png" width="16" height="16"></span> {video}</td></tr></table>
+            <ul><li>{a}{wayback}</li><li>{b}</li><li>Plain text</li></ul>
+            <p><span class="noviewer sister-inline-image"><img src="./_assets_/c.png" width="12" height="16"></span><span> Media related to </span><a class="extiw external" href="https://commons.wikimedia.org/">X</a><span> at Wikimedia Commons</span></p>
+            <p><span class="geo-inline-hidden"><span class="geo-default">90°S 0°E</span></span></p>
+            <div class="hidden-begin"><div class="hidden-title">Titles and succession</div><div class="hidden-content"><div class="navbox">Kings</div></div></div>"#,
+            edit = ext("edit"),
+            video = ext("Old film"),
+            a = ext("Protein database"),
+            b = ext("Proteopedia"),
+        );
+        let x = run(&body);
+        assert_eq!(
+            x.article.body,
+            vec![
+                Block::Para(vec![styled(
+                    Style::Italic,
+                    vec![text("This section is an excerpt from Goodreads.")]
+                )]),
+                Block::Para(vec![text("Seen at 69°S 2°W, in 1820.")]),
+            ]
         );
     }
 
