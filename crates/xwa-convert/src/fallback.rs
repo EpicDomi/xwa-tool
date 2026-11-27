@@ -899,7 +899,7 @@ mod tests {
         // α is in Noto Sans; U+11FC0 is a Tamil fraction only Noto Sans
         // Tamil Supplement has, U+10D40 a Garay letter (Unicode 16) only
         // Unifont Upper has, and U+13460 an Egyptian hieroglyph of
-        // Extended-A only NewGardiner has; U+18E00 is Jurchen and U+3D000
+        // Extended-A only NewGardiner has; U+18E01 is Jurchen and U+3D000
         // Seal (Unicode 18), which no font xwa-tool knows has yet; U+0378
         // is unassigned, and U+E000 private use (whatever a font may put
         // there).
@@ -908,7 +908,7 @@ mod tests {
             '\u{11FC0}',
             '\u{10D40}',
             '\u{13460}',
-            '\u{18E00}',
+            '\u{18E01}',
             '\u{3D000}',
             '\u{378}',
             '\u{E000}',
@@ -921,7 +921,7 @@ mod tests {
             "{}",
             l.rare_bytes
         );
-        assert_eq!(l.not_in_noto, ['\u{18E00}', '\u{3D000}']);
+        assert_eq!(l.not_in_noto, ['\u{18E01}', '\u{3D000}']);
         // Seal characters are not CJK ideographs of the extensions.
         assert_eq!((l.rare_ideographs, l.unknown_ideographs), (0, 0));
         assert_eq!(no_character().len(), 735, "the whole table is read");
@@ -942,11 +942,9 @@ mod tests {
             families.contains(&"Noto Sans Tamil Supplement"),
             "{families:?}"
         );
-        assert!(
-            families.ends_with(&["Unifont", "Unifont Upper"]),
-            "{families:?}"
-        );
+        assert!(families.ends_with(&["Unifont Upper"]), "{families:?}");
         assert!(families.contains(&"NewGardiner"), "{families:?}");
+        assert!(families.contains(&"Plangothic P1"), "{families:?}");
         assert!(rare.iter().all(|f| f.regular.glyph_bytes > 0));
         let all = fonts(None, true);
         let noto = fonts(None, false);

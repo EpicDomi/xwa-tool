@@ -869,9 +869,8 @@ under the SIL Open Font License 1.1. `cargo xtask fonts --rare` pins them
 as for the Noto fonts. Of the 172,808 characters Unicode 18 assigns, the
 Noto fonts lack 91,839 (72,591 of them rare CJK ideographs of extensions B
 to J); these fonts draw all but 12,768: the 11,328 of the Seal script and
-the 880 of Jurchen, both new in Unicode 18, which no openly licensed font
-has yet, and 560 Egyptian hieroglyphs whose shapes Unicode does not
-document. META `font.rare_characters` is `yes` for
+879 of Jurchen's 965, both new in Unicode 18, and 561 Egyptian
+hieroglyphs whose shapes Unicode does not document. META `font.rare_characters` is `yes` for
 such an archive, and `license.font` names the sources used. Nothing
 changes for a reader: they are glyphs in FONT like any other.
 
