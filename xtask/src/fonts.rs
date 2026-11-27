@@ -347,6 +347,8 @@ fn file_line(
 ///   and symbols;
 /// - NewGardiner, for the Egyptian hieroglyphs of Extended-A (Unicode 16),
 ///   which Noto Sans Egyptian Hieroglyphs lacks;
+/// - Sealie, for the Seal script (Unicode 18), in an even-stroked design;
+/// - Mallige Unicode, for Tulu-Tigalari (Unicode 16);
 /// - GNU Unifont and Unifont Upper, drawn from pixels, as the last resort.
 ///
 /// A file is listed only where it has a glyph no font before it has. Each
@@ -391,6 +393,18 @@ pub fn write_rare(root: &Path) -> Result<(), String> {
         Ok(files) => sources.extend(files.into_iter().map(|(n, u)| (n, Ok(u)))),
         Err(e) => sources.push(("NewGardiner".into(), Err(e))),
     }
+    sources.push((
+        "Sealie".into(),
+        release_asset(&agent, "iebb/sealie", "Sealie-Regular.ttf"),
+    ));
+    sources.push((
+        "Mallige Unicode".into(),
+        at_commit(
+            "TantryTuluFonts/Mallige_unicode",
+            "main",
+            "Mallige_Unicode_v2.ttf",
+        ),
+    ));
     match unifont(&agent) {
         Ok(files) => sources.extend(files.into_iter().map(|(n, u)| (n, Ok(u)))),
         Err(e) => sources.push(("Unifont".into(), Err(e))),
@@ -530,25 +544,63 @@ fn plangothic(agent: &ureq::Agent) -> Result<Vec<(String, String)>, String> {
 /// NewGardiner's fonts at the newest commit of its repository, which is
 /// where it is published: the core signs, then the few non-core ones.
 fn newgardiner() -> Result<Vec<(String, String)>, String> {
-    const REPO: &str = "https://github.com/nederhof/newgardiner";
+    Ok(vec![
+        (
+            "NewGardiner".into(),
+            at_commit("nederhof/newgardiner", "main", "fonts/NewGardiner.ttf")?,
+        ),
+        (
+            "NewGardiner Non-Core".into(),
+            at_commit(
+                "nederhof/newgardiner",
+                "main",
+                "fonts/NewGardinerNonCore.ttf",
+            )?,
+        ),
+    ])
+}
+
+/// The address of `path` in a GitHub repository at the newest commit of
+/// `branch`, for fonts published in a repository rather than a release.
+fn at_commit(repo: &str, branch: &str, path: &str) -> Result<String, String> {
     let out = std::process::Command::new("git")
-        .args(["ls-remote", REPO, "refs/heads/main"])
+        .args([
+            "ls-remote",
+            &format!("https://github.com/{repo}"),
+            &format!("refs/heads/{branch}"),
+        ])
         .output()
-        .map_err(|e| format!("NewGardiner: git: {e}"))?;
+        .map_err(|e| format!("{repo}: git: {e}"))?;
     let commit = String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
         .next()
         .filter(|c| c.len() == 40)
         .map(str::to_string)
-        .ok_or("NewGardiner: no main branch")?;
-    let raw = format!("https://raw.githubusercontent.com/nederhof/newgardiner/{commit}/fonts");
-    Ok(vec![
-        ("NewGardiner".into(), format!("{raw}/NewGardiner.ttf")),
-        (
-            "NewGardiner Non-Core".into(),
-            format!("{raw}/NewGardinerNonCore.ttf"),
-        ),
-    ])
+        .ok_or_else(|| format!("{repo}: no {branch} branch"))?;
+    Ok(format!(
+        "https://raw.githubusercontent.com/{repo}/{commit}/{path}"
+    ))
+}
+
+/// The address of a file attached to a GitHub repository's latest release.
+fn release_asset(agent: &ureq::Agent, repo: &str, name: &str) -> Result<String, String> {
+    let release = agent
+        .get(&format!(
+            "https://api.github.com/repos/{repo}/releases/latest"
+        ))
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| format!("{repo}'s releases: {e}"))?
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("{repo}'s releases: {e}"))?;
+    let json: serde_json::Value = serde_json::from_str(&release).map_err(|e| e.to_string())?;
+    json["assets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|a| a["name"].as_str() == Some(name)))
+        .and_then(|a| a["browser_download_url"].as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{repo}: no {name} in its latest release"))
 }
 
 /// GNU Unifont's latest version: its fonts for the Basic Multilingual Plane

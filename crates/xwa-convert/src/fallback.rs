@@ -39,6 +39,12 @@ pub fn license(families: &[String]) -> String {
     if from("NewGardiner") {
         sources.push("NewGardiner");
     }
+    if from("Sealie") {
+        sources.push("Sealie");
+    }
+    if from("Mallige") {
+        sources.push("Mallige");
+    }
     if from("Unifont") {
         sources.push("GNU Unifont");
     }
