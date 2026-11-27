@@ -86,10 +86,9 @@ fn rare_tip() -> String {
     format!(
         "Adds the shapes of characters no Noto font has, which the e-reader shows as boxes: \
          {} rare Chinese characters (Unicode's extensions B to J) and {} letters and symbols \
-         of scripts new to Unicode, from Plangothic, NewGardiner and GNU Unifont. Few wikis \
-         use them. The \
-         archive grows only by the ones its text uses: nothing for most wikis, up to about \
-         {} for one that uses them all, as English Wikipedia's articles on Unicode do. Their \
+         of scripts new to Unicode, from Plangothic, Sealie, NewGardiner, Mallige and GNU \
+         Unifont. Few wikis use them. The archive grows only by the ones its text uses: \
+         nothing for most wikis, up to about {} for one that uses them all. Their \
          fonts ({}) are downloaded the first time they are needed. Converted without it, the \
          summary says what it would add, and Copy to SD card can add it then.",
         group(r.ideographs as u64),
@@ -1114,8 +1113,8 @@ impl App {
                     .tip(format!(
                         "This archive's text has {} no Noto font has, such as rare Chinese \
                          characters or letters of scripts new to Unicode, which the e-reader \
-                         shows as boxes. This adds their shapes, from Plangothic and GNU \
-                         Unifont, without converting again: about {} more on the card. The \
+                         shows as boxes. This adds their shapes, from fonts such as \
+                         Plangothic, without converting again: about {} more on the card. The \
                          fonts are downloaded the first time.",
                         characters(rare.chars),
                         size_text(rare.bytes)

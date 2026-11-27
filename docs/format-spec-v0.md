@@ -863,14 +863,16 @@ Noto font has, from fonts looked in after every Noto font: the other
 designs of Noto scripts (Noto Sans Tamil Supplement, Noto Sans Mono and
 Noto Sans Syriac Western, for what only they have), Plangothic (the CJK
 ideographs of extensions B to J, and many of the newest letters and
-symbols), NewGardiner (Egyptian Hieroglyphs Extended-A) and GNU Unifont
-and Unifont Upper (outlines of 16-pixel glyphs, as the last resort), all
-under the SIL Open Font License 1.1. `cargo xtask fonts --rare` pins them
-as for the Noto fonts. Of the 172,808 characters Unicode 18 assigns, the
-Noto fonts lack 91,839 (72,591 of them rare CJK ideographs of extensions B
-to J); these fonts draw all but 12,768: the 11,328 of the Seal script and
-879 of Jurchen's 965, both new in Unicode 18, and 561 Egyptian
-hieroglyphs whose shapes Unicode does not document. META `font.rare_characters` is `yes` for
+symbols), NewGardiner (Egyptian Hieroglyphs Extended-A), Sealie (the Seal
+script), Mallige Unicode (Tulu-Tigalari) and GNU Unifont Upper (outlines
+of 16-pixel glyphs, as the last resort). `cargo xtask fonts --rare` pins
+them as for the Noto fonts. Of the 172,808 characters Unicode 18 assigns,
+the Noto fonts lack 91,839 (72,591 of them rare CJK ideographs of
+extensions B to J); these fonts draw all but 1,440: 879 of Jurchen's 965
+(Unicode 18), for which no font exists yet, and 561 Egyptian hieroglyphs
+whose shapes Unicode does not document. `cargo xtask coverage` lists
+them by block, and a weekly check brings in new Unicode versions and font
+releases and reports what has no glyph. META `font.rare_characters` is `yes` for
 such an archive, and `license.font` names the sources used. Nothing
 changes for a reader: they are glyphs in FONT like any other.
 

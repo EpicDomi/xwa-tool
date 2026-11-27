@@ -22,8 +22,12 @@
 //!
 //! `cargo xtask unicode` writes `crates/xwa-convert/data/no-character.txt`,
 //! the code points no font draws (unassigned, private use, surrogates and
-//! controls), from the Unicode Character Database.
+//! controls), from the latest Unicode Character Database.
+//!
+//! `cargo xtask coverage [--out FILE]` reports, block by block, the
+//! characters Unicode assigns that no font in the catalogues draws.
 
+mod coverage;
 mod days;
 mod fonts;
 mod spdx;
@@ -84,8 +88,15 @@ fn main() -> ExitCode {
         Some("fonts") if args.len() == 1 => fonts::write(&workspace_root()),
         Some("fonts") if args[1..] == ["--rare"] => fonts::write_rare(&workspace_root()),
         Some("unicode") if args.len() == 1 => unicode::write(&workspace_root()),
+        Some("coverage") => match &args[1..] {
+            [] => coverage::write(&workspace_root(), None),
+            [flag, out] if flag == "--out" => {
+                coverage::write(&workspace_root(), Some(Path::new(out)))
+            }
+            _ => Err("usage: cargo xtask coverage [--out FILE]".into()),
+        },
         _ => Err(
-            "usage: cargo xtask licenses [--target TRIPLE]... [--out FILE]\n       cargo xtask days\n       cargo xtask fonts [--rare]\n       cargo xtask unicode"
+            "usage: cargo xtask licenses [--target TRIPLE]... [--out FILE]\n       cargo xtask days\n       cargo xtask fonts [--rare]\n       cargo xtask unicode\n       cargo xtask coverage [--out FILE]"
                 .into(),
         ),
     };

@@ -5,8 +5,9 @@
 //!
 //! Optionally, rare characters too: what no Noto font has, from Plangothic
 //! (the rare CJK ideographs of Unicode's extensions B to J, and many of the
-//! newest letters and symbols), NewGardiner (Egyptian hieroglyphs), GNU
-//! Unifont, and the other designs of Noto scripts. `cargo xtask fonts --rare` makes their catalogue.
+//! newest letters and symbols), Sealie (Seal), NewGardiner (Egyptian
+//! hieroglyphs), Mallige (Tulu-Tigalari), GNU Unifont, and the other designs
+//! of Noto scripts. `cargo xtask fonts --rare` makes their catalogue.
 
 use std::collections::BTreeMap;
 
@@ -905,10 +906,10 @@ mod tests {
         // α is in Noto Sans; U+11FC0 is a Tamil fraction only Noto Sans
         // Tamil Supplement has, U+10D40 a Garay letter (Unicode 16) only
         // Unifont Upper has, and U+13460 an Egyptian hieroglyph of
-        // Extended-A only NewGardiner has; U+18E01 is Jurchen and U+3D000
-        // Seal (Unicode 18), which no font xwa-tool knows has yet; U+0378
-        // is unassigned, and U+E000 private use (whatever a font may put
-        // there).
+        // Extended-A only NewGardiner has, and U+3D000 a Seal character
+        // (Unicode 18) only Sealie has; U+18E01 is Jurchen (Unicode 18),
+        // which no font xwa-tool knows has yet; U+0378 is unassigned, and
+        // U+E000 private use (whatever a font may put there).
         let chars = [
             'α',
             '\u{11FC0}',
@@ -921,16 +922,21 @@ mod tests {
         ];
         let l = lacking(&chars, &fonts, &rare_catalogue());
         assert_eq!(l.in_noto, ['α']);
-        assert_eq!(l.in_rare, ['\u{11FC0}', '\u{10D40}', '\u{13460}']);
+        assert_eq!(
+            l.in_rare,
+            ['\u{11FC0}', '\u{10D40}', '\u{13460}', '\u{3D000}']
+        );
         assert!(
-            l.rare_bytes > 1000 && l.rare_bytes < 5000,
+            l.rare_bytes > 5000 && l.rare_bytes < 15000,
             "{}",
             l.rare_bytes
         );
-        assert_eq!(l.not_in_noto, ['\u{18E01}', '\u{3D000}']);
+        assert_eq!(l.not_in_noto, ['\u{18E01}']);
         // Seal characters are not CJK ideographs of the extensions.
         assert_eq!((l.rare_ideographs, l.unknown_ideographs), (0, 0));
-        assert_eq!(no_character().len(), 735, "the whole table is read");
+        // The whole table is read (the number of ranges changes little
+        // between Unicode versions).
+        assert!(no_character().len() > 700, "{}", no_character().len());
         // Without the fonts for rare characters, no font has them.
         let l = lacking(&chars, &fonts, &[]);
         assert_eq!(l.not_in_noto.len(), 5);

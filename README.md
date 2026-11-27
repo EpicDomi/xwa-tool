@@ -128,7 +128,7 @@ The window *is* the reader: an X4 Pro, X4 or X3, in a black or white case. Its s
 - **Pictures** can be left out for a far smaller archive.
 - **Sharper diagrams** fetches crisper diagrams from Wikipedia (see below).
 - **Real italic** stores true italic letters for scripts the reader's fonts lack; *See the difference* shows pictures of both.
-- **Rare characters** (off unless chosen) also draws what no Noto font has: the rare Chinese characters of Unicode's extensions B to J, Egyptian hieroglyphs, and letters and symbols of scripts new to Unicode, from Plangothic, NewGardiner and GNU Unifont. Its tooltip says how many characters it adds and what its fonts take to download. An archive grows only by the ones its text uses: nothing for most wikis, up to about 55 MB for one that uses them all, as English Wikipedia's articles on Unicode do. Converted without it, the summary says how many the wiki has and what adding them would cost.
+- **Rare characters** (off unless chosen) also draws what no Noto font has: the rare Chinese characters of Unicode's extensions B to J, the Seal script, Egyptian hieroglyphs, and letters and symbols of scripts new to Unicode, from Plangothic, Sealie, NewGardiner, Mallige and GNU Unifont. Its tooltip says how many characters it adds, what its fonts take to download, and the most an archive could grow. An archive grows only by the ones its text uses: nothing for most wikis, tens of MB for one whose articles show whole Unicode blocks, as English Wikipedia's do. Converted without it, the summary says how many the wiki has and what adding them would cost.
 
 <p align="center">
   <img src="docs/images/card-firmware.png" alt="Copy to SD card with a card selected, the Firmware screen, and firmware being installed" width="840">
@@ -262,7 +262,7 @@ xwa-tool flash --file firmware.bin --any-firmware          # any firmware file
 | `--hd-diagrams` | Sharper diagrams from Wikimedia; kept in the cache (`--hd-cache DIR` to choose where) |
 | `--math-as-text` | Write formulas as text instead of drawing them |
 | `--no-real-italic` | Leave out real italic glyphs; the reader slants the regular ones |
-| `--rare-characters` | Also draw rare characters no Noto font has (rare CJK ideographs, the newest scripts), from Plangothic and GNU Unifont; the report of a conversion without it says what it would add |
+| `--rare-characters` | Also draw rare characters no Noto font has (rare CJK ideographs, Seal, the newest scripts), from Plangothic, Sealie, NewGardiner, Mallige and GNU Unifont; the report of a conversion without it says what it would add |
 | `--no-fallback-font` | Leave out the fallback font altogether |
 | `--font-cache DIR` | Where the Noto fonts are kept |
 
@@ -351,7 +351,7 @@ It stands on the work of many others:
 - **[Kiwix](https://kiwix.org)** and **[Wikimedia](https://wikimedia.org)** make the ZIM files. The articles in an archive keep their own licences (for Wikipedia, CC BY-SA), and each archive names its source.
 - **[KaTeX](https://katex.org)**: its fonts are embedded for drawing formulas (SIL Open Font License).
 - **[Noto](https://fonts.google.com/noto)**: the fallback glyphs come from the Noto fonts (SIL Open Font License).
-- **[Plangothic](https://github.com/Fitzgerald-Porthmouth-Koenigsegg/Plangothic-Project)**, **[NewGardiner](https://github.com/nederhof/newgardiner)** and **[GNU Unifont](https://unifoundry.com/unifont/)** draw rare characters, when chosen (SIL Open Font License; Unifont is also under the GNU GPL with the font embedding exception).
+- **[Plangothic](https://github.com/Fitzgerald-Porthmouth-Koenigsegg/Plangothic-Project)**, **[Sealie](https://github.com/iebb/sealie)**, **[NewGardiner](https://github.com/nederhof/newgardiner)**, **[Mallige](https://github.com/TantryTuluFonts/Mallige_unicode)** and **[GNU Unifont](https://unifoundry.com/unifont/)** draw rare characters, when chosen (SIL Open Font License; Unifont is also under the GNU GPL with the font embedding exception).
 - **[Ubuntu](https://design.ubuntu.com/font)** and Noto Sans draw the app's screen, as on the reader (Ubuntu Font Licence; SIL Open Font License).
 - **[CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)** and **[CPR-vCodex](https://github.com/franssjz/cpr-vcodex)**: the firmware these archives are made for, whose menus and icons the app draws.
 

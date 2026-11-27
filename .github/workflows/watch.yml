@@ -1,0 +1,78 @@
+# Every week: brings in a new Unicode version and new releases of the fonts
+# the fallback font is drawn from, and opens (or updates) a pull request
+# when anything changed, saying what Unicode assigns that no font draws, so
+# that new characters are noticed and a font found for them.
+#
+# Pull requests opened with the workflow's own token do not start the CI
+# workflow, so this runs the tests itself and puts their result in the pull
+# request. Opening one needs "Allow GitHub Actions to create and approve pull
+# requests" (Settings > Actions > General); without it, the report becomes an
+# issue instead.
+name: Unicode and fonts
+
+on:
+  schedule:
+    - cron: "37 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    env:
+      BRANCH: data/unicode-and-fonts
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bring in the latest Unicode and fonts
+        run: |
+          cargo run -q -p xtask -- unicode
+          cargo run -q -p xtask -- fonts
+          cargo run -q -p xtask -- fonts --rare
+      - name: Say what has no glyph
+        run: cargo run -q -p xtask -- coverage --out coverage.md
+      - name: Test
+        id: test
+        continue-on-error: true
+        run: cargo test --workspace 2>&1 | tail -40 > test.log
+      - name: Propose the update
+        run: |
+          if git diff --quiet -- crates/xwa-convert/data; then
+            echo "Nothing changed."
+            exit 0
+          fi
+          {
+            cat coverage.md
+            echo
+            echo "## What changed"
+            echo
+            git diff --stat -- crates/xwa-convert/data | sed 's/^/    /'
+            echo
+            if [ "${{ steps.test.outcome }}" = success ]; then
+              echo "The tests pass with the new data."
+            else
+              echo "**The tests fail with the new data:**"
+              echo
+              echo '```'
+              cat test.log
+              echo '```'
+            fi
+          } > body.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          git add crates/xwa-convert/data
+          git commit -q -m "Bring in the latest Unicode data and font releases"
+          git push -f origin "$BRANCH"
+          title="Unicode and fonts: new data ($(date -u +%Y-%m-%d))"
+          if gh pr view "$BRANCH" --json state -q .state 2>/dev/null | grep -q OPEN; then
+            gh pr edit "$BRANCH" --title "$title" --body-file body.md
+          elif ! gh pr create --head "$BRANCH" --title "$title" --body-file body.md; then
+            gh issue create --title "$title" --body-file body.md
+          fi

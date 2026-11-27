@@ -76,8 +76,8 @@ enum Command {
         #[arg(long, conflicts_with = "no_fallback_font")]
         no_real_italic: bool,
         /// Draw rare characters too: what no Noto font has, such as the rare
-        /// CJK ideographs and the newest scripts, from Plangothic and GNU
-        /// Unifont. The archive grows only by the characters its text uses;
+        /// CJK ideographs, Seal and the newest scripts, from Plangothic,
+        /// Sealie, NewGardiner, Mallige and GNU Unifont. The archive grows only by the characters its text uses;
         /// the report of a conversion without it says how many and how much.
         #[arg(long, conflicts_with = "no_fallback_font")]
         rare_characters: bool,
