@@ -58,7 +58,8 @@ about 380 KB RAM, no PSRAM) are supported through the compact profile.
   it could, when a source can't be had. `cargo xtask unicode` follows the
   newest Unicode version, and `cargo xtask coverage` reports what it
   assigns that no font draws. `.github/workflows/watch.yml` runs all three
-  weekly and opens a pull request when the data changes.
+  weekly and opens an issue (or updates the open one) when the data would
+  change; bring the data in by running them and committing it.
 - `docs/format-spec-v0.md`: the format specification.
 
 ## Rules

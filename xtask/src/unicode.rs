@@ -5,7 +5,8 @@
 //!
 //! One range per line, in hexadecimal (`0378-0379`, or `E000-F8FF`), after
 //! a line naming the Unicode version. It follows the latest version of
-//! Unicode, which the weekly check (`.github/workflows/watch.yml`) brings in.
+//! Unicode; the weekly check (`.github/workflows/watch.yml`) says when a new
+//! one is out.
 
 use std::path::Path;
 

@@ -871,8 +871,8 @@ the Noto fonts lack 91,839 (72,591 of them rare CJK ideographs of
 extensions B to J); these fonts draw all but 1,440: 879 of Jurchen's 965
 (Unicode 18), for which no font exists yet, and 561 Egyptian hieroglyphs
 whose shapes Unicode does not document. `cargo xtask coverage` lists
-them by block, and a weekly check brings in new Unicode versions and font
-releases and reports what has no glyph. META `font.rare_characters` is `yes` for
+them by block, and a weekly check reports new Unicode versions and font
+releases, and what has no glyph. META `font.rare_characters` is `yes` for
 such an archive, and `license.font` names the sources used. Nothing
 changes for a reader: they are glyphs in FONT like any other.
 

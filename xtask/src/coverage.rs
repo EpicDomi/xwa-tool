@@ -1,7 +1,7 @@
 //! What the fallback font can draw of what Unicode assigns, by block: a
-//! report in Markdown for the weekly check, which opens a pull request with
-//! it when Unicode or a font changes, so new characters no font draws are
-//! seen (`.github/workflows/watch.yml`).
+//! report in Markdown for the weekly check, which opens an issue with it
+//! when Unicode or a font changes, so new characters no font draws are seen
+//! (`.github/workflows/watch.yml`).
 //!
 //! Reads the catalogues in `crates/xwa-convert/data` and the latest Unicode
 //! Character Database; characters the e-reader's own fonts draw come from
