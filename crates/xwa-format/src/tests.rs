@@ -640,6 +640,93 @@ fn font_sections_can_be_replaced_in_place() {
 }
 
 #[test]
+fn patching_sections_takes_back_the_old_ones_space() {
+    use crate::font::{Font, FontChars, FontStyle, Glyph};
+    let font = |chars: &str| Font {
+        upem: 1000,
+        ascender: 800,
+        descender: -200,
+        line_gap: 0,
+        glyphs: chars
+            .chars()
+            .map(|c| {
+                (
+                    c,
+                    Glyph {
+                        advance: 500,
+                        outline: Default::default(),
+                    },
+                )
+            })
+            .collect(),
+    };
+    let mut w = ArchiveWriter::new(Cursor::new(Vec::new()), options(Profile::Compact)).unwrap();
+    let article = Article {
+        title: "Pi".into(),
+        body: vec![Block::Para(vec![Inline::Text("π and ω".into())])],
+        ..Default::default()
+    };
+    w.add_article(0, &article, 0).unwrap();
+    let text = w.text_chars();
+    let none = crate::normalize::CharSet::default();
+    w.set_font(FontStyle::Regular, font("π").encode().unwrap());
+    w.set_font_chars(&FontChars::new(false, [&text, &none, &none, &none]));
+    let (bytes, _) = finish(w);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.xwa");
+    std::fs::write(&path, &bytes).unwrap();
+    let size = || std::fs::metadata(&path).unwrap().len();
+    let before = size();
+
+    // Rebuilt again and again, the font takes the old one's place: the file
+    // stays the size of one copy, and ends where its superblock says.
+    let mut meta = Archive::open(&path).unwrap().meta().to_vec();
+    meta.push(("a".into(), "b".into()));
+    let mut sizes = Vec::new();
+    for _ in 0..4 {
+        crate::writer::patch_sections(
+            &path,
+            &[
+                (section::FONT, Some(font("πω").encode().unwrap())),
+                (section::META, Some(crate::meta::encode(&meta))),
+            ],
+        )
+        .unwrap();
+        let a = Archive::open(&path).unwrap();
+        assert_eq!(a.superblock().file_size, size());
+        assert_eq!(a.font().unwrap().unwrap(), font("πω"));
+        assert_eq!(a.meta_value("a"), Some("b"));
+        let r = a.verify(&mut |_, _, _| {}).unwrap();
+        assert!(r.ok(), "{:?}", r.problems);
+        sizes.push(size());
+    }
+    assert!(sizes.windows(2).all(|w| w[0] == w[1]), "{sizes:?}");
+    // META came before the font's section: its old copy is all that stays.
+    assert!(
+        sizes[0] <= before + 2 * crate::BLOCK_SIZE as u64,
+        "{before} -> {sizes:?}"
+    );
+
+    // Bytes after the end, as a stopped tool may leave, are ignored; a
+    // shorter file is still an incomplete copy.
+    let mut data = std::fs::read(&path).unwrap();
+    data.extend_from_slice(&[0xAB; 1000]);
+    std::fs::write(&path, &data).unwrap();
+    let a = Archive::open(&path).unwrap();
+    assert!(a.verify(&mut |_, _, _| {}).unwrap().ok());
+    drop(a);
+    crate::writer::patch_sections(&path, &[(section::FONT, Some(font("ω").encode().unwrap()))])
+        .unwrap();
+    let a = Archive::open(&path).unwrap();
+    assert_eq!(a.superblock().file_size, size(), "the junk is cut off too");
+    assert_eq!(a.font().unwrap().unwrap(), font("ω"));
+    drop(a);
+    data.truncate(data.len() - 2000);
+    std::fs::write(&path, &data).unwrap();
+    assert!(Archive::open(&path).is_err());
+}
+
+#[test]
 fn days_name_an_article_for_each_day() {
     let mut w = ArchiveWriter::new(Cursor::new(Vec::new()), options(Profile::Compact)).unwrap();
     for (id, title) in ["January 1", "February 29"].into_iter().enumerate() {

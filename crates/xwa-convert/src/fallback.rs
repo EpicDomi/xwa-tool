@@ -2,6 +2,12 @@
 //! the characters an archive's text uses that the firmware's own fonts
 //! cannot draw, and FONT_BOLD (10.1): their bold glyphs, from the bold of
 //! the same family. `cargo xtask fonts` makes the catalogue of fonts.
+//!
+//! Optionally, rare characters too: what no Noto font has, from Plangothic
+//! (the rare CJK ideographs of Unicode's extensions B to J, and many of the
+//! newest letters and symbols), Sealie (Seal), NewGardiner (Egyptian
+//! hieroglyphs), Mallige (Tulu-Tigalari), GNU Unifont, and the other designs
+//! of Noto scripts. `cargo xtask fonts --rare` makes their catalogue.
 
 use std::collections::BTreeMap;
 
@@ -13,6 +19,9 @@ use xwa_format::normalize::CharSet;
 
 /// One line per file: family, style, URL, SHA-256, size, coverage.
 static CATALOGUE: &[u8] = include_bytes!("../data/fonts.tsv.zst");
+/// The fonts for rare characters, looked in after the Noto fonts: the same,
+/// and the mean size of the glyphs each adds.
+static RARE: &[u8] = include_bytes!("../data/fonts-rare.tsv.zst");
 
 /// What every glyph is scaled to.
 const UPEM: u16 = 1000;
@@ -20,9 +29,36 @@ const UPEM: u16 = 1000;
 const ASCENDER: i16 = 1069;
 const DESCENDER: i16 = -293;
 
-/// META `license.font`, when an archive has FONT.
-pub const LICENSE: &str =
-    "Fallback glyphs from the Noto fonts (Google Fonts), SIL Open Font License 1.1";
+/// META `license.font`, when an archive has FONT: the sources of the
+/// families its glyphs came from.
+pub fn license(families: &[String]) -> String {
+    let from = |prefix: &str| families.iter().any(|f| f.starts_with(prefix));
+    let mut sources = vec!["the Noto fonts (Google Fonts)"];
+    if from("Plangothic") {
+        sources.push("Plangothic");
+    }
+    if from("NewGardiner") {
+        sources.push("NewGardiner");
+    }
+    if from("Sealie") {
+        sources.push("Sealie");
+    }
+    if from("Mallige") {
+        sources.push("Mallige");
+    }
+    if from("Unifont") {
+        sources.push("GNU Unifont");
+    }
+    let list = match sources.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => sources[0].to_string(),
+    };
+    format!("Fallback glyphs from {list}, SIL Open Font License 1.1")
+}
+
+/// META key an archive built with rare characters carries (value `yes`),
+/// so completing its font later keeps them.
+pub const RARE_META: &str = "font.rare_characters";
 
 /// One style of a font family, as a file on Google Fonts.
 #[derive(Debug, Clone)]
@@ -32,6 +68,9 @@ pub struct FontFile {
     pub size: u64,
     /// The code points it has glyphs for, as sorted inclusive ranges.
     pub coverage: Vec<(u32, u32)>,
+    /// For a font for rare characters, the mean size in FONT of the glyphs
+    /// it adds; 0 when not known.
+    pub glyph_bytes: u32,
 }
 
 impl FontFile {
@@ -68,7 +107,27 @@ impl CatalogFont {
 
 /// The catalogue, in the order fonts are looked in.
 pub fn catalogue() -> Vec<CatalogFont> {
-    let table = zstd::decode_all(CATALOGUE).expect("the font catalogue is zstd");
+    parse(CATALOGUE)
+}
+
+/// The fonts for rare characters, in the order they are looked in after
+/// the Noto fonts.
+pub fn rare_catalogue() -> Vec<CatalogFont> {
+    parse(RARE)
+}
+
+/// The fonts to look in for an archive in `language`: the Noto fonts, then
+/// with `rare` the fonts for rare characters.
+pub fn fonts(language: Option<&str>, rare: bool) -> Vec<CatalogFont> {
+    let mut fonts = search_order(catalogue(), language);
+    if rare {
+        fonts.extend(rare_catalogue());
+    }
+    fonts
+}
+
+fn parse(packed: &[u8]) -> Vec<CatalogFont> {
+    let table = zstd::decode_all(packed).expect("the font catalogue is zstd");
     let table = String::from_utf8(table).expect("the font catalogue is UTF-8");
     let mut out: Vec<CatalogFont> = Vec::new();
     for line in table.lines() {
@@ -78,6 +137,7 @@ pub fn catalogue() -> Vec<CatalogFont> {
         else {
             continue;
         };
+        let glyph_bytes = f.next().and_then(|b| b.parse().ok()).unwrap_or(0);
         let coverage = cover
             .split(',')
             .filter_map(|r| {
@@ -94,6 +154,7 @@ pub fn catalogue() -> Vec<CatalogFont> {
             sha256: sha256.to_string(),
             size,
             coverage,
+            glyph_bytes,
         };
         // A family's regular file comes first, its other styles after it.
         let styled = match style {
@@ -187,6 +248,12 @@ pub fn search_order(mut fonts: Vec<CatalogFont>, language: Option<&str>) -> Vec<
     fonts
 }
 
+/// Whether `cp` is a CJK ideograph of Unicode's extensions B to J (planes 2
+/// and 3, before the Seal script), of which Noto has only the commonest.
+fn rare_ideograph(cp: u32) -> bool {
+    (0x20000..0x3D000).contains(&cp)
+}
+
 /// Whether `c` is an Arabic letter or mark, which the firmware shapes into
 /// presentation forms.
 fn is_arabic(c: char) -> bool {
@@ -264,16 +331,66 @@ pub fn missing(
     (regular, other)
 }
 
+/// What the fonts for rare characters offer, for saying what the option
+/// gives and costs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RareSummary {
+    /// Characters (assigned in Unicode) they have and no Noto font has.
+    pub characters: usize,
+    /// How many of those are CJK ideographs of Unicode's extensions B to J.
+    pub ideographs: usize,
+    /// About how many bytes all of them would add to an archive.
+    pub bytes: u64,
+    /// The size of their font files, downloaded when first needed.
+    pub download: u64,
+}
+
+/// What the fonts for rare characters offer beyond the Noto fonts.
+pub fn rare_summary() -> RareSummary {
+    static SUMMARY: std::sync::OnceLock<RareSummary> = std::sync::OnceLock::new();
+    *SUMMARY.get_or_init(|| {
+        let mut taken = vec![false; 0x11_0000];
+        for (lo, hi) in no_character() {
+            taken[*lo as usize..=*hi as usize].fill(true);
+        }
+        for f in catalogue() {
+            for &(lo, hi) in &f.regular.coverage {
+                taken[lo as usize..=hi as usize].fill(true);
+            }
+        }
+        let mut out = RareSummary::default();
+        for f in rare_catalogue() {
+            out.download += f.regular.size;
+            for &(lo, hi) in &f.regular.coverage {
+                for cp in lo..=hi {
+                    if !std::mem::replace(&mut taken[cp as usize], true) {
+                        out.characters += 1;
+                        out.ideographs += usize::from(rare_ideograph(cp));
+                        out.bytes += u64::from(f.regular.glyph_bytes);
+                    }
+                }
+            }
+        }
+        out
+    })
+}
+
 /// Characters an archive's FONT has no glyph for, sorted by why.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lacking {
     /// A Noto font has them: completing the font would add them.
     pub in_noto: Vec<char>,
-    /// Characters no Noto font has.
-    pub not_in_noto: Vec<char>,
-    /// How many of those are CJK ideographs of planes 2 and 3 (Unicode's
-    /// extensions B to I), of which Noto has only the commonest.
+    /// No Noto font has them, but a font for rare characters does.
+    pub in_rare: Vec<char>,
+    /// About how many bytes their glyphs would add to FONT.
+    pub rare_bytes: u64,
+    /// How many of them are CJK ideographs of planes 2 and 3 (Unicode's
+    /// extensions B to J), of which Noto has only the commonest.
     pub rare_ideographs: usize,
+    /// Characters no font xwa-tool knows has.
+    pub not_in_noto: Vec<char>,
+    /// How many of those are CJK ideographs of planes 2 and 3.
+    pub unknown_ideographs: usize,
     /// Code points no font has: not assigned in Unicode, private use, or
     /// controls.
     pub no_character: Vec<char>,
@@ -299,19 +416,25 @@ fn no_character() -> &'static [(u32, u32)] {
     })
 }
 
-/// Sorts `chars`, the characters an archive's FONT lacks, by why.
-pub fn lacking(chars: &[char], fonts: &[CatalogFont]) -> Lacking {
+/// Sorts `chars`, the characters an archive's FONT lacks, by why: `fonts`
+/// are the Noto fonts, `rare` the fonts for rare characters.
+pub fn lacking(chars: &[char], fonts: &[CatalogFont], rare: &[CatalogFont]) -> Lacking {
     let none = no_character();
     let mut out = Lacking::default();
     for &c in chars {
+        let ideograph = usize::from(rare_ideograph(c as u32));
         // A font's private-use glyphs are its own, not the text's.
         let i = none.partition_point(|&(_, hi)| hi < c as u32);
         if none.get(i).is_some_and(|&(lo, _)| lo <= c as u32) {
             out.no_character.push(c);
         } else if source(c, fonts).is_some() {
             out.in_noto.push(c);
+        } else if let Some(f) = rare.iter().find(|f| f.covers(c)) {
+            out.in_rare.push(c);
+            out.rare_bytes += u64::from(f.regular.glyph_bytes);
+            out.rare_ideographs += ideograph;
         } else {
-            out.rare_ideographs += usize::from((0x20000..0x40000).contains(&(c as u32)));
+            out.unknown_ideographs += ideograph;
             out.not_in_noto.push(c);
         }
     }
@@ -328,6 +451,11 @@ pub struct Report {
     pub fonts: Vec<String>,
     /// Characters of the text no font had a glyph for.
     pub missing: usize,
+    /// Those characters.
+    pub lacking: Vec<char>,
+    /// Of those, how many the fonts for rare characters have, and about
+    /// how many bytes they would add, when they were not looked in.
+    pub rare: (usize, u64),
     /// FONT_BOLD and the like: glyphs, size, and the code points asked
     /// for that their family has no face for, which the reader
     /// synthesises.
@@ -547,7 +675,9 @@ pub fn build(
             break;
         }
     }
-    report.missing = left.iter().filter(|&&c| text.contains(c)).count();
+    left.retain(|&c| text.contains(c));
+    report.missing = left.len();
+    report.lacking = left;
     if glyphs.is_empty() {
         return (Vec::new(), report);
     }
@@ -704,6 +834,7 @@ mod tests {
             sha256: url.to_string(),
             size: 0,
             coverage: covers.chars().map(|c| (c as u32, c as u32)).collect(),
+            glyph_bytes: 0,
         };
         let stand_in = |family: &str, covers: &str, bold: bool| CatalogFont {
             family: family.to_string(),
@@ -772,19 +903,117 @@ mod tests {
     #[test]
     fn lacking_characters_are_sorted_by_why() {
         let fonts = search_order(catalogue(), None);
-        // α is in Noto Sans; U+20000 is an Extension B ideograph Noto
-        // lacks, and U+2B96 a symbol of Unicode 17 none has; U+0378 is
-        // unassigned, and U+E000 private use (whatever a font may put
-        // there).
-        let l = lacking(
-            &['α', '\u{2B96}', '\u{20000}', '\u{378}', '\u{E000}'],
-            &fonts,
-        );
+        // α is in Noto Sans; U+11FC0 is a Tamil fraction only Noto Sans
+        // Tamil Supplement has, U+10D40 a Garay letter (Unicode 16) only
+        // Unifont Upper has, and U+13460 an Egyptian hieroglyph of
+        // Extended-A only NewGardiner has, and U+3D000 a Seal character
+        // (Unicode 18) only Sealie has; U+18E01 is Jurchen (Unicode 18),
+        // which no font xwa-tool knows has yet; U+0378 is unassigned, and
+        // U+E000 private use (whatever a font may put there).
+        let chars = [
+            'α',
+            '\u{11FC0}',
+            '\u{10D40}',
+            '\u{13460}',
+            '\u{18E01}',
+            '\u{3D000}',
+            '\u{378}',
+            '\u{E000}',
+        ];
+        let l = lacking(&chars, &fonts, &rare_catalogue());
         assert_eq!(l.in_noto, ['α']);
-        assert_eq!(l.not_in_noto, ['\u{2B96}', '\u{20000}']);
-        assert_eq!(l.rare_ideographs, 1);
-        assert_eq!(l.no_character, ['\u{378}', '\u{E000}']);
-        assert_eq!(no_character().len(), 735, "the whole table is read");
+        assert_eq!(
+            l.in_rare,
+            ['\u{11FC0}', '\u{10D40}', '\u{13460}', '\u{3D000}']
+        );
+        assert!(
+            l.rare_bytes > 5000 && l.rare_bytes < 15000,
+            "{}",
+            l.rare_bytes
+        );
+        assert_eq!(l.not_in_noto, ['\u{18E01}']);
+        // Seal characters are not CJK ideographs of the extensions.
+        assert_eq!((l.rare_ideographs, l.unknown_ideographs), (0, 0));
+        // The whole table is read (the number of ranges changes little
+        // between Unicode versions).
+        assert!(no_character().len() > 700, "{}", no_character().len());
+        // Without the fonts for rare characters, no font has them.
+        let l = lacking(&chars, &fonts, &[]);
+        assert_eq!(l.not_in_noto.len(), 5);
+        assert!(l.in_rare.is_empty() && l.rare_bytes == 0);
+        // An Extension B ideograph is counted as one.
+        let l = lacking(&['\u{20000}'], &fonts, &[]);
+        assert_eq!(l.unknown_ideographs, 1);
+    }
+
+    #[test]
+    fn rare_characters_come_after_every_noto_font() {
+        let rare = rare_catalogue();
+        let families: Vec<&str> = rare.iter().map(|f| f.family.as_str()).collect();
+        assert!(
+            families.contains(&"Noto Sans Tamil Supplement"),
+            "{families:?}"
+        );
+        assert!(families.ends_with(&["Unifont Upper"]), "{families:?}");
+        assert!(families.contains(&"NewGardiner"), "{families:?}");
+        assert!(families.contains(&"Plangothic P1"), "{families:?}");
+        assert!(rare.iter().all(|f| f.regular.glyph_bytes > 0));
+        let all = fonts(None, true);
+        let noto = fonts(None, false);
+        assert_eq!(all.len(), noto.len() + rare.len());
+        assert_eq!(
+            all[..noto.len()]
+                .iter()
+                .map(|f| &f.family)
+                .collect::<Vec<_>>(),
+            noto.iter().map(|f| &f.family).collect::<Vec<_>>()
+        );
+        // What Noto has still comes from Noto.
+        assert_eq!(all[source('α', &all).unwrap()].family, "Noto Sans");
+        assert_eq!(all[source('中', &all).unwrap()].family, "Noto Sans SC");
+        assert_eq!(
+            all[source('\u{11FC0}', &all).unwrap()].family,
+            "Noto Sans Tamil Supplement"
+        );
+    }
+
+    #[test]
+    fn the_rare_summary_counts_what_noto_lacks() {
+        let r = rare_summary();
+        println!("{r:?}");
+        // Thousands of rare CJK ideographs, and other characters too.
+        assert!(
+            r.ideographs > 5_000 && r.characters > r.ideographs + 1_000,
+            "{r:?}"
+        );
+        assert!(r.ideographs < r.characters);
+        assert!(r.bytes > r.characters as u64 * 100, "{r:?}");
+        let files: u64 = rare_catalogue().iter().map(|f| f.regular.size).sum();
+        assert_eq!(r.download, files);
+    }
+
+    #[test]
+    fn the_licence_names_the_sources_used() {
+        let names = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            license(&names(&["Noto Sans", "Noto Sans SC"])),
+            "Fallback glyphs from the Noto fonts (Google Fonts), SIL Open Font License 1.1"
+        );
+        assert_eq!(
+            license(&names(&["Noto Sans", "Plangothic P1", "Unifont Upper"])),
+            "Fallback glyphs from the Noto fonts (Google Fonts), Plangothic and GNU Unifont, \
+             SIL Open Font License 1.1"
+        );
+        assert_eq!(
+            license(&names(&["Noto Sans", "NewGardiner"])),
+            "Fallback glyphs from the Noto fonts (Google Fonts) and NewGardiner, \
+             SIL Open Font License 1.1"
+        );
+        assert_eq!(
+            license(&names(&["Unifont"])),
+            "Fallback glyphs from the Noto fonts (Google Fonts) and GNU Unifont, \
+             SIL Open Font License 1.1"
+        );
     }
 
     #[test]

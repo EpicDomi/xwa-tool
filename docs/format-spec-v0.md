@@ -80,9 +80,13 @@ offset 0      Superblock (4096 bytes)
 `u64 length`, `u32 crc32` (of the section bytes, 0 = not computed), `u32
 reserved`. A type appears at most once.
 
-`file_size` must equal the size of the file. A reader that finds a shorter
+`file_size` is the size of the archive. A reader that finds a shorter
 file reports an incomplete copy rather than reading past the end; copying
-large files to SD cards fails this way often enough to matter.
+large files to SD cards fails this way often enough to matter. Bytes after
+`file_size` are not part of the archive and readers ignore them: a tool that
+changes sections in place writes the new ones after the end and points the
+superblock at them last, so whenever it stops, the file is a whole archive,
+perhaps with unused bytes after it. A finished archive has none.
 
 While `version_major` is 0, every minor version may change the layout:
 readers accept only the minor version they were written for, and tell the
@@ -156,7 +160,9 @@ that folder; FAT32 and exFAT match its name in any case.
 `license`, `attribution`, `created` (RFC 3339), `converter` (name and
 version), `profile`, `counts.articles`, `counts.redirects` (redirect
 entries in the title index, after de-duplication), `counts.images`,
-`counts.formulas`, `main_article` (decimal article id).
+`counts.formulas`, `main_article` (decimal article id), `license.font`
+and `license.math_font` (10, 8), `font.rare_characters` (`yes` when FONT
+was built with rare characters, 10; tools completing the font keep them).
 
 Wikipedia content is CC BY-SA: `attribution` must be shown somewhere in the
 firmware UI (archive info screen).
@@ -848,8 +854,27 @@ Wiktionary, 2,599 (0.9 MB, 0.55% of the archive) for chemistry, 6,816 (2.2
 MB, 3%) for mathematics and 10,157 (4.8 MB, 0.56%) for Swedish Wikipedia's
 2.6 million articles. A Han character takes about 590 bytes, most other
 glyphs 200-300. What no Noto font draws is rare: private-use and
-unassigned code points in the source text, some of CJK extension B, and
-symbols added in Unicode 15 and 16 (`xwa-tool verify` lists them).
+unassigned code points in the source text, the rare CJK ideographs of
+extensions B to J, and letters and symbols added to Unicode lately
+(`xwa-tool verify` lists them).
+
+**Rare characters (optional).** On request, xwa-tool also draws what no
+Noto font has, from fonts looked in after every Noto font: the other
+designs of Noto scripts (Noto Sans Tamil Supplement, Noto Sans Mono and
+Noto Sans Syriac Western, for what only they have), Plangothic (the CJK
+ideographs of extensions B to J, and many of the newest letters and
+symbols), NewGardiner (Egyptian Hieroglyphs Extended-A), Sealie (the Seal
+script), Mallige Unicode (Tulu-Tigalari) and GNU Unifont Upper (outlines
+of 16-pixel glyphs, as the last resort). `cargo xtask fonts --rare` pins
+them as for the Noto fonts. Of the 172,808 characters Unicode 18 assigns,
+the Noto fonts lack 91,839 (72,591 of them rare CJK ideographs of
+extensions B to J); these fonts draw all but 1,440: 879 of Jurchen's 965
+(Unicode 18), for which no font exists yet, and 561 Egyptian hieroglyphs
+whose shapes Unicode does not document. `cargo xtask coverage` lists
+them by block, and a weekly check reports new Unicode versions and font
+releases, and what has no glyph. META `font.rare_characters` is `yes` for
+such an archive, and `license.font` names the sources used. Nothing
+changes for a reader: they are glyphs in FONT like any other.
 
 ### 10.1 Bold and italic (FONT_BOLD, FONT_ITALIC, FONT_BOLD_ITALIC)
 

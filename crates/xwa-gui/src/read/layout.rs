@@ -1059,13 +1059,28 @@ impl Cx<'_> {
                 h,
                 ..Line::default()
             };
-            line.items.push(Item::Fill {
-                x,
-                y: 0.0,
-                w,
-                h: 1.0,
-                grey: false,
-            });
+            // The cell in each slot of this row, spans and cells from rows
+            // above included: lines go round cells, not through them.
+            let cols = xs.len() - 1;
+            let mut slot: Vec<Option<usize>> = vec![None; cols];
+            for (i, &(r, c, span, cell)) in placed.iter().enumerate() {
+                if r <= row && row < r + cell.rowspan.max(1) as usize {
+                    slot[c..(c + span).min(cols)].fill(Some(i));
+                }
+            }
+            for (s, cell) in slot.iter().enumerate() {
+                // No line across a cell that goes on from the row above.
+                if cell.is_some_and(|i| placed[i].0 < row) {
+                    continue;
+                }
+                line.items.push(Item::Fill {
+                    x: xs[s],
+                    y: 0.0,
+                    w: xs[s + 1] - xs[s],
+                    h: 1.0,
+                    grey: false,
+                });
+            }
             for (cx, cw, header, ls) in lines {
                 if header {
                     line.items.push(Item::Fill {
@@ -1092,7 +1107,11 @@ impl Cx<'_> {
                     y += l.h;
                 }
             }
-            for &bx in &xs {
+            for (b, &bx) in xs.iter().enumerate() {
+                let edge = b == 0 || b == cols || slot[b - 1].is_none() || slot[b] != slot[b - 1];
+                if !edge {
+                    continue;
+                }
                 line.items.push(Item::Fill {
                     x: bx.min(x + w - 1.0),
                     y: 0.0,

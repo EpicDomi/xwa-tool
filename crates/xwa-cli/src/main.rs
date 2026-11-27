@@ -75,6 +75,12 @@ enum Command {
         /// slants the regular ones instead (a little smaller archive).
         #[arg(long, conflicts_with = "no_fallback_font")]
         no_real_italic: bool,
+        /// Draw rare characters too: what no Noto font has, such as the rare
+        /// CJK ideographs, Seal and the newest scripts, from Plangothic,
+        /// Sealie, NewGardiner, Mallige and GNU Unifont. The archive grows only by the characters its text uses;
+        /// the report of a conversion without it says how many and how much.
+        #[arg(long, conflicts_with = "no_fallback_font")]
+        rare_characters: bool,
     },
     /// List the ZIM files in the Kiwix library.
     Catalog {
@@ -156,6 +162,10 @@ enum Command {
         /// Where the Noto fonts are kept (default: the system's cache folder).
         #[arg(long)]
         font_cache: Option<PathBuf>,
+        /// Add rare characters too (see `convert --rare-characters`); an
+        /// archive made with them keeps them anyway.
+        #[arg(long)]
+        rare_characters: bool,
     },
     /// Check every checksum, chunk, article, link, image and title in an XWA file.
     Verify {
@@ -240,6 +250,7 @@ fn main() -> ExitCode {
             no_fallback_font,
             font_cache,
             no_real_italic,
+            rare_characters,
         } => {
             let device = match device {
                 DeviceArg::X4Pro => Device::X4Pro,
@@ -264,6 +275,7 @@ fn main() -> ExitCode {
                         diagrams,
                         fonts,
                         real_italic: !no_real_italic,
+                        rare_characters,
                     };
                     convert(&zim, out, &opts)
                 }
@@ -288,7 +300,11 @@ fn main() -> ExitCode {
             any_firmware: _,
             port,
         } => flash(list, release.as_deref(), file.as_deref(), port.as_deref()),
-        Command::CompleteFont { file, font_cache } => complete_font(&file, font_cache),
+        Command::CompleteFont {
+            file,
+            font_cache,
+            rare_characters,
+        } => complete_font(&file, font_cache, rare_characters),
         Command::Dump(args) => dump_cmd(&args),
         Command::TitleIndex { zim, queries } => title_index_cmd(&zim, &queries).map_err(Into::into),
     };
@@ -831,6 +847,14 @@ fn print_fallback_font(f: &xwa_convert::fallback::Report) {
             String::new()
         }
     );
+    let (rare, bytes) = f.rare;
+    if rare > 0 {
+        println!(
+            "  rare characters: {rare} of those are in the fonts for rare characters; \
+             converting with `--rare-characters` would draw them, adding about {}",
+            size_words(bytes)
+        );
+    }
     for s in f.styled.iter().filter(|s| s.glyphs + s.synthesised > 0) {
         let word = style_word(s.style);
         println!(
@@ -870,7 +894,7 @@ fn print_fallback_font(f: &xwa_convert::fallback::Report) {
     }
 }
 
-fn complete_font(path: &Path, cache: Option<PathBuf>) -> CliResult {
+fn complete_font(path: &Path, cache: Option<PathBuf>, rare: bool) -> CliResult {
     let fonts = Fonts::new(
         cache
             .or_else(Fonts::default_cache)
@@ -891,16 +915,40 @@ fn complete_font(path: &Path, cache: Option<PathBuf>) -> CliResult {
     };
     let status = xwa_convert::font_status(&archive, &chars)?;
     drop(archive);
-    if status.complete() {
-        println!("The fallback font has every glyph the Noto fonts can give; nothing to do.");
+    let adding_rare = rare && !status.rare;
+    if status.complete() && !(adding_rare && status.rare_chars > 0) {
+        if status.rare {
+            println!("The fallback font has every glyph its fonts can give; nothing to do.");
+        } else {
+            println!("The fallback font has every glyph the Noto fonts can give; nothing to do.");
+            if status.rare_chars > 0 && !rare {
+                println!(
+                    "{} characters are in the fonts for rare characters; \
+                     `--rare-characters` adds them (about {} to the file).",
+                    status.rare_chars,
+                    size_words(status.rare_bytes)
+                );
+            }
+        }
         return Ok(());
     }
-    println!(
-        "{} characters lack a glyph, and {} bold or italic glyphs; getting them",
-        status.missing, status.missing_styled
-    );
+    if adding_rare {
+        println!(
+            "{} characters lack a glyph the Noto fonts have, {} bold or italic glyphs, \
+             and {} rare characters (about {} to the file); getting them",
+            status.missing,
+            status.missing_styled,
+            status.rare_chars,
+            size_words(status.rare_bytes)
+        );
+    } else {
+        println!(
+            "{} characters lack a glyph, and {} bold or italic glyphs; getting them",
+            status.missing, status.missing_styled
+        );
+    }
     let mut progress = Progress::new();
-    let report = xwa_convert::rebuild_font(path, &chars, &fonts, &mut |p| {
+    let report = xwa_convert::rebuild_font(path, &chars, &fonts, rare, &mut |p| {
         progress.update("getting fonts", p.done, p.total);
         true
     })?;
@@ -920,12 +968,24 @@ fn complete_font(path: &Path, cache: Option<PathBuf>) -> CliResult {
 }
 
 /// Why the characters FONT lacks are missing, for `verify`.
-fn print_lacking(chars: &[char]) {
+fn print_lacking(archive: &Xwa, chars: &[char]) {
     if chars.is_empty() {
         println!("  every character of the text has a glyph");
         return;
     }
-    let l = xwa_convert::fallback::lacking(chars, &xwa_convert::fallback::catalogue());
+    use xwa_convert::fallback;
+    let rare = archive.meta_value(fallback::RARE_META) == Some("yes");
+    let language = archive.meta_value("language");
+    let l = if rare {
+        // Its fonts include those for rare characters.
+        fallback::lacking(chars, &fallback::fonts(language, true), &[])
+    } else {
+        fallback::lacking(
+            chars,
+            &fallback::fonts(language, false),
+            &fallback::rare_catalogue(),
+        )
+    };
     let sample = |chars: &[char]| -> String {
         let shown: String = chars.iter().take(24).collect();
         if shown.is_empty() {
@@ -945,18 +1005,28 @@ fn print_lacking(chars: &[char]) {
             sample(&l.in_noto)
         );
     }
-    if !l.not_in_noto.is_empty() {
-        let ideographs = if l.rare_ideographs > 0 {
-            format!(
-                " ({} of them rare CJK ideographs, of Unicode's extensions B to I)",
-                l.rare_ideographs
-            )
+    let ideographs = |n: usize| {
+        if n > 0 {
+            format!(" ({n} of them rare CJK ideographs, of Unicode's extensions B to J)")
         } else {
             String::new()
-        };
+        }
+    };
+    if !l.in_rare.is_empty() {
         println!(
-            "    {} are in no Noto font{ideographs}{}",
+            "    {} are in the fonts for rare characters{}; \
+             `xwa-tool complete-font --rare-characters` adds them, about {} to the file{}",
+            l.in_rare.len(),
+            ideographs(l.rare_ideographs),
+            size_words(l.rare_bytes),
+            sample(&l.in_rare)
+        );
+    }
+    if !l.not_in_noto.is_empty() {
+        println!(
+            "    {} are in no font xwa-tool draws from{}{}",
             l.not_in_noto.len(),
+            ideographs(l.unknown_ideographs),
             sample(&l.not_in_noto)
         );
     }
@@ -1000,7 +1070,7 @@ fn verify(path: &Path) -> CliResult {
             .map(|(s, n)| format!(", {n} {}", style_word(*s)))
             .collect();
         println!("fallback font: {} glyphs{styled}", r.font_glyphs);
-        print_lacking(&r.without_glyph);
+        print_lacking(&a, &r.without_glyph);
     }
     if r.listed_places > 0 {
         println!(
@@ -1139,6 +1209,15 @@ fn dump_cmd(args: &DumpArgs) -> CliResult {
 
 fn mb(bytes: u64) -> f64 {
     bytes as f64 / 1e6
+}
+
+/// A size in kilobytes or megabytes, for estimates.
+fn size_words(bytes: u64) -> String {
+    if bytes < 1_000_000 {
+        format!("{} KB", bytes.div_ceil(1000))
+    } else {
+        format!("{:.1} MB", mb(bytes))
+    }
 }
 
 fn inspect(path: &Path, decompress: bool) -> xwa_zim::Result<()> {

@@ -79,6 +79,33 @@ const FIELD_TOP: f32 = 58.0;
 const SUMMARY_TOP: f32 = 112.0;
 const COPY_TOP: f32 = 96.0;
 
+/// What rare characters give and cost, from the catalogue of their fonts.
+fn rare_tip() -> String {
+    let r = xwa_convert::fallback::rare_summary();
+    let others = r.characters - r.ideographs;
+    format!(
+        "Adds the shapes of characters no Noto font has, which the e-reader shows as boxes: \
+         {} rare Chinese characters (Unicode's extensions B to J) and {} letters and symbols \
+         of scripts new to Unicode, from Plangothic, Sealie, NewGardiner, Mallige and GNU \
+         Unifont. Few wikis use them. The archive grows only by the ones its text uses: \
+         nothing for most wikis, up to about {} for one that uses them all. Their \
+         fonts ({}) are downloaded the first time they are needed. Converted without it, the \
+         summary says what it would add, and Copy to SD card can add it then.",
+        group(r.ideographs as u64),
+        group(others as u64),
+        size_text(r.bytes),
+        size_text(r.download),
+    )
+}
+
+/// "1 character", "2,048 characters".
+pub(crate) fn characters(n: usize) -> String {
+    match n {
+        1 => "1 character".into(),
+        n => format!("{} characters", group(n as u64)),
+    }
+}
+
 fn on_off(on: bool) -> &'static str {
     if on { "ON" } else { "OFF" }
 }
@@ -858,6 +885,11 @@ impl App {
                 .tip("Pictures of the e-reader's screen with real and slanted italic.")
                 .opens()
                 .on_press(Message::Open(Screen::Italic)),
+            Row::new(Kind::Setting, "Rare characters")
+                .subtitle("Rare Chinese characters, newest scripts")
+                .tip(rare_tip())
+                .value(on_off(self.rare_characters))
+                .on_press(Message::ToggleRare),
             Row::new(
                 Kind::Action,
                 if matches!(self.conversion, Job::Finished(Err(_))) {
@@ -1042,6 +1074,7 @@ impl App {
                 .opens()
                 .on_press(Message::ChooseArchive),
         );
+        let rare = self.archive_font.rare();
         match &self.archive_font {
             ArchiveFont::Missing { glyphs, .. } if self.archive.is_some() => page.rows.push(
                 Row::new(Kind::Item, "Complete its fallback font")
@@ -1068,6 +1101,26 @@ impl App {
                     .on_press(Message::CheckFont),
             ),
             _ => {}
+        }
+        if rare.chars > 0 && self.archive.is_some() {
+            page.rows.push(
+                Row::new(Kind::Item, "Add rare characters")
+                    .subtitle(format!(
+                        "{} · about {} more",
+                        characters(rare.chars),
+                        size_text(rare.bytes)
+                    ))
+                    .tip(format!(
+                        "This archive's text has {} no Noto font has, such as rare Chinese \
+                         characters or letters of scripts new to Unicode, which the e-reader \
+                         shows as boxes. This adds their shapes, from fonts such as \
+                         Plangothic, without converting again: about {} more on the card. The \
+                         fonts are downloaded the first time.",
+                        characters(rare.chars),
+                        size_text(rare.bytes)
+                    ))
+                    .on_press(Message::AddRareCharacters),
+            );
         }
         for d in &self.drives {
             let name = if d.name.is_empty() {

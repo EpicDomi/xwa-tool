@@ -387,18 +387,32 @@ impl FontsKept {
     }
 }
 
+/// What the fonts for rare characters would add to an archive made
+/// without them: characters of its text, and about how many bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RareChars {
+    pub chars: usize,
+    pub bytes: u64,
+}
+
 /// What the app knows of the chosen archive's fallback font (spec 10).
 #[derive(Debug, Clone, Default)]
 pub enum ArchiveFont {
     /// Not looked at yet.
     #[default]
     Unknown,
-    /// Every glyph the Noto fonts have for its text.
-    Complete,
-    /// Glyphs the Noto fonts could add, and the characters to build for.
+    /// Every glyph its fonts have for its text; the characters it was built
+    /// for, and what rare characters would add.
+    Complete {
+        chars: Arc<FontChars>,
+        rare: RareChars,
+    },
+    /// Glyphs its fonts could add, the characters to build for, and what
+    /// rare characters would add.
     Missing {
         glyphs: usize,
         chars: Arc<FontChars>,
+        rare: RareChars,
     },
     /// Made before archives listed their characters: finding out means
     /// reading its text.
@@ -448,21 +462,30 @@ fn check_font(
     Ok((state, said))
 }
 
-/// Gets the glyphs `path`'s font lacks and puts them in the archive.
+/// Gets the glyphs `path`'s font lacks, with `rare` rare characters too,
+/// and puts them in the archive.
 fn complete_font(
     path: &Path,
     chars: &FontChars,
     fonts: &Fonts,
+    rare: bool,
     send: &mut dyn FnMut(String, u64, u64) -> bool,
 ) -> Result<(ArchiveFont, String), String> {
-    let report = xwa_convert::rebuild_font(path, chars, fonts, &mut |p| {
+    let report = xwa_convert::rebuild_font(path, chars, fonts, rare, &mut |p| {
         let label = format!("Fonts: {} of {}", group(p.done), group(p.total));
         send(label, p.done, p.total)
     })
     .map_err(|e| e.to_string())?;
     let state = archive_font(path);
     let said = match &state {
-        ArchiveFont::Complete => "Its fallback font now has every glyph it needs.".to_string(),
+        ArchiveFont::Complete { .. } if rare => format!(
+            "Its fallback font now has every glyph it needs, rare characters included \
+             ({} glyphs).",
+            group(report.glyphs as u64)
+        ),
+        ArchiveFont::Complete { .. } => {
+            "Its fallback font now has every glyph it needs.".to_string()
+        }
         ArchiveFont::Missing { glyphs, .. } => {
             let why = report
                 .failed
@@ -470,7 +493,7 @@ fn complete_font(
                 .map(|(_, why)| format!(" ({why})"))
                 .unwrap_or_default();
             format!(
-                "{} glyphs are still missing: some Noto fonts could not be downloaded{why}.",
+                "{} glyphs are still missing: some fonts could not be downloaded{why}.",
                 group(*glyphs as u64)
             )
         }
@@ -485,12 +508,18 @@ fn font_state(
 ) -> Result<ArchiveFont, xwa_format::Error> {
     let status = xwa_convert::font_status(archive, &chars)
         .map_err(|e| xwa_format::Error::Invalid(e.to_string()))?;
+    let rare = RareChars {
+        chars: status.rare_chars,
+        bytes: status.rare_bytes,
+    };
+    let chars = Arc::new(chars);
     Ok(if status.complete() {
-        ArchiveFont::Complete
+        ArchiveFont::Complete { chars, rare }
     } else {
         ArchiveFont::Missing {
             glyphs: status.missing + status.missing_styled,
-            chars: Arc::new(chars),
+            chars,
+            rare,
         }
     })
 }
@@ -584,6 +613,7 @@ pub enum Message {
     ToggleImages,
     ToggleSharper,
     ToggleItalic,
+    ToggleRare,
     /// The next (1) or previous (-1) picture of italic.
     ItalicPicture(isize),
     Convert,
@@ -621,6 +651,8 @@ pub enum Message {
     CheckFont,
     /// Get the glyphs the archive's font lacks and put them in it.
     CompleteFont,
+    /// Add the glyphs of its rare characters to the archive's font.
+    AddRareCharacters,
     FontWork(Event<(ArchiveFont, String)>),
     CancelFontWork,
     // The Kiwix library.
@@ -712,6 +744,8 @@ pub struct App {
     pub sharper: bool,
     /// Real italic letters in the fallback font.
     pub real_italic: bool,
+    /// Rare characters in the fallback font.
+    pub rare_characters: bool,
     /// Which picture the italic screen shows.
     pub italic_picture: usize,
     pub conversion: Job,
@@ -756,6 +790,34 @@ pub struct App {
     pub language_search: String,
     pub book: Option<Book>,
     pub downloads: Queue,
+}
+
+/// Work on an archive's fallback font.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontJob {
+    /// Read an older archive's text to see what its font lacks.
+    Check,
+    /// Get the glyphs its fonts could add.
+    Complete,
+    /// Add its rare characters.
+    AddRare,
+}
+
+impl ArchiveFont {
+    /// What rare characters would add to it, when it was checked.
+    pub fn rare(&self) -> RareChars {
+        match self {
+            ArchiveFont::Complete { rare, .. } | ArchiveFont::Missing { rare, .. } => *rare,
+            _ => RareChars::default(),
+        }
+    }
+
+    fn chars(&self) -> Option<&Arc<FontChars>> {
+        match self {
+            ArchiveFont::Complete { chars, .. } | ArchiveFont::Missing { chars, .. } => Some(chars),
+            _ => None,
+        }
+    }
 }
 
 impl App {
@@ -933,6 +995,7 @@ impl App {
             images: true,
             sharper: false,
             real_italic: true,
+            rare_characters: false,
             italic_picture: 0,
             conversion: Job::Idle,
             converting_sharper: false,
@@ -1871,6 +1934,11 @@ impl App {
                     self.real_italic = !self.real_italic;
                 }
             }
+            Message::ToggleRare => {
+                if !self.conversion.running() {
+                    self.rare_characters = !self.rare_characters;
+                }
+            }
             Message::ItalicPicture(step) => self.turn_italic(step),
             Message::Convert => return self.convert(true),
             Message::ConvertReplacing => {
@@ -2004,8 +2072,9 @@ impl App {
                     self.archive_font = state;
                 }
             }
-            Message::CheckFont => return self.start_font_work(false),
-            Message::CompleteFont => return self.start_font_work(true),
+            Message::CheckFont => return self.start_font_work(FontJob::Check),
+            Message::CompleteFont => return self.start_font_work(FontJob::Complete),
+            Message::AddRareCharacters => return self.start_font_work(FontJob::AddRare),
             Message::FontWork(Event::Progress(p)) => self.font_work.progress(p),
             Message::FontWork(Event::Done(result)) => {
                 self.font_work = Job::Finished(match result {
@@ -2477,6 +2546,7 @@ impl App {
         // The fallback font, for letters and symbols the e-reader's fonts lack.
         let fonts = Fonts::default_cache().map(|cache| Arc::new(Fonts::new(cache)));
         let real_italic = self.real_italic;
+        let rare_characters = self.rare_characters;
         self.converting_sharper = sharper;
         self.converting_images = images;
         let (tx, rx) = iced::futures::channel::mpsc::unbounded();
@@ -2486,6 +2556,7 @@ impl App {
                 diagrams,
                 fonts,
                 real_italic,
+                rare_characters,
                 ..xwa_convert::Options::new(device)
             };
             let mut throttle = Throttle::default();
@@ -2540,20 +2611,22 @@ impl App {
         })
     }
 
-    /// Reads an older archive's text to find what its font lacks or, with
-    /// `complete`, gets what it lacks and puts it in the archive.
-    fn start_font_work(&mut self, complete: bool) -> Task<Message> {
+    /// Reads an older archive's text to find what its font lacks, or gets
+    /// what it lacks (or its rare characters) and puts it in the archive.
+    fn start_font_work(&mut self, job: FontJob) -> Task<Message> {
         let Some(path) = self.archive.clone() else {
             return Task::none();
         };
         if self.copy.running() || self.font_work.running() {
             return Task::none();
         }
-        let chars = match (&self.archive_font, complete) {
-            (ArchiveFont::Missing { chars, .. }, true) => Some(chars.clone()),
-            (ArchiveFont::Unchecked, false) => None,
+        let chars = match (&self.archive_font, job) {
+            (ArchiveFont::Missing { chars, .. }, FontJob::Complete) => Some(chars.clone()),
+            (font, FontJob::AddRare) if font.rare().chars > 0 => font.chars().cloned(),
+            (ArchiveFont::Unchecked, FontJob::Check) => None,
             _ => return Task::none(),
         };
+        let rare = job == FontJob::AddRare;
         let Some(cache) = Fonts::default_cache() else {
             self.font_work = Job::Finished(Err("There is no folder to keep fonts in.".into()));
             return Task::none();
@@ -2583,7 +2656,7 @@ impl App {
             };
             let result = match chars {
                 None => check_font(&path, &mut send),
-                Some(chars) => complete_font(&path, &chars, &Fonts::new(cache), &mut send),
+                Some(chars) => complete_font(&path, &chars, &Fonts::new(cache), rare, &mut send),
             };
             let _ = tx.unbounded_send(Event::Done(result));
         });
@@ -2905,6 +2978,16 @@ fn summary(r: &xwa_convert::Report, out: &Path, device: xwa_convert::Device) -> 
         if let Some(why) = &d.stopped {
             done.push_str(&format!(" Some could not be downloaded: {why}."));
         }
+    }
+    if let Some(f) = &r.fallback_font
+        && f.rare.0 > 0
+    {
+        done.push_str(&format!(
+            " Its text has {} the fallback font leaves out as rare: Add rare characters, \
+             on the Copy to SD card screen, draws them for about {} more.",
+            crate::screens::characters(f.rare.0),
+            size_text(f.rare.1)
+        ));
     }
     if let Some(f) = &r.fallback_font
         && let Some((_, why)) = f.failed.first()
