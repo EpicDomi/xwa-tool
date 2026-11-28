@@ -481,10 +481,11 @@ fn child_elements<'a>(
         .filter_map(|c| c.value().as_element().map(|e| (c, e)))
 }
 
-/// Whether a list item is a link to another website: its first text is in
-/// an external link (Parsoid's `rel="mw:ExtLink"`, or class `external`), as
-/// in "External links" sections in any language.
-fn is_external_entry(li: NodeRef<'_, Node>) -> bool {
+/// Whether a list item is a link to another website: its first words are
+/// in an external link (Parsoid's `rel="mw:ExtLink"`, or class `external`),
+/// as in "External links" sections in any language, and it says at most
+/// `say` characters besides its links.
+fn is_external_entry(li: NodeRef<'_, Node>, say: usize) -> bool {
     // Whether a text node is inside a link to another website. A link to
     // another language's Wikipedia (class `extiw`) names an article, so it
     // is content, not another website.
@@ -503,16 +504,18 @@ fn is_external_entry(li: NodeRef<'_, Node>) -> bool {
         .descendants()
         .filter(|d| matches!(d.value(), Node::Text(t) if !t.trim().is_empty()))
         .collect();
-    let Some(&first) = texts.first() else {
+    // Its first words, after any opening quotation mark.
+    let Some(&first) = texts.iter().find(|t| match t.value() {
+        Node::Text(s) => s.chars().any(char::is_alphanumeric),
+        _ => false,
+    }) else {
         return false;
     };
     if introduced(first, li) {
         return false;
     }
     // What the entry says besides its links: an archive note ("Archived
-    // 2012-09-08 at the Wayback Machine") is little; a description of what
-    // the link leads to ("BrianQC – has an open C level API for ...") is
-    // content, and keeps the entry.
+    // 2012-09-08 at the Wayback Machine") is little.
     let besides: usize = texts
         .iter()
         .filter(|t| !external(**t))
@@ -521,8 +524,54 @@ fn is_external_entry(li: NodeRef<'_, Node>) -> bool {
             _ => 0,
         })
         .sum();
-    external(first) && besides <= 40
+    external(first) && besides <= say
 }
+
+/// The number of characters of text, besides spaces, in `n` that a reader
+/// sees: not in styles or hidden parts (coordinates shown only beside the
+/// title).
+fn shown_chars(n: NodeRef<'_, Node>) -> usize {
+    n.children()
+        .map(|c| match c.value() {
+            Node::Text(t) => t.chars().filter(|c| !c.is_whitespace()).count(),
+            Node::Element(e) if !is_chrome(e) => shown_chars(c),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Whether a list entry links to other websites and to no article, and
+/// says at most `say` characters besides its links ("Agency for Toxic
+/// Substances and Disease Registry: Chlorine", not a vote with its reasons).
+fn links_only_elsewhere(li: NodeRef<'_, Node>, say: usize) -> bool {
+    let mut external = false;
+    let mut besides = 0;
+    for d in li.descendants() {
+        match d.value() {
+            Node::Text(t) => {
+                let linked = d
+                    .ancestors()
+                    .take_while(|a| a.id() != li.id())
+                    .any(|a| element(&a).is_some_and(|e| e.name() == "a"));
+                if !linked {
+                    besides += t.trim().chars().count();
+                }
+            }
+            Node::Element(e) if e.name() == "a" => {
+                if e.attr("rel").is_some_and(|r| r.contains("mw:WikiLink")) || has_class(e, "extiw")
+                {
+                    return false;
+                }
+                external |= has_class(e, "external") && !introduced(d, li);
+            }
+            _ => {}
+        }
+    }
+    external && besides <= say
+}
+
+/// Classes of lists of references.
+const REFERENCE_LISTS: [&str; 4] = ["references", "reflist", "refbegin", "mw-references-wrap"];
 
 /// Whether `n` in list entry `li` is a name the text introduces, which is
 /// content even when it links to its website: in a contact card (the hCard
@@ -555,9 +604,22 @@ fn appendix_entries(root: NodeRef<'_, Node>, referenced: bool) -> HashSet<NodeId
                     "li" | "dd" | "dt" | "table" | "figure" | "blockquote"
                 ) || is_chrome(a)
             })
-            && text_content(*n).trim().chars().count() >= 100
+            && shown_chars(*n) >= 80
     };
-    let mut start = nodes.iter().rposition(prose).map_or(0, |i| i + 1);
+    // A footnote mark in the text, not in a list of references: the text
+    // cites its sources, an appendix doesn't ("TMF loading: TMF tests
+    // simulate ... [81]" in a list after the last paragraph).
+    let cited = |n: &NodeRef<'_, Node>| {
+        element(n).is_some_and(|e| has_class(e, "reference") || has_class(e, "mw-ref"))
+            && !n
+                .ancestors()
+                .filter_map(|a| element(&a))
+                .any(|a| REFERENCE_LISTS.iter().any(|c| has_class(a, c)))
+    };
+    let mut start = nodes
+        .iter()
+        .rposition(|n| prose(n) || cited(n))
+        .map_or(0, |i| i + 1);
     if !referenced {
         let heading = |n: &NodeRef<'_, Node>| {
             element(n).is_some_and(|e| matches!(e.name(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6"))
@@ -586,7 +648,7 @@ fn is_external_links_table(table: NodeRef<'_, Node>) -> bool {
         c.parent()
             .is_some_and(|tr| child_elements(tr).any(|(_, e)| e.name() == "th"))
     });
-    !cells.is_empty() && !labelled && cells.into_iter().all(is_external_entry)
+    !cells.is_empty() && !labelled && cells.into_iter().all(|c| is_external_entry(c, 40))
 }
 
 fn text_content(n: NodeRef<'_, Node>) -> String {
@@ -701,10 +763,7 @@ impl Cx<'_> {
             self.count_dropped(node, e);
             // A list of references, whose labels ("Citations") may be
             // left without it.
-            if ["references", "reflist", "refbegin", "mw-references-wrap"]
-                .iter()
-                .any(|c| has_class(e, c))
-            {
+            if REFERENCE_LISTS.iter().any(|c| has_class(e, c)) {
                 flow.leave_out();
             }
             return;
@@ -1035,8 +1094,17 @@ impl Cx<'_> {
             // ("Archived ... at the Wayback Machine"): "External links" in
             // any language. Only in the appendix: in the text such an entry
             // is a place to go ("TUIfly flies from Amsterdam"), and in
-            // tables and infoboxes such links are values.
-            if self.in_cell == 0 && self.appendix.contains(&child.id()) && is_external_entry(child)
+            // tables and infoboxes such links are values. In an article
+            // with references, a line about the website goes with it;
+            // elsewhere a description ("BrianQC – has an open C
+            // level API for ...") may be the page's content, and keeps it.
+            // There, too, an entry whose only links go to other websites
+            // ("Agency for Toxic Substances and Disease Registry: Chlorine").
+            let say = if self.referenced { 200 } else { 40 };
+            if self.in_cell == 0
+                && self.appendix.contains(&child.id())
+                && (is_external_entry(child, say)
+                    || self.referenced && links_only_elsewhere(child, 80))
             {
                 flow.leave_out();
                 continue;
@@ -2303,11 +2371,22 @@ fn drop_empty_headings(
             }
         })
         .collect();
+    // Labels go with their dropped heading, and a label whose list was
+    // left out goes when no content follows it ("Digital editions" before
+    // "Exhibitions").
     let mut dropped = false;
-    for (b, k) in blocks.iter().zip(keep.iter_mut()) {
-        match level(b) {
-            Some(_) => dropped = !*k,
-            None if dropped && is_label(b) => *k = false,
+    for i in 0..blocks.len() {
+        match level(&blocks[i]) {
+            Some(_) => dropped = !keep[i],
+            None if is_label(&blocks[i]) => {
+                let bare = left_out.contains(&(i + 1))
+                    && blocks
+                        .get(i + 1)
+                        .is_none_or(|b| level(b).is_some() || is_label(b));
+                if dropped || bare {
+                    keep[i] = false;
+                }
+            }
             None => {}
         }
     }
@@ -2574,7 +2653,7 @@ mod tests {
         let x = run(
             r##"<section data-mw-section-id="0"><p>In  <a rel="mw:WikiLink" href="Mathematics">mathematics</a>,
             the <b>theorem</b> of <a rel="mw:WikiLink" href="./Euclid%27s_Elements#Book_I"><i>Euclid</i></a> is
-            <a rel="mw:WikiLink" href="Missing_page">missing</a> and <a rel="mw:ExtLink" class="external" href="https://x.org">out</a>.<sup class="mw-ref reference"><a href="#cite_note-1">[1]</a></sup> </p>
+            <a rel="mw:WikiLink" href="Missing_page">missing</a> and <a rel="mw:ExtLink" class="external" href="https://x.org">out</a>.<sup class="mw-ref reference"><a href='#cite_note-1'>[1]</a></sup> </p>
             <p> </p><p class="mw-empty-elt"></p></section>"##,
         );
         assert_eq!(
@@ -2660,7 +2739,7 @@ mod tests {
             <section data-mw-section-id="1"><div class="mw-heading mw-heading2"><h2 id="Childhood">Early years</h2></div><p>Text.</p></section>
             <section data-mw-section-id="2"><div class="mw-heading mw-heading2"><h2 id="Empty">Empty</h2></div></section>
             <section data-mw-section-id="3"><div class="mw-heading mw-heading2"><h2 id="Euclid's_proof"><span id="Euclid.27s_proof" typeof="mw:FallbackId"></span>Euclid's proof</h2></div>
-              <p id="mwAB"><span class="anchor" id="Decomposition"></span>More <sup class="mw-ref reference" id="cite_ref-1"><a href="#cite_note-1">[1]</a></sup>text.</p></section>
+              <p id="mwAB"><span class="anchor" id="Decomposition"></span>More <sup class="mw-ref reference" id="cite_ref-1"><a href='#cite_note-1'>[1]</a></sup>text.</p></section>
             <section data-mw-section-id="4"><div class="mw-heading mw-heading2"><h2 id="Proofs">Proofs</h2></div><p>Many.</p></section>"##,
         );
         let toc: Vec<String> = x
@@ -2942,14 +3021,19 @@ mod more_tests {
             <dl><dt>Books</dt></dl>
             <div class="mw-heading mw-heading2"><h2 id="External_links">External links</h2></div>
             <table class="infobox"><tr><th>External videos</th></tr><tr><td><span typeof="mw:File"><img src="./_assets_/v.png" width="16" height="16"></span> {video}</td></tr></table>
-            <ul><li>{a}{wayback}</li><li>{b}</li><li>Plain text</li></ul>
+            <ul><li>{a}{wayback}</li><li>{b}</li><li>Plain text</li><li>Agency for Toxic Substances: {atsdr}</li><li>"{dealer}"; website of a dealer who has sold six signed copies of the amendment.</li></ul>
+            <p><b>Digital editions</b></p>
+            <ul><li>{folger}</li></ul>
             <p><span class="noviewer sister-inline-image"><img src="./_assets_/c.png" width="12" height="16"></span><span> Media related to </span><a class="extiw external" href="https://commons.wikimedia.org/">X</a><span> at Wikimedia Commons</span></p>
-            <p><span class="geo-inline-hidden"><span class="geo-default">90°S 0°E</span></span></p>
+            <p><span class="geo-inline-hidden"><style>.mw-parser-output .geo-default,.mw-parser-output .geo-dms,.mw-parser-output .geo-dec{{display:inline}}.mw-parser-output .geo-nondefault{{display:none}}</style><span class="geo-default">90°S 0°E</span></span></p>
             <div class="hidden-begin"><div class="hidden-title">Titles and succession</div><div class="hidden-content"><div class="navbox">Kings</div></div></div>"#,
             edit = ext("edit"),
             video = ext("Old film"),
             a = ext("Protein database"),
             b = ext("Proteopedia"),
+            dealer = ext("Abolishing Slavery"),
+            atsdr = ext("Chlorine"),
+            folger = ext("Folger Digital Texts"),
         );
         let x = run(&body);
         assert_eq!(
@@ -2960,8 +3044,9 @@ mod more_tests {
                     vec![text("This section is an excerpt from Goodreads.")]
                 )]),
                 Block::Para(vec![text("Seen at 69°S 2°W, in 1820.")]),
-                // The list loses its two links to other websites, not the
-                // entry that is not one, so its heading stays.
+                // The list loses its links to other websites, with what
+                // they say about them, but not the entry that is not one,
+                // so its heading stays. The label of a list that went goes.
                 Block::Heading {
                     level: 2,
                     content: vec![text("External links")]
@@ -2974,9 +3059,11 @@ mod more_tests {
         );
 
         // A "See also" of articles in other languages' Wikipedias, or one
-        // with a link to another website among its articles, keeps them.
+        // with a link to another website among its articles, keeps them;
+        // so does, in a page without references, an entry describing what
+        // it links to.
         let body = format!(
-            r#"<div class="mw-references-wrap"><ol class="mw-references references"><li>A source</li></ol></div><ul><li><a rel="mw:WikiLink/Interwiki" class="extiw external" href="https://uk.wikipedia.org/wiki/X">Sumykhimprom</a></li><li>Azot (Cherkasy)</li></ul>
+            r#"<div class="mw-heading mw-heading2"><h2 id="See_also">See also</h2></div><ul><li><a rel="mw:WikiLink/Interwiki" class="extiw external" href="https://uk.wikipedia.org/wiki/X">Sumykhimprom</a></li><li>Azot (Cherkasy)</li></ul>
             <ul><li><a rel="mw:WikiLink" href="Geometry">Geometry</a></li><li>{factsheet}</li></ul>
             <ul><li>{brianqc} – has an open C level API for quantum chemistry simulations on GPUs, of <a rel="mw:WikiLink" href="Geometry">Q-Chem</a></li></ul>"#,
             factsheet = ext("ANL factsheet"),
@@ -3007,19 +3094,21 @@ mod more_tests {
             "{names:?}"
         );
 
-        // In the text, before its last paragraph of prose, such an entry is
-        // a place to go and stays. After it, a bold sentence is content,
+        // In the text, before its last paragraph of prose or footnote
+        // mark, such an entry is a place to go or a point made, and stays. After it, a bold sentence is content,
         // not a label, and keeps its heading.
         let body = format!(
             r#"<div class="mw-heading mw-heading2"><h2 id="By_plane">By plane</h2></div>
             <ul><li>{tui} flies from Amsterdam (AMS);</li></ul>
             <div class="mw-heading mw-heading2"><h2 id="Go_next">Go next</h2></div>
             <p>Ferries leave the harbour every hour in summer and twice a day in winter, weather permitting, from the quay.</p>
+            <ul><li>{tmf}: tests cycle temperature and strain in two limiting modes.<sup class="mw-ref reference"><a href='#cite_note-1'>[1]</a></sup></li></ul>
             <div class="mw-heading mw-heading2"><h2 id="Contact">Contact</h2></div>
             <p><b>Call 112 in an emergency.</b></p>
             <ul><li>{office}</li></ul>
             <div class="mw-references-wrap"><ol class="mw-references references"><li>A source</li></ol></div>"#,
             tui = ext("TUIfly"),
+            tmf = ext("TMF loading"),
             office = ext("Tourist office"),
         );
         let lines: Vec<String> = run(&body)
@@ -3043,6 +3132,7 @@ mod more_tests {
                 "- TUIfly flies from Amsterdam (AMS);",
                 "# Go next",
                 "Ferries leave the harbour every hour in summer and twice a day in winter, weather permitting, from the quay.",
+                "- TMF loading: tests cycle temperature and strain in two limiting modes.",
                 "# Contact",
                 "Call 112 in an emergency.",
             ],
