@@ -7,9 +7,9 @@
 //! lists of external links. Section headings left empty by that are
 //! removed, so "References" and "External links" disappear in any language.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use ego_tree::NodeRef;
+use ego_tree::{NodeId, NodeRef};
 use scraper::node::Element;
 use scraper::{Html, Node};
 use unicode_normalization::{UnicodeNormalization, is_nfc};
@@ -124,6 +124,9 @@ pub fn extract(
     let doc = Html::parse_document(html);
     let root = content_root(&doc);
     let text_px = body_text_px(&doc);
+    let referenced = root
+        .descendants()
+        .any(|n| element(&n).is_some_and(|e| has_class(e, "references")));
     let mut cx = Cx {
         path,
         self_id,
@@ -137,6 +140,8 @@ pub fn extract(
         headings: 0,
         marks: Vec::new(),
         in_cell: 0,
+        appendix: appendix_entries(root, referenced),
+        referenced,
         images: Vec::new(),
         image_slots: HashMap::new(),
         text_px,
@@ -147,7 +152,7 @@ pub fn extract(
     };
     cx.flow_children(root, &mut flow);
     flow.flush();
-    let (body, anchors, kept) = drop_empty_headings(flow.blocks, flow.anchors);
+    let (body, anchors, kept) = drop_empty_headings(flow.blocks, flow.anchors, &flow.left_out);
 
     // Number the remaining top-level headings as the table of contents does,
     // and find each named place's section. The anchors headings get by rule
@@ -480,30 +485,108 @@ fn child_elements<'a>(
 /// an external link (Parsoid's `rel="mw:ExtLink"`, or class `external`), as
 /// in "External links" sections in any language.
 fn is_external_entry(li: NodeRef<'_, Node>) -> bool {
-    let Some(text) = li.descendants().find(|d| match d.value() {
-        Node::Text(t) => !t.trim().is_empty(),
-        _ => false,
-    }) else {
+    // Whether a text node is inside a link to another website. A link to
+    // another language's Wikipedia (class `extiw`) names an article, so it
+    // is content, not another website.
+    let external = |text: NodeRef<'_, Node>| {
+        text.ancestors()
+            .take_while(|a| a.id() != li.id())
+            .filter_map(|a| element(&a))
+            .any(|e| {
+                e.name() == "a"
+                    && !has_class(e, "extiw")
+                    && (e.attr("rel").is_some_and(|r| r.contains("mw:ExtLink"))
+                        || has_class(e, "external"))
+            })
+    };
+    let texts: Vec<_> = li
+        .descendants()
+        .filter(|d| matches!(d.value(), Node::Text(t) if !t.trim().is_empty()))
+        .collect();
+    let Some(&first) = texts.first() else {
         return false;
     };
-    text.ancestors()
+    if introduced(first, li) {
+        return false;
+    }
+    // What the entry says besides its links: an archive note ("Archived
+    // 2012-09-08 at the Wayback Machine") is little; a description of what
+    // the link leads to ("BrianQC – has an open C level API for ...") is
+    // content, and keeps the entry.
+    let besides: usize = texts
+        .iter()
+        .filter(|t| !external(**t))
+        .map(|t| match t.value() {
+            Node::Text(s) => s.trim().chars().count(),
+            _ => 0,
+        })
+        .sum();
+    external(first) && besides <= 40
+}
+
+/// Whether `n` in list entry `li` is a name the text introduces, which is
+/// content even when it links to its website: in a contact card (the hCard
+/// microformat of Wikivoyage's listings), or bold ("**IMC Cinema** is on
+/// Barrack St.").
+fn introduced(n: NodeRef<'_, Node>, li: NodeRef<'_, Node>) -> bool {
+    n.ancestors()
         .take_while(|a| a.id() != li.id())
         .filter_map(|a| element(&a))
         .any(|e| {
-            e.name() == "a"
-                && (e.attr("rel").is_some_and(|r| r.contains("mw:ExtLink"))
-                    || has_class(e, "external"))
+            matches!(e.name(), "b" | "strong") || has_class(e, "vcard") || has_class(e, "h-card")
         })
 }
 
+/// The list entries after the article's last paragraph of prose: its
+/// appendix, where "External links" ("Weblinks", "Liens externes", ...) is
+/// in every language, with the references and "See also". In a page without
+/// references only its last section counts: in Wikivoyage or the
+/// OpenStreetMap wiki, links to other websites are places to go, or what a
+/// page lists ("Software libraries"), in any section.
+fn appendix_entries(root: NodeRef<'_, Node>, referenced: bool) -> HashSet<NodeId> {
+    let nodes: Vec<_> = root.descendants().collect();
+    // A paragraph of the text itself, rather than one in a list, a table or
+    // a box, or a line introducing links ("Official websites:").
+    let prose = |n: &NodeRef<'_, Node>| {
+        element(n).is_some_and(|e| e.name() == "p")
+            && !n.ancestors().filter_map(|a| element(&a)).any(|a| {
+                matches!(
+                    a.name(),
+                    "li" | "dd" | "dt" | "table" | "figure" | "blockquote"
+                ) || is_chrome(a)
+            })
+            && text_content(*n).trim().chars().count() >= 100
+    };
+    let mut start = nodes.iter().rposition(prose).map_or(0, |i| i + 1);
+    if !referenced {
+        let heading = |n: &NodeRef<'_, Node>| {
+            element(n).is_some_and(|e| matches!(e.name(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6"))
+        };
+        match nodes.iter().rposition(heading) {
+            Some(i) => start = start.max(i + 1),
+            None => return HashSet::new(),
+        }
+    }
+    nodes[start..]
+        .iter()
+        .filter(|n| element(n).is_some_and(|e| e.name() == "li"))
+        .map(|n| n.id())
+        .collect()
+}
+
 /// Whether every data cell of a table starts with a link to another
-/// website, as a box of external media does.
+/// website, as a box of external media does. A row naming what its links
+/// are ("MeSH | D018496") is data, and so is the table.
 fn is_external_links_table(table: NodeRef<'_, Node>) -> bool {
     let cells: Vec<_> = table
         .descendants()
         .filter(|d| element(d).is_some_and(|e| e.name() == "td"))
         .collect();
-    !cells.is_empty() && cells.into_iter().all(is_external_entry)
+    let labelled = cells.iter().any(|c| {
+        c.parent()
+            .is_some_and(|tr| child_elements(tr).any(|(_, e)| e.name() == "th"))
+    });
+    !cells.is_empty() && !labelled && cells.into_iter().all(is_external_entry)
 }
 
 fn text_content(n: NodeRef<'_, Node>) -> String {
@@ -525,9 +608,17 @@ struct Flow {
     run: Vec<Inline>,
     /// The article's own flow, whose headings make the table of contents.
     top: bool,
+    /// Where blocks of the page were left out, as the number of blocks
+    /// before: what tells a section whose lists went from one with only a
+    /// bold line in it.
+    left_out: Vec<usize>,
 }
 
 impl Flow {
+    fn leave_out(&mut self) {
+        self.left_out.push(self.blocks.len());
+    }
+
     fn flush(&mut self) {
         let mut run = std::mem::take(&mut self.run);
         normalize(&mut run);
@@ -571,6 +662,10 @@ struct Cx<'a> {
     marks: Vec<(String, u32)>,
     /// Inside a table cell or infobox, where tables flatten to text.
     in_cell: u32,
+    /// The list entries after the last paragraph of prose.
+    appendix: HashSet<NodeId>,
+    /// Whether the article has references, as an encyclopedia's does.
+    referenced: bool,
     images: Vec<ImageUse>,
     /// Image key to its index in `images`.
     image_slots: HashMap<u32, u32>,
@@ -604,6 +699,14 @@ impl Cx<'_> {
         }
         if is_chrome(e) {
             self.count_dropped(node, e);
+            // A list of references, whose labels ("Citations") may be
+            // left without it.
+            if ["references", "reflist", "refbegin", "mw-references-wrap"]
+                .iter()
+                .any(|c| has_class(e, c))
+            {
+                flow.leave_out();
+            }
             return;
         }
         if let Some(level) = heading_level(e.name()) {
@@ -616,7 +719,10 @@ impl Cx<'_> {
             // line about another site, after its logo.
             "p" if child_elements(node)
                 .find(|(_, ce)| ce.name() != "style")
-                .is_some_and(|(_, ce)| has_class(ce, "sister-inline-image")) => {}
+                .is_some_and(|(_, ce)| has_class(ce, "sister-inline-image")) =>
+            {
+                flow.leave_out();
+            }
             "p" => {
                 flow.flush();
                 self.flow_children(node, flow);
@@ -625,9 +731,10 @@ impl Cx<'_> {
             "ul" | "ol" => {
                 if has_class(e, "gallery") {
                     self.gallery(node, flow);
-                } else if self.in_cell == 0 && is_link_or_citation_list(node) {
+                } else if self.in_cell == 0 && is_link_or_citation_list(node, &self.appendix) {
                     self.stats.citations_dropped += 1;
-                } else if let Some(b) = self.list(node, e) {
+                    flow.leave_out();
+                } else if let Some(b) = self.list(node, e, flow) {
                     flow.block(b);
                 }
             }
@@ -712,7 +819,9 @@ impl Cx<'_> {
                     }
                 }
                 let content = inner.finish();
-                if !content.is_empty() {
+                if content.is_empty() {
+                    flow.leave_out();
+                } else {
                     for (c, ce) in child_elements(node) {
                         if has_class(ce, "hidden-title") {
                             let mut run = Vec::new();
@@ -910,7 +1019,7 @@ impl Cx<'_> {
         }
     }
 
-    fn list(&mut self, node: NodeRef<'_, Node>, e: &Element) -> Option<Block> {
+    fn list(&mut self, node: NodeRef<'_, Node>, e: &Element, flow: &mut Flow) -> Option<Block> {
         let kind = if e.name() == "ol" {
             ListKind::Number
         } else {
@@ -919,6 +1028,17 @@ impl Cx<'_> {
         let mut items = Vec::new();
         for (child, ce) in child_elements(node) {
             if ce.name() != "li" || is_chrome(ce) {
+                continue;
+            }
+            // An entry that starts with a link to another website goes
+            // nowhere offline, even when it names an article after it
+            // ("Archived ... at the Wayback Machine"): "External links" in
+            // any language. Only in the appendix: in the text such an entry
+            // is a place to go ("TUIfly flies from Amsterdam"), and in
+            // tables and infoboxes such links are values.
+            if self.in_cell == 0 && self.appendix.contains(&child.id()) && is_external_entry(child)
+            {
+                flow.leave_out();
                 continue;
             }
             self.note_place(ce);
@@ -992,8 +1112,9 @@ impl Cx<'_> {
 
     fn table(&mut self, node: NodeRef<'_, Node>, e: &Element, flow: &mut Flow) {
         // A box of links to other websites ("External videos").
-        if self.in_cell == 0 && is_external_links_table(node) {
+        if self.in_cell == 0 && self.referenced && is_external_links_table(node) {
             self.stats.citations_dropped += 1;
+            flow.leave_out();
             return;
         }
         if has_class(e, "clade") {
@@ -1793,11 +1914,10 @@ fn count_images(node: NodeRef<'_, Node>) -> u64 {
         .count() as u64
 }
 
-/// A list whose every item is a citation or an external link: a
-/// bibliography or an "External links" section.
-fn is_link_or_citation_list(list: NodeRef<'_, Node>) -> bool {
+/// A list whose every item is a citation, or an external link in the
+/// appendix: a bibliography or an "External links" section.
+fn is_link_or_citation_list(list: NodeRef<'_, Node>, appendix: &HashSet<NodeId>) -> bool {
     let mut items = 0;
-    let mut links = 0;
     for (li, le) in child_elements(list) {
         if le.name() != "li" {
             continue;
@@ -1811,20 +1931,16 @@ fn is_link_or_citation_list(list: NodeRef<'_, Node>) -> bool {
             match e.name() {
                 "cite" => citation = true,
                 "span" if has_class(e, "citation") => citation = true,
-                "a" if has_class(e, "external") => external = true,
+                "a" if has_class(e, "external") && !introduced(d, li) => external = true,
                 "a" if e.attr("rel").is_some_and(|r| r.contains("mw:WikiLink")) => internal = true,
                 _ => {}
             }
         }
-        // An entry that starts with a link to another website is one even
-        // when it names a Wikipedia article after ("Archived ... at the
-        // Wayback Machine").
-        if citation || (external && !internal) || is_external_entry(li) {
-            links += 1;
+        if !(citation || (external && !internal && appendix.contains(&li.id()))) {
+            return false;
         }
     }
-    // Two in three: a list of links keeps the odd entry that is not one.
-    items > 0 && links * 3 >= items * 2
+    items > 0
 }
 
 /// Cells grouped by the row their top-left corner is in.
@@ -2115,24 +2231,35 @@ fn trim_end(list: &mut Vec<Inline>) {
     }
 }
 
-/// Drops headings with nothing under them before the next heading of the
-/// same or a higher level. Also gives, for each heading before (in order),
-/// its section number after: its own, or the one it now falls in.
 /// A short line of bold text alone, or one indented: a label for what
 /// follows rather than content.
 fn is_label(b: &Block) -> bool {
+    // Bold, and naming no article: a bold line with a link ("3. Grignard
+    // reaction") is content.
     fn bold_only(run: &[Inline]) -> bool {
+        fn no_link(run: &[Inline]) -> bool {
+            run.iter().all(|i| match i {
+                Inline::Link { .. } => false,
+                Inline::Styled(_, c) => no_link(c),
+                _ => true,
+            })
+        }
         run.iter().all(|i| match i {
-            Inline::Styled(Style::Bold, _) => true,
+            Inline::Styled(Style::Bold, c) => no_link(c),
             Inline::Text(t) => t.trim().is_empty(),
             _ => false,
         })
     }
     match b {
+        // A sentence ("The island is closed to non-resort guests.") is
+        // content.
         Block::Para(run) => {
+            let text = plain_text(run);
+            let text = text.trim();
             bold_only(run)
                 && run.iter().any(|i| !matches!(i, Inline::Text(_)))
-                && plain_text(run).chars().count() <= 120
+                && text.chars().count() <= 120
+                && !text.ends_with(['.', '!', '?', '。', '！', '？', '؟', '।'])
         }
         Block::Quote(inner) => inner.len() == 1 && is_label(&inner[0]),
         // Terms of a definition list with no definitions.
@@ -2144,25 +2271,36 @@ fn is_label(b: &Block) -> bool {
     }
 }
 
+/// Drops headings with nothing under them before the next heading of the
+/// same or a higher level. Also gives, for each heading before (in order),
+/// its section number after: its own, or the one it now falls in.
 fn drop_empty_headings(
     blocks: Vec<Block>,
     anchors: Vec<Option<String>>,
+    left_out: &[usize],
 ) -> (Vec<Block>, Vec<Option<String>>, Vec<u32>) {
     let level = |b: &Block| match b {
         Block::Heading { level, .. } => Some(*level),
         _ => None,
     };
-    // A heading is kept when something other than headings and labels
-    // follows it before the next heading of its level or above: labels are
-    // what is left of a section whose lists were left out ("Citations",
-    // "Books"), and go with it.
+    // A heading is kept when something other than headings follows it
+    // before the next heading of its level or above. When something was left
+    // out there, labels don't count: they are what is left of a section
+    // whose lists went ("Citations", "Books"), and go with it. A section of
+    // only a bold line, with nothing left out, keeps it (an event's title).
     let mut keep: Vec<bool> = (0..blocks.len())
         .map(|i| match level(&blocks[i]) {
             None => true,
-            Some(l) => blocks[i + 1..]
-                .iter()
-                .take_while(|b| level(b).is_none_or(|n| n > l))
-                .any(|b| level(b).is_none() && !is_label(b)),
+            Some(l) => {
+                let end = blocks[i + 1..]
+                    .iter()
+                    .position(|b| level(b).is_some_and(|n| n <= l))
+                    .map_or(blocks.len(), |n| i + 1 + n);
+                let lost = left_out.iter().any(|&d| d > i && d <= end);
+                blocks[i + 1..end]
+                    .iter()
+                    .any(|b| level(b).is_none() && !(lost && is_label(b)))
+            }
         })
         .collect();
     let mut dropped = false;
@@ -2799,6 +2937,7 @@ mod more_tests {
             <p>Seen at <span class="geo-default">69°S 2°W</span><span class="geo-multi-punct"> / </span><span class="geo-nondefault">-69, -2</span>, in 1820.</p>
             <div class="mw-heading mw-heading2"><h2 id="References">References</h2></div>
             <div class="mw-heading mw-heading3"><h3 id="Citations">Citations</h3></div>
+            <div class="mw-references-wrap"><ol class="mw-references references"><li>A source</li></ol></div>
             <p><b>Attribution</b></p>
             <dl><dt>Books</dt></dl>
             <div class="mw-heading mw-heading2"><h2 id="External_links">External links</h2></div>
@@ -2821,8 +2960,138 @@ mod more_tests {
                     vec![text("This section is an excerpt from Goodreads.")]
                 )]),
                 Block::Para(vec![text("Seen at 69°S 2°W, in 1820.")]),
+                // The list loses its two links to other websites, not the
+                // entry that is not one, so its heading stays.
+                Block::Heading {
+                    level: 2,
+                    content: vec![text("External links")]
+                },
+                Block::List {
+                    kind: ListKind::Bullet,
+                    items: vec![vec![Block::Para(vec![text("Plain text")])]]
+                },
             ]
         );
+
+        // A "See also" of articles in other languages' Wikipedias, or one
+        // with a link to another website among its articles, keeps them.
+        let body = format!(
+            r#"<div class="mw-references-wrap"><ol class="mw-references references"><li>A source</li></ol></div><ul><li><a rel="mw:WikiLink/Interwiki" class="extiw external" href="https://uk.wikipedia.org/wiki/X">Sumykhimprom</a></li><li>Azot (Cherkasy)</li></ul>
+            <ul><li><a rel="mw:WikiLink" href="Geometry">Geometry</a></li><li>{factsheet}</li></ul>
+            <ul><li>{brianqc} – has an open C level API for quantum chemistry simulations on GPUs, of <a rel="mw:WikiLink" href="Geometry">Q-Chem</a></li></ul>"#,
+            factsheet = ext("ANL factsheet"),
+            brianqc = ext("BrianQC"),
+        );
+        let x = run(&body);
+        let names: Vec<String> = x
+            .article
+            .body
+            .iter()
+            .flat_map(|b| match b {
+                Block::List { items, .. } => items.clone(),
+                _ => Vec::new(),
+            })
+            .map(|i| match &i[0] {
+                Block::Para(run) => plain_text(run),
+                b => format!("{b:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Sumykhimprom",
+                "Azot (Cherkasy)",
+                "Geometry",
+                "BrianQC – has an open C level API for quantum chemistry simulations on GPUs, of Q-Chem"
+            ],
+            "{names:?}"
+        );
+
+        // In the text, before its last paragraph of prose, such an entry is
+        // a place to go and stays. After it, a bold sentence is content,
+        // not a label, and keeps its heading.
+        let body = format!(
+            r#"<div class="mw-heading mw-heading2"><h2 id="By_plane">By plane</h2></div>
+            <ul><li>{tui} flies from Amsterdam (AMS);</li></ul>
+            <div class="mw-heading mw-heading2"><h2 id="Go_next">Go next</h2></div>
+            <p>Ferries leave the harbour every hour in summer and twice a day in winter, weather permitting, from the quay.</p>
+            <div class="mw-heading mw-heading2"><h2 id="Contact">Contact</h2></div>
+            <p><b>Call 112 in an emergency.</b></p>
+            <ul><li>{office}</li></ul>
+            <div class="mw-references-wrap"><ol class="mw-references references"><li>A source</li></ol></div>"#,
+            tui = ext("TUIfly"),
+            office = ext("Tourist office"),
+        );
+        let lines: Vec<String> = run(&body)
+            .article
+            .body
+            .iter()
+            .map(|b| match b {
+                Block::Heading { content, .. } => format!("# {}", plain_text(content)),
+                Block::Para(run) => plain_text(run),
+                Block::List { items, .. } => match &items[0][0] {
+                    Block::Para(run) => format!("- {}", plain_text(run)),
+                    b => format!("{b:?}"),
+                },
+                b => format!("{b:?}"),
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "# By plane",
+                "- TUIfly flies from Amsterdam (AMS);",
+                "# Go next",
+                "Ferries leave the harbour every hour in summer and twice a day in winter, weather permitting, from the quay.",
+                "# Contact",
+                "Call 112 in an emergency.",
+            ],
+            "{lines:?}"
+        );
+
+        // In a page without references, as in the OpenStreetMap wiki or
+        // Wikivoyage, links to other websites are what it lists and stay,
+        // but in its last section. A section of only a bold line keeps its
+        // heading when nothing was left out of it.
+        let body = format!(
+            r#"<div class="mw-heading mw-heading2"><h2 id="Title">Title</h2></div>
+            <p><b>Mapping hospitals (online)</b></p>
+            <div class="mw-heading mw-heading2"><h2 id="Libraries">Libraries</h2></div>
+            <ul><li>{gdal} – reads and writes vector data</li><li>{proj}</li></ul>
+            <table><tr><td>{forum}</td></tr></table>
+            <div class="mw-heading mw-heading2"><h2 id="External_links">External links</h2></div>
+            <p><b>Sites</b></p>
+            <ul><li>{site}</li></ul>"#,
+            gdal = ext("GDAL"),
+            proj = ext("PROJ"),
+            forum = ext("OSM Forum"),
+            site = ext("Official website"),
+        );
+        let body = run(&body).article.body;
+        assert!(
+            matches!(
+                &body[..],
+                [
+                    Block::Heading { .. },
+                    Block::Para(_),
+                    Block::Heading { .. },
+                    Block::List { items, .. },
+                    Block::TableRef(_)
+                ] if items.len() == 2
+            ),
+            "{body:?}"
+        );
+
+        // In an article, a box of identifiers is data: its rows say what
+        // each link is.
+        let body = format!(
+            r#"<table><tr><th>MeSH</th><td>{mesh}</td></tr><tr><th>ICD-10</th><td>{icd}</td></tr></table>
+            <div class="mw-references-wrap"><ol class="mw-references references"><li>A source</li></ol></div>"#,
+            mesh = ext("D018496"),
+            icd = ext("T59.8"),
+        );
+        let body = run(&body).article.body;
+        assert!(matches!(&body[..], [Block::TableRef(_)]), "{body:?}");
     }
 
     #[test]
